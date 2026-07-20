@@ -38,7 +38,9 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    not a plain `context.DB`. `appContext` is the exported `createContext` handle.
 3. `app/routes.ts` — route table. Currently a **single index route** → `routes/home.tsx`.
 4. `app/root.tsx` — HTML document shell (`Layout`), root `Outlet`, and `ErrorBoundary`.
-5. `app/routes/home.tsx` — renders `<SalesLoopCRM />` and sets page `meta`/`links`.
+5. `app/routes/home.tsx` — the index route's `loader` reads contacts from D1
+   (`listContacts`), the `action` handles intent-dispatched writes, and the default export
+   renders `<SalesLoopCRM contacts={loaderData.contacts} />` and sets page `meta`/`links`.
 
 `app/entry.server.tsx` is the standard streaming SSR entry (`renderToReadableStream`,
 5s `streamTimeout`, bot-detection via `isbot`).
@@ -47,23 +49,26 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
 
 The whole product lives in three files:
 
-- **`data.ts`** — the model and seed data. Types (`Contact`, `Touch`, `Note`), constants
-  (`CH` channels, `STATUSES`, `OWNERS`, `VIEWER = "Tom"`, `TODAY`), a small **seeded RNG**
-  (`rng(42)`), and `buildData()` which deterministically generates ~30 fake contacts. Also
-  pure helpers: `needsAttention`, `hasConflict`, `statusMeta`, `loopBadge`, `statusPill`,
-  date formatting (`ago`, `fmtDate`, `dateFrom`).
-  **Determinism matters**: data is seeded and `TODAY` is fixed so SSR and client render
-  identically (no hydration mismatch). Don't introduce `Date.now()`/`Math.random()` into the
-  render path.
+- **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`), constants
+  (`CH` channels, `STATUSES`, `OWNERS`, `VIEWER = "Tom"`), and pure helpers:
+  `needsAttention`, `hasConflict`, `statusMeta`, `loopBadge`, `statusPill`, date formatting
+  (`ago`, `fmtDate`, `dateFrom`). The `Contact` shape (with relative `daysAgo`/`followUp`
+  integers) is the contract between the server loader and the UI.
+  **Determinism matters**: all date math happens server-side in the loader against a single
+  `now`; the UI renders only from loader-serialized integers/labels, so SSR and client
+  hydration match. Don't introduce `Date.now()`/`Math.random()` into the render path.
 - **`ui.tsx`** — presentation primitives. `css(string)` parses an inline CSS **string** into a
   React style object (the app keeps the original template's style strings verbatim). `Box` is
   a polymorphic element (`as=...`) that adds `hover`/`focus` style merging via local state.
   Plus a set of inline SVG icon components.
-- **`sales-loop-crm.tsx`** — the entire app as **one ~920-line client component**. Single
-  `useState` "God object" (`State`) patched through a `patch()` helper; a `nidRef` for new
-  IDs. Contains all views (sidebar filters, "Needs attention" queue, contact table, detail
-  slide-over, add/CSV-import modals) and all handlers (status changes, notes, follow-ups,
-  CSV parsing). No routing, no server calls.
+- **`sales-loop-crm.tsx`** — the entire UI as **one big client component** taking a
+  `contacts` prop from the route loader. A `useState` "God object" (`State`) holds only
+  **UI** state (filters, selection, menus, form/CSV drafts) — patched through `patch()`; the
+  contact data itself lives in the loader. All six mutations (status changes, notes,
+  follow-up snooze/clear, add, CSV import) submit to the route `action` via a single
+  `useFetcher` + a hidden `intent` field; React Router revalidates the loader afterward (no
+  optimistic UI). Contains all views: sidebar filters, "Needs attention" queue, contact
+  table, detail slide-over, add/CSV-import modals.
 
 ### Two "loops" domain concept
 - **Loop 1** — always-on outbound (grey badge).
@@ -71,17 +76,25 @@ The whole product lives in three files:
 A contact can be in one or both. Owners are **Tom** and **Britton**; a contact touched by
 both surfaces a "conflict" warning.
 
-## Data: important gotcha
+## Data persistence
 
-The running UI is **entirely in-memory**. `buildData()` seeds React state; adds/edits/imports
-mutate `useState` only. Nothing reads or writes D1 yet.
+Contacts, notes, and follow-ups **persist to Cloudflare D1**. `app/lib/crm.server.ts` is the
+server-only data-access layer (raw D1 prepared statements, `crypto.randomUUID()` ids). It owns
+all conversion between stored **absolute** timestamps and the **relative** `daysAgo`/`followUp`
+values the UI renders — keeping every `Date` call server-side is what preserves SSR/hydration
+determinism. `schema.sql` mirrors the `data.ts` model: `contacts` stores `loops` as a JSON
+text array and a nullable `follow_up_at`; `notes` uses a `text` column. The DB **starts
+empty** — contacts are created via the UI / CSV import.
 
-`schema.sql` (tables `contacts`, `touchpoints`, `notes`) and the better-auth setup exist as
-scaffolding for a future persistence layer but are **not wired to the UI**. If you're asked to
-"make it persist" or "load from the database," that work does not exist yet — you'd add
-loaders/actions in the route (reading `context.get(appContext).DB`) and replace the
-`buildData()` seed. Also note the `schema.sql` column names (snake_case, e.g. `last_touchpoint`,
-`loop1_resumed_at`) don't yet match the richer in-memory `Contact` shape in `data.ts`.
+Gotchas:
+- **No touchpoint write path.** Nothing inserts into the `touchpoints` table yet, so
+  `touches` is always `[]`: the "Last touch" column and the detail timeline render empty, and
+  `hasConflict` never fires. Logging touchpoints is the natural next feature.
+- **better-auth is still orphaned** — instantiated per request into context, but no handler is
+  mounted and no auth tables exist. Login is not implemented; the app is a single shared
+  dataset with `VIEWER = "Tom"` as the note author.
+- Index-route **actions require `?index`** in the POST URL (the client's `useFetcher` adds it
+  automatically; a raw `curl` to `/` hits the layout route and 405s).
 
 ## Conventions
 

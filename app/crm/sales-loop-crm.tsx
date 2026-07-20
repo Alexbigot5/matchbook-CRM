@@ -1,7 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { useFetcher } from "react-router";
 import {
   ago,
-  buildData,
   CH,
   type Contact,
   fmtDate,
@@ -50,8 +50,9 @@ type State = {
   form: FormState;
   csvText: string;
   csvError: string;
-  contacts: Contact[];
 };
+
+type ActionResult = { ok: true } | { ok: false; error: string };
 
 const blankForm = (loops?: number[]): FormState => ({
   name: "",
@@ -74,8 +75,8 @@ const GLOBAL_CSS = `
 
 const MONO = "font-family:'Geist Mono',monospace;";
 
-export function SalesLoopCRM() {
-  const nidRef = useRef(1000);
+export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
+  const fetcher = useFetcher();
   const [state, setState] = useState<State>(() => ({
     view: "all",
     owner: "all",
@@ -88,13 +89,29 @@ export function SalesLoopCRM() {
     form: blankForm([1]),
     csvText: "",
     csvError: "",
-    contacts: buildData(),
   }));
 
   const patch = (u: Partial<State> | ((s: State) => Partial<State>)) =>
     setState((s) => ({ ...s, ...(typeof u === "function" ? u(s) : u) }));
 
   const S = state;
+
+  // Persistence goes through the route action; React Router revalidates the
+  // loader after each write, so `contacts` (a prop) is always fresh. This effect
+  // only reconciles modal/error UI once a submission settles.
+  const submit = (fields: Record<string, string>) =>
+    fetcher.submit(fields, { method: "post" });
+
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    const result = fetcher.data as ActionResult;
+    if (result.ok) {
+      patch((s) => (s.modal ? { modal: null, csvText: "", csvError: "" } : {}));
+    } else {
+      patch({ csvError: result.error });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetcher.state, fetcher.data]);
 
   // ---- handlers ----
   const setView = (v: string) => patch({ view: v, menuId: null });
@@ -110,25 +127,15 @@ export function SalesLoopCRM() {
   const toggleDetailMenu = () => patch((s) => ({ detailMenu: !s.detailMenu }));
   const setStatus = (id: string, status: string, e?: any) => {
     if (e) e.stopPropagation();
-    patch((s) => ({
-      contacts: s.contacts.map((c) => (c.id === id ? { ...c, status } : c)),
-      menuId: null,
-      detailMenu: false,
-    }));
+    patch({ menuId: null, detailMenu: false });
+    submit({ intent: "setStatus", id, status });
   };
   const onNoteInput = (e: any) => patch({ noteDraft: e.target.value });
   const addNote = () => {
     const txt = (S.noteDraft || "").trim();
-    if (!txt) return;
-    const id = S.selectedId;
-    patch((s) => ({
-      noteDraft: "",
-      contacts: s.contacts.map((c) =>
-        c.id === id
-          ? { ...c, notes: [{ author: VIEWER, text: txt, daysAgo: 0 }, ...c.notes] }
-          : c,
-      ),
-    }));
+    if (!txt || !S.selectedId) return;
+    patch({ noteDraft: "" });
+    submit({ intent: "addNote", id: S.selectedId, text: txt });
   };
   const onNoteKey = (e: any) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -137,16 +144,12 @@ export function SalesLoopCRM() {
     }
   };
   const snoozeFollow = () => {
-    const id = S.selectedId;
-    patch((s) => ({
-      contacts: s.contacts.map((c) => (c.id === id ? { ...c, followUp: -3 } : c)),
-    }));
+    if (!S.selectedId) return;
+    submit({ intent: "snooze", id: S.selectedId });
   };
   const clearFollow = () => {
-    const id = S.selectedId;
-    patch((s) => ({
-      contacts: s.contacts.map((c) => (c.id === id ? { ...c, followUp: null } : c)),
-    }));
+    if (!S.selectedId) return;
+    submit({ intent: "clearFollow", id: S.selectedId });
   };
 
   const defaultLoops = () => (S.view === "loop2" ? [2] : [1]);
@@ -162,35 +165,17 @@ export function SalesLoopCRM() {
       if (!loops.length) loops = [n];
       return { form: { ...s.form, loops: loops.sort() } };
     });
-  const makeContact = (
-    name: string,
-    company: string,
-    loops: number[],
-    owner: string | null,
-    status: string,
-  ): Contact => ({
-    id: "n" + nidRef.current++,
-    name: name.trim(),
-    company: (company || "").trim(),
-    loops: loops.length ? loops : [1],
-    owner: owner || null,
-    status: status || "New",
-    touches: [],
-    notes: [],
-    followUp: 0,
-    opts: {},
-  });
   const submitAdd = () => {
     const f = S.form;
     if (!f.name.trim()) return;
-    const c = makeContact(
-      f.name,
-      f.company,
-      f.loops,
-      f.owner === "Unassigned" ? null : f.owner,
-      f.status,
-    );
-    patch((s) => ({ contacts: [c, ...s.contacts], modal: null }));
+    submit({
+      intent: "addContact",
+      name: f.name.trim(),
+      company: (f.company || "").trim(),
+      loops: JSON.stringify(f.loops.length ? f.loops : [1]),
+      owner: f.owner === "Unassigned" ? "" : f.owner,
+      status: f.status || "New",
+    });
   };
   const importCsv = () => {
     const raw = (S.csvText || "").trim();
@@ -223,19 +208,17 @@ export function SalesLoopCRM() {
     let start = 0;
     const first = rows[0].toLowerCase();
     if (/name/.test(first) && /company|loop|owner/.test(first)) start = 1;
-    const made: Contact[] = [];
+    const made = [];
     for (let i = start; i < rows.length; i++) {
       const cols = rows[i].split(/[,\t]/).map((x) => x.trim());
       if (!cols[0]) continue;
-      made.push(
-        makeContact(
-          cols[0],
-          cols[1] || "",
-          parseLoops(cols[2]),
-          parseOwner(cols[3]),
-          parseStatus(cols[4]),
-        ),
-      );
+      made.push({
+        name: cols[0],
+        company: cols[1] || "",
+        loops: parseLoops(cols[2]),
+        owner: parseOwner(cols[3]),
+        status: parseStatus(cols[4]),
+      });
     }
     if (!made.length) {
       patch({
@@ -244,11 +227,10 @@ export function SalesLoopCRM() {
       });
       return;
     }
-    patch((s) => ({ contacts: [...made, ...s.contacts], modal: null, csvText: "" }));
+    submit({ intent: "importContacts", rows: JSON.stringify(made) });
   };
 
   // ---- derived ----
-  const contacts = S.contacts;
   const byView = (c: Contact) =>
     S.view === "all"
       ? true
@@ -414,7 +396,8 @@ export function SalesLoopCRM() {
         followColor = "#c2410c";
       } else {
         followLabel =
-          "Due in " + due + " day" + (due > 1 ? "s" : "") + " · " + fmtDate(sel.followUp);
+          "Due in " + due + " day" + (due > 1 ? "s" : "") +
+          (sel.followUpDateLabel ? " · " + sel.followUpDateLabel : "");
         followColor = due <= 1 ? "#c2410c" : "#75756f";
       }
     } else {

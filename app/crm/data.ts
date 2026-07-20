@@ -24,6 +24,9 @@ export type Contact = {
   touches: Touch[];
   notes: Note[];
   followUp: number | null;
+  // Absolute due-date label ("Jul 20") for followUp, precomputed server-side so
+  // no Date math runs during render. Null when there is no follow-up.
+  followUpDateLabel?: string | null;
   opts: ContactOpts;
 };
 
@@ -77,136 +80,6 @@ export const OWNERS: Record<string, Owner> = {
 
 export const VIEWER = "Tom";
 export const TODAY = new Date(2026, 6, 16);
-
-function rng(seed: number) {
-  let s = seed;
-  return () => {
-    s = (s * 1103515245 + 12345) & 0x7fffffff;
-    return s / 0x7fffffff;
-  };
-}
-
-function noteFor(ch: string, k: number) {
-  if (k > 0) return "";
-  const m: Record<string, string> = {
-    ad: "Retargeting creative served; landing-page visit logged.",
-    email: "Sent intro sequence, awaiting open.",
-    linkedin: "Connection request + short opener.",
-    call: "Left voicemail, referenced prior touch.",
-  };
-  return m[ch] || "";
-}
-
-function deskNote(status: string) {
-  const m: Record<string, string> = {
-    Replied: "Asked for a one-pager and pricing — warm. Loop back Thursday.",
-    "Meeting booked":
-      "Booked 30-min intro. Wants to see the community-blitz angle specifically.",
-    Won: "Signed pilot. Hand off to onboarding, keep in Loop 1 for expansion.",
-  };
-  return m[status] || "";
-}
-
-type BaseRow = [
-  string,
-  string,
-  number[],
-  string,
-  string,
-  ContactOpts?,
-];
-
-export function buildData(): Contact[] {
-  const base: BaseRow[] = [
-    ["Marcus Reeve", "Northwind Freight", [1], "Tom", "Replied"],
-    ["Dana Okafor", "Cedarline Health", [1], "Britton", "Contacted"],
-    ["Priya Nair", "Halcyon Labs", [1, 2], "Tom", "Meeting booked", { mix: true }],
-    ["Sokol Berisha", "Vantage Retail", [1], "Britton", "New"],
-    ["Elena Duarte", "Brightpath Ed", [2], "Britton", "Contacted"],
-    ["Jamal Whitfield", "Orbit Logistics", [1], "Tom", "Won"],
-    ["Naomi Sørensen", "Fenwick & Cole", [1, 2], "Britton", "Replied", { mix: true }],
-    ["Theo Karamanlis", "Quillix", [1], "Tom", "Dead"],
-    ["Grace Lim", "Meridian Foods", [2], "Britton", "Meeting booked"],
-    ["Owen Castellano", "Trailhead Gear", [1], "Tom", "Contacted"],
-    ["Farida Hassan", "Lumen Analytics", [1, 2], "Tom", "Contacted"],
-    ["Bianca Toma", "Riverstone Legal", [1], "Britton", "New"],
-    ["Devin Park", "Nimbus Cloud", [1], "Tom", "Replied"],
-    ["Aisha Rahman", "Copperfield Mfg", [2], "Britton", "New", { unassigned: true }],
-    ["Lars Møller", "Beacon Insurance", [1], "Tom", "Contacted"],
-    [" Camille Fontaine", "Solterra Energy", [1, 2], "Britton", "Meeting booked", { mix: true }],
-    ["Reuben Adeyemi", "Kestrel Media", [2], "Britton", "Replied"],
-    ["Sana Kapoor", "Driftwood Hotels", [1], "Tom", "New"],
-    ["Nikolai Petrov", "Anvil Robotics", [1], "Tom", "Won"],
-    ["Yara Haddad", "Palmetto Bank", [2], "Britton", "Contacted"],
-    ["Colin Mayweather", "Junction Rail", [1], "Tom", "Dead"],
-    ["Ines Vidal", "Aster Biotech", [1, 2], "Tom", "Replied"],
-    ["Kwame Mensah", "Foundry Works", [2], "Britton", "New", { unassigned: true }],
-    ["Hannah Lindqvist", "Verdi Interiors", [1], "Britton", "Contacted"],
-    ["Rafael Ortiz", "Slate & Ivory", [1], "Tom", "Meeting booked"],
-    ["Mei-Ling Chou", "Polaris Devices", [1, 2], "Britton", "Contacted", { mix: true }],
-    ["Gustavo Ferrer", "Harbor Freight Co", [2], "Britton", "Replied"],
-    ["Tabitha Cross", "Willowbrook", [1], "Tom", "New"],
-    ["Amara Diallo", "Continuum AI", [1], "Tom", "Contacted"],
-    ["Sergio Ricci", "Basalt Ventures", [2], "Britton", "Meeting booked"],
-  ];
-  const rnd = rng(42);
-  const cnt: Record<string, number> = {
-    New: 1,
-    Contacted: 2,
-    Replied: 3,
-    "Meeting booked": 4,
-    Won: 5,
-    Dead: 2,
-  };
-  return base.map((b, i) => {
-    const [name, company, loops, owner, status, opts = {}] = b;
-    const nc = name.trim();
-    const assignee = opts.unassigned ? null : owner;
-    const n = cnt[status] || 2;
-    const chById: Record<number, string[]> = {
-      1: ["ad", "email", "linkedin"],
-      2: ["linkedin", "email", "call"],
-    };
-    const touches: Touch[] = [];
-    let day = 1 + Math.floor(rnd() * 3);
-    for (let k = 0; k < n; k++) {
-      const loop = loops[Math.floor(rnd() * loops.length)];
-      const pool = chById[loop];
-      const ch = pool[Math.floor(rnd() * pool.length)];
-      let towner = assignee || owner;
-      if (opts.mix && k % 2 === 1) towner = owner === "Tom" ? "Britton" : "Tom";
-      if (opts.unassigned) towner = k % 2 === 0 ? "Tom" : "Britton";
-      touches.push({ owner: towner, ch, loop, daysAgo: day, note: noteFor(ch, k) });
-      day += 2 + Math.floor(rnd() * 6);
-    }
-    touches.sort((a, b2) => a.daysAgo - b2.daysAgo); // newest first
-    const notes: Note[] = [];
-    if (status === "Replied" || status === "Meeting booked" || status === "Won") {
-      notes.push({
-        author: touches[0].owner,
-        text: deskNote(status),
-        daysAgo: touches[0].daysAgo,
-      });
-    }
-    let followUp: number | null = null;
-    if (["New", "Contacted", "Replied"].includes(status) && rnd() > 0.45) {
-      followUp = -(1 + Math.floor(rnd() * 4)); // due in N days (negative daysAgo)
-    }
-    if (status === "Meeting booked") followUp = -(1 + Math.floor(rnd() * 2));
-    return {
-      id: "c" + i,
-      name: nc,
-      company,
-      loops,
-      owner: assignee,
-      status,
-      touches,
-      notes,
-      followUp,
-      opts,
-    };
-  });
-}
 
 export function dateFrom(daysAgo: number) {
   const d = new Date(TODAY);
