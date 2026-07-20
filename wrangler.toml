@@ -1,0 +1,12 @@
+name = "matchbook-crm"
+main = "./workers/app.ts"
+compatibility_date = "2026-07-19"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./build/client"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "crm-db"
+database_id = "3c3402ea-d215-4780-95b3-5ea10605d1b1"

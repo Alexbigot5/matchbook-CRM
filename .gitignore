@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Leftover scaffold from migration (locked nested .git, safe to ignore)
+crm-app/
+
+# Build output
+build/
+dist/
+.react-router/
+
+# Cloudflare / Wrangler local state
+.wrangler/
+worker-configuration.d.ts
+
+# Local env / secrets
+.dev.vars
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

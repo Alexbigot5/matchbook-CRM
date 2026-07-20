@@ -1,0 +1,922 @@
+import { useRef, useState } from "react";
+import {
+  ago,
+  buildData,
+  CH,
+  type Contact,
+  fmtDate,
+  hasConflict,
+  loopBadge,
+  needsAttention,
+  NO_TOUCH_ICON,
+  OWNERS,
+  peopleInvolved,
+  statusMeta,
+  statusPill,
+  STATUSES,
+  VIEWER,
+} from "./data";
+import {
+  Box,
+  css,
+  IconCalendar,
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconClose,
+  IconPlus,
+  IconSearch,
+  IconUpload,
+  IconWarn,
+} from "./ui";
+
+type FormState = {
+  name: string;
+  company: string;
+  loops: number[];
+  owner: string;
+  status: string;
+};
+
+type State = {
+  view: string;
+  owner: string;
+  query: string;
+  selectedId: string | null;
+  menuId: string | null;
+  detailMenu: boolean;
+  noteDraft: string;
+  modal: string | null;
+  form: FormState;
+  csvText: string;
+  csvError: string;
+  contacts: Contact[];
+};
+
+const blankForm = (loops?: number[]): FormState => ({
+  name: "",
+  company: "",
+  loops: loops || [1],
+  owner: "Tom",
+  status: "New",
+});
+
+const GLOBAL_CSS = `
+  .slcrm * { box-sizing: border-box; }
+  .slcrm { font-family: 'Geist', system-ui, sans-serif; color: #1a1a1a; -webkit-font-smoothing: antialiased; }
+  .slcrm ::-webkit-scrollbar { width: 10px; height: 10px; }
+  .slcrm ::-webkit-scrollbar-thumb { background: #e2e2df; border-radius: 6px; border: 3px solid #fff; }
+  .slcrm ::-webkit-scrollbar-thumb:hover { background: #d0d0cd; }
+  @keyframes slcrm-slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  @keyframes slcrm-fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes slcrm-slideDown { from { transform: translateY(-12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+`;
+
+const MONO = "font-family:'Geist Mono',monospace;";
+
+export function SalesLoopCRM() {
+  const nidRef = useRef(1000);
+  const [state, setState] = useState<State>(() => ({
+    view: "all",
+    owner: "all",
+    query: "",
+    selectedId: null,
+    menuId: null,
+    detailMenu: false,
+    noteDraft: "",
+    modal: null,
+    form: blankForm([1]),
+    csvText: "",
+    csvError: "",
+    contacts: buildData(),
+  }));
+
+  const patch = (u: Partial<State> | ((s: State) => Partial<State>)) =>
+    setState((s) => ({ ...s, ...(typeof u === "function" ? u(s) : u) }));
+
+  const S = state;
+
+  // ---- handlers ----
+  const setView = (v: string) => patch({ view: v, menuId: null });
+  const setOwner = (o: string) => patch({ owner: o, menuId: null });
+  const onSearch = (e: any) => patch({ query: e.target.value });
+  const open = (id: string) =>
+    patch({ selectedId: id, noteDraft: "", menuId: null, detailMenu: false });
+  const close = () => patch({ selectedId: null, detailMenu: false });
+  const toggleMenu = (id: string, e?: any) => {
+    if (e) e.stopPropagation();
+    patch((s) => ({ menuId: s.menuId === id ? null : id }));
+  };
+  const toggleDetailMenu = () => patch((s) => ({ detailMenu: !s.detailMenu }));
+  const setStatus = (id: string, status: string, e?: any) => {
+    if (e) e.stopPropagation();
+    patch((s) => ({
+      contacts: s.contacts.map((c) => (c.id === id ? { ...c, status } : c)),
+      menuId: null,
+      detailMenu: false,
+    }));
+  };
+  const onNoteInput = (e: any) => patch({ noteDraft: e.target.value });
+  const addNote = () => {
+    const txt = (S.noteDraft || "").trim();
+    if (!txt) return;
+    const id = S.selectedId;
+    patch((s) => ({
+      noteDraft: "",
+      contacts: s.contacts.map((c) =>
+        c.id === id
+          ? { ...c, notes: [{ author: VIEWER, text: txt, daysAgo: 0 }, ...c.notes] }
+          : c,
+      ),
+    }));
+  };
+  const onNoteKey = (e: any) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      addNote();
+    }
+  };
+  const snoozeFollow = () => {
+    const id = S.selectedId;
+    patch((s) => ({
+      contacts: s.contacts.map((c) => (c.id === id ? { ...c, followUp: -3 } : c)),
+    }));
+  };
+  const clearFollow = () => {
+    const id = S.selectedId;
+    patch((s) => ({
+      contacts: s.contacts.map((c) => (c.id === id ? { ...c, followUp: null } : c)),
+    }));
+  };
+
+  const defaultLoops = () => (S.view === "loop2" ? [2] : [1]);
+  const openAdd = () => patch({ modal: "add", form: blankForm(defaultLoops()) });
+  const openCsv = () => patch({ modal: "csv", csvText: "", csvError: "" });
+  const closeModal = () => patch({ modal: null, csvError: "" });
+  const setForm = (p: Partial<FormState>) =>
+    patch((s) => ({ form: { ...s.form, ...p } }));
+  const toggleFormLoop = (n: number) =>
+    patch((s) => {
+      const has = s.form.loops.includes(n);
+      let loops = has ? s.form.loops.filter((x) => x !== n) : [...s.form.loops, n];
+      if (!loops.length) loops = [n];
+      return { form: { ...s.form, loops: loops.sort() } };
+    });
+  const makeContact = (
+    name: string,
+    company: string,
+    loops: number[],
+    owner: string | null,
+    status: string,
+  ): Contact => ({
+    id: "n" + nidRef.current++,
+    name: name.trim(),
+    company: (company || "").trim(),
+    loops: loops.length ? loops : [1],
+    owner: owner || null,
+    status: status || "New",
+    touches: [],
+    notes: [],
+    followUp: 0,
+    opts: {},
+  });
+  const submitAdd = () => {
+    const f = S.form;
+    if (!f.name.trim()) return;
+    const c = makeContact(
+      f.name,
+      f.company,
+      f.loops,
+      f.owner === "Unassigned" ? null : f.owner,
+      f.status,
+    );
+    patch((s) => ({ contacts: [c, ...s.contacts], modal: null }));
+  };
+  const importCsv = () => {
+    const raw = (S.csvText || "").trim();
+    if (!raw) {
+      patch({ csvError: "Paste some rows first." });
+      return;
+    }
+    const rows = raw
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const parseLoops = (v: string) => {
+      const s = (v || "").toLowerCase();
+      const out: number[] = [];
+      if (/\b1\b|loop\s*1|general|outbound/.test(s)) out.push(1);
+      if (/\b2\b|loop\s*2|event|blitz|community/.test(s)) out.push(2);
+      return out.length ? out : [S.view === "loop2" ? 2 : 1];
+    };
+    const parseOwner = (v: string) => {
+      const s = (v || "").trim().toLowerCase();
+      if (s.startsWith("t")) return "Tom";
+      if (s.startsWith("b")) return "Britton";
+      return null;
+    };
+    const parseStatus = (v: string) => {
+      const s = (v || "").trim().toLowerCase();
+      const hit = STATUSES.find((x) => x.id.toLowerCase() === s);
+      return hit ? hit.id : "New";
+    };
+    let start = 0;
+    const first = rows[0].toLowerCase();
+    if (/name/.test(first) && /company|loop|owner/.test(first)) start = 1;
+    const made: Contact[] = [];
+    for (let i = start; i < rows.length; i++) {
+      const cols = rows[i].split(/[,\t]/).map((x) => x.trim());
+      if (!cols[0]) continue;
+      made.push(
+        makeContact(
+          cols[0],
+          cols[1] || "",
+          parseLoops(cols[2]),
+          parseOwner(cols[3]),
+          parseStatus(cols[4]),
+        ),
+      );
+    }
+    if (!made.length) {
+      patch({
+        csvError:
+          "Couldn’t read any contacts. Use: Name, Company, Loop, Owner, Status",
+      });
+      return;
+    }
+    patch((s) => ({ contacts: [...made, ...s.contacts], modal: null, csvText: "" }));
+  };
+
+  // ---- derived ----
+  const contacts = S.contacts;
+  const byView = (c: Contact) =>
+    S.view === "all"
+      ? true
+      : S.view === "loop1"
+        ? c.loops.includes(1)
+        : c.loops.includes(2);
+  const byOwner = (c: Contact) =>
+    S.owner === "all"
+      ? true
+      : S.owner === "unassigned"
+        ? !c.owner
+        : c.owner === S.owner;
+  const q = S.query.trim().toLowerCase();
+  const byQuery = (c: Contact) =>
+    !q ||
+    c.name.toLowerCase().includes(q) ||
+    c.company.toLowerCase().includes(q);
+
+  const counts = {
+    all: contacts.length,
+    loop1: contacts.filter((c) => c.loops.includes(1)).length,
+    loop2: contacts.filter((c) => c.loops.includes(2)).length,
+  };
+  const ownerCounts = {
+    all: contacts.length,
+    Tom: contacts.filter((c) => c.owner === "Tom").length,
+    Britton: contacts.filter((c) => c.owner === "Britton").length,
+    unassigned: contacts.filter((c) => !c.owner).length,
+  };
+
+  const tabBtn = (active: boolean) =>
+    `display:flex;align-items:center;justify-content:space-between;width:100%;padding:7px 8px;border:none;background:${active ? "#eeeee9" : "none"};border-radius:8px;font-size:13px;font-weight:${active ? "500" : "450"};color:${active ? "#1a1a1a" : "#575753"};cursor:pointer;font-family:inherit;margin-bottom:1px;`;
+  const viewTabs = [
+    { key: "all", label: "All contacts", dot: "#c4c4be", count: counts.all },
+    { key: "loop1", label: "Loop 1", dot: "#9a9a95", count: counts.loop1 },
+    { key: "loop2", label: "Loop 2", dot: "#e0930a", count: counts.loop2 },
+  ].map((t) => ({
+    ...t,
+    style: tabBtn(S.view === t.key),
+    onClick: () => setView(t.key),
+  }));
+
+  const ownerTabs = [
+    { key: "all", label: "Everyone", count: ownerCounts.all, hasAvatar: false, color: "", initial: "" },
+    { key: "Tom", label: "Tom", count: ownerCounts.Tom, hasAvatar: true, color: OWNERS.Tom.color, initial: "T" },
+    { key: "Britton", label: "Britton", count: ownerCounts.Britton, hasAvatar: true, color: OWNERS.Britton.color, initial: "B" },
+    { key: "unassigned", label: "Unassigned", count: ownerCounts.unassigned, hasAvatar: false, color: "", initial: "" },
+  ].map((o) => ({ ...o, style: tabBtn(S.owner === o.key), onClick: () => setOwner(o.key) }));
+
+  const visible = contacts.filter((c) => byView(c) && byOwner(c) && byQuery(c));
+
+  const prio = (c: Contact) => {
+    if (!c.owner) return 0;
+    if (c.followUp !== null && c.followUp <= 0) return 1;
+    if (c.status === "Meeting booked") return 2;
+    return 3;
+  };
+  const queueSrc = contacts
+    .filter((c) => byView(c) && byOwner(c))
+    .map((c) => ({ c, att: needsAttention(c) }))
+    .filter((x) => x.att.flag)
+    .sort(
+      (a, b) => prio(a.c) - prio(b.c) || (a.c.followUp ?? 99) - (b.c.followUp ?? 99),
+    )
+    .slice(0, 8);
+  const queue = queueSrc.map(({ c, att }) => {
+    const o = c.owner ? OWNERS[c.owner] : null;
+    const last = c.touches[0];
+    const ch = last ? CH[last.ch] : null;
+    const m = statusMeta(c.status);
+    const urgent = !c.owner || (c.followUp !== null && c.followUp <= 0);
+    return {
+      name: c.name,
+      company: c.company,
+      reason: att.reason,
+      ownerColor: o ? o.color : "#b0b0aa",
+      ownerInitial: o ? o.initial : "?",
+      status: c.status,
+      statusStyle: statusPill(c.status, false),
+      statusDot: m.dot,
+      touchChannel: ch ? ch.label : "No touch",
+      touchAgo: last ? ago(last.daysAgo) : "—",
+      touchIconHtml: { __html: ch ? ch.icon : "" },
+      touchWrap: `width:20px;height:20px;border-radius:5px;background:${ch ? ch.bg : "#f2f2f0"};color:${ch ? ch.fg : "#a3a39d"};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
+      loops: c.loops.map((l) => loopBadge(l, true)),
+      reasonColor: urgent ? "#c2410c" : "#75756f",
+      border: urgent ? "#f6cfa2" : "#ededea",
+      bg: urgent ? "#fffaf2" : "#ffffff",
+      onClick: () => open(c.id),
+    };
+  });
+
+  const rows = visible.map((c) => {
+    const last = c.touches[0];
+    const ch = last
+      ? CH[last.ch]
+      : { label: "No touch yet", bg: "#f2f2f0", fg: "#a3a39d", icon: NO_TOUCH_ICON };
+    const conflict = hasConflict(c);
+    const o = c.owner ? OWNERS[c.owner] : null;
+    const m = statusMeta(c.status);
+    const statusMenu = STATUSES.map((s) => ({
+      label: s.id,
+      dot: s.dot,
+      active: s.id === c.status,
+      onClick: (e: any) => setStatus(c.id, s.id, e),
+      style:
+        "display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px;border:none;background:none;border-radius:7px;font-size:12.5px;font-family:inherit;color:#2a2a28;cursor:pointer;text-align:left;",
+    }));
+    return {
+      id: c.id,
+      name: c.name,
+      company: c.company,
+      hasConflict: conflict,
+      loops: c.loops.map((l) => loopBadge(l, true)),
+      touch: {
+        channel: ch.label,
+        ago: last ? ago(last.daysAgo) : "—",
+        iconHtml: { __html: ch.icon },
+        iconWrap: `width:22px;height:22px;border-radius:6px;background:${ch.bg};color:${ch.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
+      },
+      status: c.status,
+      statusDot: m.dot,
+      statusStyle: statusPill(c.status, false),
+      menuOpen: S.menuId === c.id,
+      toggleMenu: (e: any) => toggleMenu(c.id, e),
+      stopProp: (e: any) => e.stopPropagation(),
+      statusMenu,
+      ownerColor: o ? o.color : "#b0b0aa",
+      ownerInitial: o ? o.initial : "?",
+      ownerName: c.owner || "Unassigned",
+      onOpen: () => open(c.id),
+      rowStyle: "border-bottom:1px solid #f2f2f0;",
+    };
+  });
+
+  // detail
+  const sel = contacts.find((c) => c.id === S.selectedId) || null;
+  let detail: any = null;
+  if (sel) {
+    const o = sel.owner ? OWNERS[sel.owner] : null;
+    const m = statusMeta(sel.status);
+    const people = [...peopleInvolved(sel)];
+    const conflict = people.length > 1;
+    const lastT = sel.touches[0];
+    const detailMenu = STATUSES.map((s) => ({
+      label: s.id,
+      dot: s.dot,
+      active: s.id === sel.status,
+      onClick: (e: any) => setStatus(sel.id, s.id, e),
+      style:
+        "display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px;border:none;background:none;border-radius:7px;font-size:12.5px;font-family:inherit;color:#2a2a28;cursor:pointer;text-align:left;",
+    }));
+    let followLabel: string;
+    let followColor = "#75756f";
+    let hasFollow = false;
+    let snoozeLabel = "Set follow-up";
+    if (sel.followUp !== null) {
+      hasFollow = true;
+      snoozeLabel = "Snooze 3d";
+      const due = -sel.followUp;
+      if (due <= 0) {
+        followLabel = "Due today";
+        followColor = "#c2410c";
+      } else {
+        followLabel =
+          "Due in " + due + " day" + (due > 1 ? "s" : "") + " · " + fmtDate(sel.followUp);
+        followColor = due <= 1 ? "#c2410c" : "#75756f";
+      }
+    } else {
+      followLabel = "No reminder set";
+    }
+    const vc = OWNERS[VIEWER];
+    const others = people.filter((p) => p !== sel.owner);
+    detail = {
+      name: sel.name,
+      company: sel.company,
+      ownerName: sel.owner || "Unassigned",
+      ownerColor: o ? o.color : "#b0b0aa",
+      ownerInitial: o ? o.initial : "?",
+      loops: sel.loops.map((l) => loopBadge(l, false)),
+      status: sel.status,
+      statusDot: m.dot,
+      statusStyle: statusPill(sel.status, true),
+      menuOpen: S.detailMenu,
+      toggleMenu: () => toggleDetailMenu(),
+      statusMenu: detailMenu,
+      hasConflict: conflict,
+      conflictText: conflict
+        ? sel.owner
+          ? `Owned by ${sel.owner}, but ${others.join(" & ")} ${others.length > 1 ? "have" : "has"} also touched this contact. Confirm who's driving before the next outreach.`
+          : `No owner assigned — ${people.join(" & ")} have both reached out. Assign one driver to avoid double-touching.`
+        : "",
+      followLabel,
+      followColor,
+      hasFollow,
+      snoozeLabel,
+      snoozeFollow: () => snoozeFollow(),
+      clearFollow: () => clearFollow(),
+      viewerColor: vc.color,
+      viewerInitial: vc.initial,
+      viewerName: VIEWER,
+      hasNotes: sel.notes.length > 0,
+      notes: sel.notes.map((n) => ({
+        author: n.author,
+        ago: ago(n.daysAgo),
+        text: n.text,
+        color: (OWNERS[n.author] || { color: "#b0b0aa" }).color,
+        initial: (OWNERS[n.author] || { initial: "?" }).initial,
+      })),
+      lastBy: lastT ? lastT.owner : "—",
+      timeline: sel.touches.map((t, i) => {
+        const c2 = CH[t.ch];
+        return {
+          channel: c2.label,
+          iconHtml: { __html: c2.icon },
+          iconWrap: `width:26px;height:26px;border-radius:8px;background:${c2.bg};color:${c2.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
+          loopLabel: "Loop " + t.loop,
+          loopStyle: loopBadge(t.loop, true).style,
+          date: fmtDate(t.daysAgo),
+          owner: t.owner,
+          hasNote: !!t.note,
+          note: t.note,
+          hasLine: i < sel.touches.length - 1,
+        };
+      }),
+    };
+  }
+
+  const headerTitle =
+    S.view === "all"
+      ? "All contacts"
+      : S.view === "loop1"
+        ? "Loop 1 · always-on"
+        : "Loop 2 · community blitz";
+  const headerSub =
+    visible.length +
+    " contact" +
+    (visible.length === 1 ? "" : "s") +
+    (S.owner === "all" ? "" : " · " + (S.owner === "unassigned" ? "unassigned" : S.owner));
+
+  // modal derived
+  const f = S.form;
+  const inputStyle =
+    "width:100%;padding:9px 11px;border:1px solid #e6e6e2;border-radius:9px;font-size:13px;font-family:inherit;background:#fff;outline:none;color:#1a1a1a;";
+  const loopChip = (n: number, on: boolean) => {
+    const amber = n === 2;
+    return on
+      ? `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid ${amber ? "#e5a53a" : "#c9c9c3"};background:${amber ? "#fdf0d9" : "#f0f0ec"};color:${amber ? "#b45309" : "#3a3a38"};font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;`
+      : `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid #e6e6e2;background:#fff;color:#75756f;font-size:13px;font-weight:450;font-family:inherit;cursor:pointer;`;
+  };
+  const ownerChoice = (on: boolean) =>
+    `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid ${on ? "#c9c9c3" : "#e6e6e2"};background:${on ? "#f0f0ec" : "#fff"};color:${on ? "#1a1a1a" : "#75756f"};font-size:13px;font-weight:${on ? "500" : "450"};font-family:inherit;cursor:pointer;`;
+  const formOwners = ["Tom", "Britton", "Unassigned"].map((o) => ({
+    label: o,
+    style: ownerChoice(f.owner === o),
+    onClick: () => setForm({ owner: o }),
+    hasAvatar: o !== "Unassigned",
+    color: (OWNERS[o] || { color: "" }).color,
+    initial: (OWNERS[o] || { initial: "" }).initial,
+  }));
+
+  return (
+    <div className="slcrm" style={css("display:flex; height:100vh; width:100%; overflow:hidden; background:#ffffff;")}>
+      <style dangerouslySetInnerHTML={{ __html: GLOBAL_CSS }} />
+
+      {/* SIDEBAR */}
+      <aside style={css("width:236px; flex:0 0 236px; border-right:1px solid #ededea; background:#fbfbfa; display:flex; flex-direction:column; padding:16px 12px;")}>
+        <div style={css("display:flex; align-items:center; gap:9px; padding:4px 8px 16px 8px;")}>
+          <div style={css("width:24px; height:24px; border-radius:6px; background:#1a1a1a; color:#fff; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600;")}>S</div>
+          <div style={css("font-size:14px; font-weight:600; letter-spacing:-0.01em;")}>Sales Loops</div>
+        </div>
+
+        <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; padding:8px 8px 6px;")}>Views</div>
+        {viewTabs.map((tab) => (
+          <Box as="button" key={tab.key} onClick={tab.onClick} style={css(tab.style)} hover={css("background:#f0f0ec;")}>
+            <span style={css("display:flex; align-items:center; gap:9px;")}>
+              <span style={css(`width:8px; height:8px; border-radius:3px; background:${tab.dot};`)} />
+              <span>{tab.label}</span>
+            </span>
+            <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{tab.count}</span>
+          </Box>
+        ))}
+
+        <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; padding:18px 8px 6px;")}>Owner</div>
+        {ownerTabs.map((o) => (
+          <Box as="button" key={o.key} onClick={o.onClick} style={css(o.style)} hover={css("background:#f0f0ec;")}>
+            <span style={css("display:flex; align-items:center; gap:9px;")}>
+              {o.hasAvatar && (
+                <span style={css(`width:18px; height:18px; border-radius:5px; background:${o.color}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600;`)}>{o.initial}</span>
+              )}
+              <span>{o.label}</span>
+            </span>
+            <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{o.count}</span>
+          </Box>
+        ))}
+
+        <div style={css("margin-top:auto; padding:12px 8px; border-top:1px solid #ededea; font-size:11px; color:#a3a39d; line-height:1.5;")}>
+          <div><span style={css("color:#575753;")}>Loop 1</span> · always-on outbound</div>
+          <div><span style={css("color:#b45309;")}>Loop 2</span> · event/community blitz</div>
+        </div>
+      </aside>
+
+      {/* MAIN */}
+      <main style={css("flex:1; display:flex; flex-direction:column; min-width:0; background:#ffffff;")}>
+        <div style={css("display:flex; align-items:center; gap:14px; padding:16px 24px; border-bottom:1px solid #ededea;")}>
+          <div style={css("min-width:0;")}>
+            <div style={css("font-size:17px; font-weight:600; letter-spacing:-0.015em;")}>{headerTitle}</div>
+            <div style={css("font-size:12.5px; color:#9a9a95; margin-top:1px;")}>{headerSub}</div>
+          </div>
+          <div style={css("flex:1;")} />
+          <div style={css("position:relative; width:260px;")}>
+            <IconSearch style={css("position:absolute; left:10px; top:50%; transform:translateY(-50%); color:#b0b0aa;")} />
+            <Box
+              as="input"
+              value={S.query}
+              onChange={onSearch}
+              placeholder="Search name or company…"
+              style={css("width:100%; padding:8px 12px 8px 32px; border:1px solid #e6e6e2; border-radius:8px; font-size:13px; font-family:inherit; background:#fbfbfa; outline:none; color:#1a1a1a;")}
+              focus={css("border-color:#c9c9c3; background:#fff;")}
+            />
+          </div>
+          <Box as="button" onClick={openCsv} style={css("display:flex; align-items:center; gap:6px; padding:8px 12px; border:1px solid #e6e6e2; background:#fff; border-radius:8px; font-size:13px; font-weight:500; font-family:inherit; color:#3a3a38; cursor:pointer; white-space:nowrap;")} hover={css("background:#f4f4f1;")}>
+            <IconUpload />
+            Import CSV
+          </Box>
+          <Box as="button" onClick={openAdd} style={css("display:flex; align-items:center; gap:6px; padding:8px 13px; border:none; background:#1a1a1a; border-radius:8px; font-size:13px; font-weight:500; font-family:inherit; color:#fff; cursor:pointer; white-space:nowrap;")} hover={css("background:#333;")}>
+            <IconPlus />
+            Add contact
+          </Box>
+        </div>
+
+        <div style={css("flex:1; overflow-y:auto; overflow-x:hidden;")}>
+          {queue.length > 0 && (
+            <div style={css("padding:16px 24px 4px;")}>
+              <div style={css("display:flex; align-items:center; gap:8px; margin-bottom:10px;")}>
+                <IconWarn style={css("color:#c2410c;")} />
+                <span style={css("font-size:12.5px; font-weight:600; color:#3a3a38;")}>Needs attention</span>
+                <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{queue.length}</span>
+              </div>
+              <div style={css("display:grid; grid-template-columns:repeat(auto-fill, minmax(258px, 1fr)); gap:10px;")}>
+                {queue.map((qc, i) => (
+                  <Box
+                    as="button"
+                    key={i}
+                    onClick={qc.onClick}
+                    style={css(`display:flex; flex-direction:column; gap:10px; padding:13px 14px; border:1px solid ${qc.border}; background:${qc.bg}; border-radius:12px; cursor:pointer; font-family:inherit; text-align:left;`)}
+                    hover={css("border-color:#d4d4ce; box-shadow:0 2px 8px rgba(0,0,0,0.05);")}
+                  >
+                    <span style={css("display:flex; align-items:center; gap:10px; width:100%;")}>
+                      <span style={css(`width:30px; height:30px; border-radius:8px; background:${qc.ownerColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; flex:0 0 auto;`)}>{qc.ownerInitial}</span>
+                      <span style={css("display:flex; flex-direction:column; gap:1px; min-width:0; flex:1;")}>
+                        <span style={css("font-size:13.5px; font-weight:500; color:#1a1a1a; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{qc.name}</span>
+                        <span style={css("font-size:11.5px; color:#9a9a95; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{qc.company}</span>
+                      </span>
+                      <span style={css("display:flex; gap:3px; flex:0 0 auto;")}>
+                        {qc.loops.map((lp, j) => (
+                          <span key={j} style={css(lp.style)}>{lp.label}</span>
+                        ))}
+                      </span>
+                    </span>
+                    <span style={css("display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%;")}>
+                      <span style={css("display:flex; align-items:center; gap:6px; min-width:0;")}>
+                        <span style={css(qc.touchWrap)}><span dangerouslySetInnerHTML={qc.touchIconHtml} style={css("display:flex;")} /></span>
+                        <span style={css("font-size:11.5px; color:#75756f; white-space:nowrap;")}>{qc.touchChannel} · <span style={css(MONO + "color:#a3a39d;")}>{qc.touchAgo}</span></span>
+                      </span>
+                      <span style={css(qc.statusStyle)}><span style={css(`width:6px; height:6px; border-radius:4px; background:${qc.statusDot};`)} />{qc.status}</span>
+                    </span>
+                    <span style={{ ...css("display:flex; align-items:center; gap:6px; width:100%; padding-top:9px; border-top:1px solid rgba(0,0,0,0.055); font-size:12px; font-weight:500;"), color: qc.reasonColor }}>
+                      <IconWarn size={13} style={css("flex:0 0 auto;")} />
+                      {qc.reason}
+                    </span>
+                  </Box>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={css("padding:16px 24px 40px;")}>
+            <div style={css("display:grid; grid-template-columns:minmax(0,2.4fr) 88px minmax(0,1.3fr) 132px 44px 40px; gap:12px; padding:0 10px 8px; font-size:11px; font-weight:500; color:#a3a39d; text-transform:uppercase; letter-spacing:0.04em;")}>
+              <div>Contact</div>
+              <div>Loops</div>
+              <div>Last touch</div>
+              <div>Status</div>
+              <div style={css("text-align:center;")}>Owner</div>
+              <div />
+            </div>
+
+            <div style={css("border:1px solid #ededea; border-radius:11px; overflow:hidden; background:#fff;")}>
+              {rows.map((row) => (
+                <div key={row.id} style={css(row.rowStyle)}>
+                  <Box onClick={row.onOpen} style={css("display:grid; grid-template-columns:minmax(0,2.4fr) 88px minmax(0,1.3fr) 132px 44px 40px; gap:12px; align-items:center; padding:11px 10px; cursor:pointer;")} hover={css("background:#fafaf9;")}>
+                    <div style={css("display:flex; align-items:center; gap:10px; min-width:0;")}>
+                      {row.hasConflict && (
+                        <span title="Both teammates involved" style={css("flex:0 0 auto; width:6px; height:6px; border-radius:4px; background:#dc2626;")} />
+                      )}
+                      <div style={css("min-width:0;")}>
+                        <div style={css("font-size:13.5px; font-weight:500; color:#1a1a1a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.25;")}>{row.name}</div>
+                        <div style={css("font-size:12px; color:#9a9a95; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.25;")}>{row.company}</div>
+                      </div>
+                    </div>
+                    <div style={css("display:flex; gap:4px;")}>
+                      {row.loops.map((lp, j) => (
+                        <span key={j} title={lp.title} style={css(lp.style)}>{lp.label}</span>
+                      ))}
+                    </div>
+                    <div style={css("display:flex; align-items:center; gap:7px; min-width:0;")}>
+                      <span style={css(row.touch.iconWrap)}>
+                        <span dangerouslySetInnerHTML={row.touch.iconHtml} style={css("display:flex;")} />
+                      </span>
+                      <span style={css("display:flex; flex-direction:column; min-width:0;")}>
+                        <span style={css("font-size:12.5px; color:#3a3a38; line-height:1.2; white-space:nowrap;")}>{row.touch.channel}</span>
+                        <span style={css("font-size:11px; color:#a3a39d; line-height:1.2;" + MONO)}>{row.touch.ago}</span>
+                      </span>
+                    </div>
+                    <div style={css("position:relative;")} onClick={row.stopProp}>
+                      <Box as="button" onClick={row.toggleMenu} style={css(row.statusStyle)} hover={css("filter:brightness(0.97);")}>
+                        <span style={css(`width:6px; height:6px; border-radius:4px; background:${row.statusDot};`)} />
+                        {row.status}
+                        <IconChevronDown style={css("margin-left:1px; opacity:0.5;")} />
+                      </Box>
+                      {row.menuOpen && (
+                        <div style={css("position:absolute; top:calc(100% + 4px); left:0; z-index:40; background:#fff; border:1px solid #e6e6e2; border-radius:10px; box-shadow:0 8px 28px rgba(0,0,0,0.12); padding:4px; min-width:150px; animation:slcrm-fadeIn 0.1s ease;")}>
+                          {row.statusMenu.map((opt, j) => (
+                            <Box as="button" key={j} onClick={opt.onClick} style={css(opt.style)} hover={css("background:#f4f4f1;")}>
+                              <span style={css(`width:6px; height:6px; border-radius:4px; background:${opt.dot};`)} />
+                              {opt.label}
+                              {opt.active && <IconCheck style={css("margin-left:auto; color:#3a3a38;")} />}
+                            </Box>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div style={css("display:flex; justify-content:center;")}>
+                      <span title={row.ownerName} style={css(`width:24px; height:24px; border-radius:7px; background:${row.ownerColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600;`)}>{row.ownerInitial}</span>
+                    </div>
+                    <div style={css("display:flex; justify-content:center; color:#c4c4be;")}>
+                      <IconChevronRight />
+                    </div>
+                  </Box>
+                </div>
+              ))}
+            </div>
+            {visible.length === 0 && (
+              <div style={css("text-align:center; padding:48px; color:#a3a39d; font-size:13px;")}>No contacts match this view.</div>
+            )}
+          </div>
+        </div>
+      </main>
+
+      {/* DETAIL SLIDE-OVER */}
+      {detail && (
+        <>
+          <div onClick={close} style={css("position:fixed; inset:0; background:rgba(20,20,18,0.18); z-index:50; animation:slcrm-fadeIn 0.15s ease;")} />
+          <div style={css("position:fixed; top:0; right:0; bottom:0; width:480px; max-width:92vw; background:#fff; z-index:51; box-shadow:-8px 0 40px rgba(0,0,0,0.1); display:flex; flex-direction:column; animation:slcrm-slideIn 0.18s cubic-bezier(0.2,0.8,0.2,1);")}>
+            <div style={css("padding:20px 24px 16px; border-bottom:1px solid #ededea;")}>
+              <div style={css("display:flex; align-items:flex-start; gap:12px;")}>
+                <span style={css(`width:38px; height:38px; border-radius:10px; background:${detail.ownerColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:600; flex:0 0 auto;`)}>{detail.ownerInitial}</span>
+                <div style={css("flex:1; min-width:0;")}>
+                  <div style={css("font-size:18px; font-weight:600; letter-spacing:-0.015em; line-height:1.2;")}>{detail.name}</div>
+                  <div style={css("font-size:13px; color:#9a9a95; margin-top:2px;")}>{detail.company} · owned by {detail.ownerName}</div>
+                </div>
+                <Box as="button" onClick={close} style={css("border:none; background:#f2f2ef; width:30px; height:30px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66; flex:0 0 auto;")} hover={css("background:#e8e8e4;")}>
+                  <IconClose />
+                </Box>
+              </div>
+              <div style={css("display:flex; align-items:center; gap:8px; margin-top:14px; flex-wrap:wrap;")}>
+                {detail.loops.map((lp: any, j: number) => (
+                  <span key={j} style={css(lp.style)}>{lp.label}</span>
+                ))}
+                <div style={css("position:relative;")}>
+                  <Box as="button" onClick={detail.toggleMenu} style={css(detail.statusStyle)} hover={css("filter:brightness(0.97);")}>
+                    <span style={css(`width:6px; height:6px; border-radius:4px; background:${detail.statusDot};`)} />
+                    {detail.status}
+                    <IconChevronDown style={css("opacity:0.5;")} />
+                  </Box>
+                  {detail.menuOpen && (
+                    <div style={css("position:absolute; top:calc(100% + 4px); left:0; z-index:20; background:#fff; border:1px solid #e6e6e2; border-radius:10px; box-shadow:0 8px 28px rgba(0,0,0,0.12); padding:4px; min-width:150px;")}>
+                      {detail.statusMenu.map((opt: any, j: number) => (
+                        <Box as="button" key={j} onClick={opt.onClick} style={css(opt.style)} hover={css("background:#f4f4f1;")}>
+                          <span style={css(`width:6px; height:6px; border-radius:4px; background:${opt.dot};`)} />
+                          {opt.label}
+                          {opt.active && <IconCheck style={css("margin-left:auto; color:#3a3a38;")} />}
+                        </Box>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div style={css("flex:1; overflow-y:auto; padding:0 24px 24px;")}>
+              {detail.hasConflict && (
+                <div style={css("display:flex; gap:10px; align-items:flex-start; background:#fef2f2; border:1px solid #fbd5d5; border-radius:10px; padding:12px 14px; margin-top:16px;")}>
+                  <IconWarn size={16} style={css("color:#dc2626; flex:0 0 auto; margin-top:1px;")} />
+                  <div style={css("font-size:12.5px; color:#991b1b; line-height:1.45;")}>{detail.conflictText}</div>
+                </div>
+              )}
+
+              <div style={css("margin-top:16px; border:1px solid #ededea; border-radius:11px; padding:14px; background:#fbfbfa;")}>
+                <div style={css("display:flex; align-items:center; justify-content:space-between; gap:12px;")}>
+                  <div style={css("display:flex; align-items:center; gap:9px;")}>
+                    <IconCalendar style={css(`color:${detail.followColor};`)} />
+                    <div>
+                      <div style={css("font-size:13px; font-weight:500; color:#1a1a1a;")}>Follow-up</div>
+                      <div style={css(`font-size:12px; color:${detail.followColor}; margin-top:1px;`)}>{detail.followLabel}</div>
+                    </div>
+                  </div>
+                  <div style={css("display:flex; gap:6px;")}>
+                    {detail.hasFollow && (
+                      <Box as="button" onClick={detail.clearFollow} style={css("border:1px solid #e6e6e2; background:#fff; padding:6px 11px; border-radius:8px; font-size:12px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Mark done</Box>
+                    )}
+                    <Box as="button" onClick={detail.snoozeFollow} style={css("border:1px solid #e6e6e2; background:#fff; padding:6px 11px; border-radius:8px; font-size:12px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>{detail.snoozeLabel}</Box>
+                  </div>
+                </div>
+              </div>
+
+              <div style={css("margin-top:18px;")}>
+                <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px;")}>Quick note</div>
+                <div style={css("display:flex; gap:8px; align-items:flex-start;")}>
+                  <span style={css(`width:26px; height:26px; border-radius:7px; background:${detail.viewerColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; flex:0 0 auto; margin-top:2px;`)}>{detail.viewerInitial}</span>
+                  <div style={css("flex:1;")}>
+                    <Box
+                      as="textarea"
+                      value={S.noteDraft}
+                      onChange={onNoteInput}
+                      onKeyDown={onNoteKey}
+                      placeholder={`Add a note as ${detail.viewerName}… (⌘↵ to save)`}
+                      style={css("width:100%; min-height:58px; resize:vertical; padding:9px 11px; border:1px solid #e6e6e2; border-radius:9px; font-size:13px; font-family:inherit; background:#fff; outline:none; color:#1a1a1a; line-height:1.5;")}
+                      focus={css("border-color:#c9c9c3;")}
+                    />
+                    <div style={css("display:flex; justify-content:flex-end; margin-top:7px;")}>
+                      <button onClick={addNote} style={css("border:none; background:#1a1a1a; color:#fff; padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;")}>Add note</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {detail.hasNotes && (
+                <div style={css("margin-top:12px; display:flex; flex-direction:column; gap:8px;")}>
+                  {detail.notes.map((n: any, j: number) => (
+                    <div key={j} style={css("display:flex; gap:9px; padding:11px 12px; background:#faf9f6; border:1px solid #efeee9; border-radius:10px;")}>
+                      <span style={css(`width:22px; height:22px; border-radius:6px; background:${n.color}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; flex:0 0 auto; margin-top:1px;`)}>{n.initial}</span>
+                      <div style={css("min-width:0;")}>
+                        <div style={css("font-size:11.5px; color:#9a9a95; margin-bottom:2px;")}><span style={css("color:#575753; font-weight:500;")}>{n.author}</span> · {n.ago}</div>
+                        <div style={css("font-size:13px; color:#2a2a28; line-height:1.5; white-space:pre-wrap;")}>{n.text}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div style={css("margin-top:22px;")}>
+                <div style={css("display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;")}>
+                  <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.04em;")}>Touchpoint history</div>
+                  <div style={css("font-size:11.5px; color:#a3a39d;")}>Last reached by <span style={css("color:#3a3a38; font-weight:500;")}>{detail.lastBy}</span></div>
+                </div>
+                <div style={css("position:relative; padding-left:4px;")}>
+                  {detail.timeline.map((t: any, j: number) => (
+                    <div key={j} style={css("display:grid; grid-template-columns:26px 1fr; gap:12px; padding-bottom:16px; position:relative;")}>
+                      <div style={css("display:flex; flex-direction:column; align-items:center;")}>
+                        <span style={css(t.iconWrap)}><span dangerouslySetInnerHTML={t.iconHtml} style={css("display:flex;")} /></span>
+                        {t.hasLine && <span style={css("width:2px; flex:1; background:#ededea; margin-top:4px;")} />}
+                      </div>
+                      <div style={css("padding-top:1px;")}>
+                        <div style={css("display:flex; align-items:center; gap:8px; flex-wrap:wrap;")}>
+                          <span style={css("font-size:13px; font-weight:500; color:#1a1a1a;")}>{t.channel}</span>
+                          <span style={css(t.loopStyle)}>{t.loopLabel}</span>
+                          <span style={css("font-size:11.5px; color:#a3a39d; margin-left:auto;" + MONO)}>{t.date}</span>
+                        </div>
+                        <div style={css("font-size:12px; color:#75756f; margin-top:2px;")}>by {t.owner}</div>
+                        {t.hasNote && (
+                          <div style={css("font-size:12.5px; color:#4a4a46; margin-top:5px; line-height:1.45;")}>{t.note}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ADD / IMPORT MODAL */}
+      {S.modal && (
+        <div onClick={closeModal} style={css("position:fixed; inset:0; background:rgba(20,20,18,0.22); z-index:60; display:flex; align-items:flex-start; justify-content:center; padding:72px 20px; animation:slcrm-fadeIn 0.14s ease;")}>
+          <div onClick={(e) => e.stopPropagation()} style={css("width:520px; max-width:100%; background:#fff; border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.22); overflow:hidden; animation:slcrm-slideDown 0.18s cubic-bezier(0.2,0.8,0.2,1);")}>
+            {S.modal === "add" && (
+              <>
+                <div style={css("padding:20px 22px 16px; border-bottom:1px solid #ededea; display:flex; align-items:center; justify-content:space-between;")}>
+                  <div style={css("font-size:16px; font-weight:600; letter-spacing:-0.01em;")}>Add contact</div>
+                  <Box as="button" onClick={closeModal} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
+                </div>
+                <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:16px;")}>
+                  <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
+                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Name</span>
+                      <Box as="input" value={f.name} onChange={(e: any) => setForm({ name: e.target.value })} placeholder="Full name" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                    </label>
+                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Company</span>
+                      <Box as="input" value={f.company} onChange={(e: any) => setForm({ company: e.target.value })} placeholder="Company" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                    </label>
+                  </div>
+                  <div style={css("display:flex; flex-direction:column; gap:7px;")}>
+                    <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Loops</span>
+                    <div style={css("display:flex; gap:8px;")}>
+                      <button onClick={() => toggleFormLoop(1)} style={css(loopChip(1, f.loops.includes(1)))}><span style={css("width:8px;height:8px;border-radius:3px;background:#9a9a95;")} />Loop 1 · always-on</button>
+                      <button onClick={() => toggleFormLoop(2)} style={css(loopChip(2, f.loops.includes(2)))}><span style={css("width:8px;height:8px;border-radius:3px;background:#e0930a;")} />Loop 2 · blitz</button>
+                    </div>
+                  </div>
+                  <div style={css("display:flex; flex-direction:column; gap:7px;")}>
+                    <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Owner</span>
+                    <div style={css("display:flex; gap:8px;")}>
+                      {formOwners.map((o, j) => (
+                        <button key={j} onClick={o.onClick} style={css(o.style)}>
+                          {o.hasAvatar && <span style={css(`width:16px;height:16px;border-radius:5px;background:${o.color};color:#fff;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;`)}>{o.initial}</span>}
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={css("display:flex; flex-direction:column; gap:7px;")}>
+                    <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Status</span>
+                    <div style={css("display:flex; gap:7px; flex-wrap:wrap;")}>
+                      {STATUSES.map((s) => (
+                        <button key={s.id} onClick={() => setForm({ status: s.id })} style={css(`display:flex;align-items:center;gap:7px;padding:7px 11px;border-radius:8px;border:1px solid ${s.id === f.status ? "#c9c9c3" : "#e6e6e2"};background:${s.id === f.status ? "#f4f4f1" : "#fff"};color:#3a3a38;font-size:12.5px;font-family:inherit;cursor:pointer;`)}>
+                          <span style={css(`width:6px;height:6px;border-radius:4px;background:${s.dot};`)} />{s.id}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
+                    <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
+                    <button onClick={submitAdd} style={css(`border:none;background:${f.name.trim() ? "#1a1a1a" : "#c9c9c3"};color:#fff;padding:9px 16px;border-radius:9px;font-size:13px;font-weight:500;font-family:inherit;cursor:${f.name.trim() ? "pointer" : "default"};`)}>Add contact</button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {S.modal === "csv" && (
+              <>
+                <div style={css("padding:20px 22px 16px; border-bottom:1px solid #ededea; display:flex; align-items:center; justify-content:space-between;")}>
+                  <div style={css("font-size:16px; font-weight:600; letter-spacing:-0.01em;")}>Import contacts</div>
+                  <Box as="button" onClick={closeModal} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
+                </div>
+                <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:12px;")}>
+                  <div style={css("font-size:12.5px; color:#75756f; line-height:1.5;")}>Paste one contact per line, comma-separated:<br /><code style={css("font-size:11.5px; background:#f4f4f1; padding:2px 6px; border-radius:5px; color:#3a3a38;" + MONO)}>Name, Company, Loop, Owner, Status</code></div>
+                  <Box
+                    as="textarea"
+                    value={S.csvText}
+                    onChange={(e: any) => patch({ csvText: e.target.value, csvError: "" })}
+                    placeholder={"Ada Byron, Analytical Co, Loop 2, Britton, New\nGrace Hopper, Cobol Systems, 2, Tom, Contacted"}
+                    style={css("width:100%; min-height:150px; resize:vertical; padding:11px; border:1px solid #e6e6e2; border-radius:10px; font-size:12.5px; background:#fff; outline:none; color:#1a1a1a; line-height:1.6;" + MONO)}
+                    focus={css("border-color:#c9c9c3;")}
+                  />
+                  {S.csvError && <div style={css("font-size:12px; color:#c2410c;")}>{S.csvError}</div>}
+                  <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>Loop accepts <b>1</b>, <b>2</b>, <b>Loop 2</b>, or <b>blitz</b>. Owner accepts Tom / Britton (blank = unassigned). Header row optional.</div>
+                  <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
+                    <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
+                    <Box as="button" onClick={importCsv} style={css("border:none; background:#1a1a1a; color:#fff; padding:9px 16px; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;")} hover={css("background:#333;")}>Import contacts</Box>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

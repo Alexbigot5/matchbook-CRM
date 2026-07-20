@@ -1,0 +1,35 @@
+{
+  "name": "matchbook-crm",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "react-router dev",
+    "build": "react-router build",
+    "start": "wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "typecheck": "react-router typegen && tsc",
+    "db:migrate:local": "wrangler d1 execute crm-db --local --file=./schema.sql",
+    "db:migrate:remote": "wrangler d1 execute crm-db --remote --file=./schema.sql"
+  },
+  "dependencies": {
+    "better-auth": "^1.6.23",
+    "isbot": "^5.2.1",
+    "kysely-d1": "^0.4.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router": "^8.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.45.1",
+    "@cloudflare/workers-types": "^5.20260719.1",
+    "@react-router/dev": "^8.0.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.5",
+    "wrangler": "^4.112.0"
+  }
+}
