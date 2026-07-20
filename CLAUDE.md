@@ -73,8 +73,11 @@ The whole product lives in three files:
 ### Two "loops" domain concept
 - **Loop 1** — always-on outbound (grey badge).
 - **Loop 2** — event/community blitz (amber badge).
-A contact can be in one or both. Owners are **Tom** and **Britton**; a contact touched by
-both surfaces a "conflict" warning.
+A contact can be in one or both. Owners are **Tom** and **Britton**. A Loop 2 contact carries
+a free-text **`source`** (the community/event it came from, e.g. "Newtopia") that the sidebar
+can filter by, and can be **resumed into Loop 1** (adds Loop 1, keeps Loop 2, stamps
+`resumed_to_loop1_at`). A **cross-owner duplicate** (same name held by both Tom and Britton)
+surfaces a red "conflict" flag + detail banner.
 
 ## Data persistence
 
@@ -83,13 +86,18 @@ server-only data-access layer (raw D1 prepared statements, `crypto.randomUUID()`
 all conversion between stored **absolute** timestamps and the **relative** `daysAgo`/`followUp`
 values the UI renders — keeping every `Date` call server-side is what preserves SSR/hydration
 determinism. `schema.sql` mirrors the `data.ts` model: `contacts` stores `loops` as a JSON
-text array and a nullable `follow_up_at`; `notes` uses a `text` column. The DB **starts
-empty** — contacts are created via the UI / CSV import.
+text array, a nullable `follow_up_at`, a nullable `source`, and a nullable
+`resumed_to_loop1_at`; `notes` uses a `text` column. The DB **starts empty** — contacts are
+created via the UI / CSV import. **Schema changes:** `schema.sql` uses `CREATE TABLE IF NOT
+EXISTS`, so new columns need a one-time `ALTER` on existing DBs — see `migrations/` (run once)
+or drop+recreate an empty DB.
 
 Gotchas:
 - **No touchpoint write path.** Nothing inserts into the `touchpoints` table yet, so
   `touches` is always `[]`: the "Last touch" column and the detail timeline render empty, and
-  `hasConflict` never fires. Logging touchpoints is the natural next feature.
+  the touch-based `hasConflict`/`peopleInvolved` never fire (the live conflict flag is instead
+  the name-based `hasNameConflict`/`conflictOwners`). Logging touchpoints is the natural next
+  feature.
 - **better-auth is still orphaned** — instantiated per request into context, but no handler is
   mounted and no auth tables exist. Login is not implemented; the app is a single shared
   dataset with `VIEWER = "Tom"` as the note author.

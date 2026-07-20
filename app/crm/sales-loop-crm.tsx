@@ -2,15 +2,16 @@ import { useEffect, useState } from "react";
 import { useFetcher } from "react-router";
 import {
   ago,
+  buildNameIndex,
   CH,
+  conflictOwners,
   type Contact,
   fmtDate,
-  hasConflict,
+  hasNameConflict,
   loopBadge,
   needsAttention,
   NO_TOUCH_ICON,
   OWNERS,
-  peopleInvolved,
   statusMeta,
   statusPill,
   STATUSES,
@@ -36,11 +37,13 @@ type FormState = {
   loops: number[];
   owner: string;
   status: string;
+  source: string;
 };
 
 type State = {
   view: string;
   owner: string;
+  sourceFilter: string;
   query: string;
   selectedId: string | null;
   menuId: string | null;
@@ -60,6 +63,7 @@ const blankForm = (loops?: number[]): FormState => ({
   loops: loops || [1],
   owner: "Tom",
   status: "New",
+  source: "",
 });
 
 const GLOBAL_CSS = `
@@ -80,6 +84,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   const [state, setState] = useState<State>(() => ({
     view: "all",
     owner: "all",
+    sourceFilter: "all",
     query: "",
     selectedId: null,
     menuId: null,
@@ -116,6 +121,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   // ---- handlers ----
   const setView = (v: string) => patch({ view: v, menuId: null });
   const setOwner = (o: string) => patch({ owner: o, menuId: null });
+  const setSourceFilter = (s: string) => patch({ sourceFilter: s, menuId: null });
   const onSearch = (e: any) => patch({ query: e.target.value });
   const open = (id: string) =>
     patch({ selectedId: id, noteDraft: "", menuId: null, detailMenu: false });
@@ -151,6 +157,10 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     if (!S.selectedId) return;
     submit({ intent: "clearFollow", id: S.selectedId });
   };
+  const resumeLoop1 = () => {
+    if (!S.selectedId) return;
+    submit({ intent: "resumeLoop1", id: S.selectedId });
+  };
 
   const defaultLoops = () => (S.view === "loop2" ? [2] : [1]);
   const openAdd = () => patch({ modal: "add", form: blankForm(defaultLoops()) });
@@ -175,6 +185,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       loops: JSON.stringify(f.loops.length ? f.loops : [1]),
       owner: f.owner === "Unassigned" ? "" : f.owner,
       status: f.status || "New",
+      source: f.loops.includes(2) ? f.source.trim() : "",
     });
   };
   const importCsv = () => {
@@ -207,23 +218,26 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     };
     let start = 0;
     const first = rows[0].toLowerCase();
-    if (/name/.test(first) && /company|loop|owner/.test(first)) start = 1;
+    if (/name/.test(first) && /company|loop|owner|source|community|event/.test(first))
+      start = 1;
     const made = [];
     for (let i = start; i < rows.length; i++) {
       const cols = rows[i].split(/[,\t]/).map((x) => x.trim());
       if (!cols[0]) continue;
+      const loops = parseLoops(cols[2]);
       made.push({
         name: cols[0],
         company: cols[1] || "",
-        loops: parseLoops(cols[2]),
+        loops,
         owner: parseOwner(cols[3]),
         status: parseStatus(cols[4]),
+        source: loops.includes(2) ? cols[5] || "" : "",
       });
     }
     if (!made.length) {
       patch({
         csvError:
-          "Couldn’t read any contacts. Use: Name, Company, Loop, Owner, Status",
+          "Couldn’t read any contacts. Use: Name, Company, Loop, Owner, Status, Source",
       });
       return;
     }
@@ -248,6 +262,19 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     !q ||
     c.name.toLowerCase().includes(q) ||
     c.company.toLowerCase().includes(q);
+  const bySource = (c: Contact) =>
+    S.sourceFilter === "all" || (c.source || "") === S.sourceFilter;
+
+  // Cross-owner duplicate detection (same name under 2+ owners).
+  const nameIndex = buildNameIndex(contacts);
+
+  // Distinct Loop 2 sources present in the data, with counts, for the sidebar.
+  const sourceCounts = new Map<string, number>();
+  for (const c of contacts) {
+    const s = (c.source || "").trim();
+    if (s) sourceCounts.set(s, (sourceCounts.get(s) ?? 0) + 1);
+  }
+  const sources = [...sourceCounts.keys()].sort((a, b) => a.localeCompare(b));
 
   const counts = {
     all: contacts.length,
@@ -280,7 +307,20 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     { key: "unassigned", label: "Unassigned", count: ownerCounts.unassigned, hasAvatar: false, color: "", initial: "" },
   ].map((o) => ({ ...o, style: tabBtn(S.owner === o.key), onClick: () => setOwner(o.key) }));
 
-  const visible = contacts.filter((c) => byView(c) && byOwner(c) && byQuery(c));
+  const sourceTabs = sources.length
+    ? [
+        { key: "all", label: "All sources", count: counts.all },
+        ...sources.map((s) => ({ key: s, label: s, count: sourceCounts.get(s) ?? 0 })),
+      ].map((t) => ({
+        ...t,
+        style: tabBtn(S.sourceFilter === t.key),
+        onClick: () => setSourceFilter(t.key),
+      }))
+    : [];
+
+  const visible = contacts.filter(
+    (c) => byView(c) && byOwner(c) && bySource(c) && byQuery(c),
+  );
 
   const prio = (c: Contact) => {
     if (!c.owner) return 0;
@@ -289,7 +329,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     return 3;
   };
   const queueSrc = contacts
-    .filter((c) => byView(c) && byOwner(c))
+    .filter((c) => byView(c) && byOwner(c) && bySource(c))
     .map((c) => ({ c, att: needsAttention(c) }))
     .filter((x) => x.att.flag)
     .sort(
@@ -328,7 +368,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     const ch = last
       ? CH[last.ch]
       : { label: "No touch yet", bg: "#f2f2f0", fg: "#a3a39d", icon: NO_TOUCH_ICON };
-    const conflict = hasConflict(c);
+    const conflict = hasNameConflict(c, nameIndex);
     const o = c.owner ? OWNERS[c.owner] : null;
     const m = statusMeta(c.status);
     const statusMenu = STATUSES.map((s) => ({
@@ -372,8 +412,8 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   if (sel) {
     const o = sel.owner ? OWNERS[sel.owner] : null;
     const m = statusMeta(sel.status);
-    const people = [...peopleInvolved(sel)];
-    const conflict = people.length > 1;
+    const conflictWith = conflictOwners(sel, nameIndex);
+    const conflict = conflictWith.length > 0;
     const lastT = sel.touches[0];
     const detailMenu = STATUSES.map((s) => ({
       label: s.id,
@@ -404,7 +444,6 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       followLabel = "No reminder set";
     }
     const vc = OWNERS[VIEWER];
-    const others = people.filter((p) => p !== sel.owner);
     detail = {
       name: sel.name,
       company: sel.company,
@@ -418,11 +457,17 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       menuOpen: S.detailMenu,
       toggleMenu: () => toggleDetailMenu(),
       statusMenu: detailMenu,
+      hasSource: !!(sel.source && sel.source.trim()),
+      source: sel.source || "",
+      canResume: sel.loops.includes(2) && !sel.resumedToLoop1At,
+      isResumed: !!sel.resumedToLoop1At,
+      resumedLabel: sel.resumedLabel || null,
+      resumeLoop1: () => resumeLoop1(),
       hasConflict: conflict,
       conflictText: conflict
         ? sel.owner
-          ? `Owned by ${sel.owner}, but ${others.join(" & ")} ${others.length > 1 ? "have" : "has"} also touched this contact. Confirm who's driving before the next outreach.`
-          : `No owner assigned — ${people.join(" & ")} have both reached out. Assign one driver to avoid double-touching.`
+          ? `Also owned by ${conflictWith.join(" & ")} — you both have a contact named “${sel.name}”. Confirm who's driving before the next outreach.`
+          : `${conflictWith.join(" & ")} ${conflictWith.length > 1 ? "each have" : "has"} a contact named “${sel.name}”. Assign one owner to avoid double-touching.`
         : "",
       followLabel,
       followColor,
@@ -527,6 +572,21 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
             <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{o.count}</span>
           </Box>
         ))}
+
+        {sourceTabs.length > 0 && (
+          <>
+            <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; padding:18px 8px 6px;")}>Community / Event</div>
+            {sourceTabs.map((t) => (
+              <Box as="button" key={t.key} onClick={t.onClick} style={css(t.style)} hover={css("background:#f0f0ec;")}>
+                <span style={css("display:flex; align-items:center; gap:9px; min-width:0;")}>
+                  <span style={css(`width:8px; height:8px; border-radius:3px; background:${t.key === "all" ? "#c4c4be" : "#e0930a"}; flex:0 0 auto;`)} />
+                  <span style={css("white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{t.label}</span>
+                </span>
+                <span style={css(MONO + "font-size:11px; color:#a3a39d; flex:0 0 auto;")}>{t.count}</span>
+              </Box>
+            ))}
+          </>
+        )}
 
         <div style={css("margin-top:auto; padding:12px 8px; border-top:1px solid #ededea; font-size:11px; color:#a3a39d; line-height:1.5;")}>
           <div><span style={css("color:#575753;")}>Loop 1</span> · always-on outbound</div>
@@ -692,6 +752,12 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                 <div style={css("flex:1; min-width:0;")}>
                   <div style={css("font-size:18px; font-weight:600; letter-spacing:-0.015em; line-height:1.2;")}>{detail.name}</div>
                   <div style={css("font-size:13px; color:#9a9a95; margin-top:2px;")}>{detail.company} · owned by {detail.ownerName}</div>
+                  {detail.hasSource && (
+                    <div style={css("font-size:12.5px; color:#b45309; margin-top:3px; display:flex; align-items:center; gap:5px;")}>
+                      <span style={css("width:6px; height:6px; border-radius:3px; background:#e0930a; flex:0 0 auto;")} />
+                      From {detail.source}
+                    </div>
+                  )}
                 </div>
                 <Box as="button" onClick={close} style={css("border:none; background:#f2f2ef; width:30px; height:30px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66; flex:0 0 auto;")} hover={css("background:#e8e8e4;")}>
                   <IconClose />
@@ -747,6 +813,22 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                   </div>
                 </div>
               </div>
+
+              {detail.canResume && (
+                <div style={css("margin-top:12px; border:1px solid #ededea; border-radius:11px; padding:14px; background:#fbfbfa; display:flex; align-items:center; justify-content:space-between; gap:12px;")}>
+                  <div style={css("min-width:0;")}>
+                    <div style={css("font-size:13px; font-weight:500; color:#1a1a1a;")}>Didn’t convert?</div>
+                    <div style={css("font-size:12px; color:#75756f; margin-top:1px;")}>Resume this Loop 2 contact into Loop 1 outbound.</div>
+                  </div>
+                  <Box as="button" onClick={detail.resumeLoop1} style={css("border:1px solid #e6e6e2; background:#fff; padding:7px 13px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer; color:#3a3a38; white-space:nowrap; flex:0 0 auto;")} hover={css("background:#f4f4f1;")}>Resume to Loop 1</Box>
+                </div>
+              )}
+              {detail.isResumed && (
+                <div style={css("margin-top:12px; display:flex; align-items:center; gap:8px; background:#f0f0ec; border:1px solid #e6e6e2; border-radius:10px; padding:10px 14px; font-size:12.5px; color:#575753;")}>
+                  <IconCheck style={css("color:#1f7a4d; flex:0 0 auto;")} />
+                  {detail.resumedLabel}
+                </div>
+              )}
 
               <div style={css("margin-top:18px;")}>
                 <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px;")}>Quick note</div>
@@ -843,6 +925,17 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                       <button onClick={() => toggleFormLoop(2)} style={css(loopChip(2, f.loops.includes(2)))}><span style={css("width:8px;height:8px;border-radius:3px;background:#e0930a;")} />Loop 2 · blitz</button>
                     </div>
                   </div>
+                  {f.loops.includes(2) && (
+                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Community / Event <span style={css("color:#a3a39d; font-weight:450;")}>· where they came from</span></span>
+                      <Box as="input" list="slcrm-sources" value={f.source} onChange={(e: any) => setForm({ source: e.target.value })} placeholder="e.g. Naturally Network Denver, Newtopia" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                      <datalist id="slcrm-sources">
+                        {sources.map((s) => (
+                          <option key={s} value={s} />
+                        ))}
+                      </datalist>
+                    </label>
+                  )}
                   <div style={css("display:flex; flex-direction:column; gap:7px;")}>
                     <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Owner</span>
                     <div style={css("display:flex; gap:8px;")}>
@@ -879,17 +972,17 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                   <Box as="button" onClick={closeModal} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
                 </div>
                 <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:12px;")}>
-                  <div style={css("font-size:12.5px; color:#75756f; line-height:1.5;")}>Paste one contact per line, comma-separated:<br /><code style={css("font-size:11.5px; background:#f4f4f1; padding:2px 6px; border-radius:5px; color:#3a3a38;" + MONO)}>Name, Company, Loop, Owner, Status</code></div>
+                  <div style={css("font-size:12.5px; color:#75756f; line-height:1.5;")}>Paste one contact per line, comma-separated:<br /><code style={css("font-size:11.5px; background:#f4f4f1; padding:2px 6px; border-radius:5px; color:#3a3a38;" + MONO)}>Name, Company, Loop, Owner, Status, Source</code></div>
                   <Box
                     as="textarea"
                     value={S.csvText}
                     onChange={(e: any) => patch({ csvText: e.target.value, csvError: "" })}
-                    placeholder={"Ada Byron, Analytical Co, Loop 2, Britton, New\nGrace Hopper, Cobol Systems, 2, Tom, Contacted"}
+                    placeholder={"Ada Byron, Analytical Co, Loop 2, Britton, New, Newtopia\nGrace Hopper, Cobol Systems, 2, Tom, Contacted, Naturally Network Denver"}
                     style={css("width:100%; min-height:150px; resize:vertical; padding:11px; border:1px solid #e6e6e2; border-radius:10px; font-size:12.5px; background:#fff; outline:none; color:#1a1a1a; line-height:1.6;" + MONO)}
                     focus={css("border-color:#c9c9c3;")}
                   />
                   {S.csvError && <div style={css("font-size:12px; color:#c2410c;")}>{S.csvError}</div>}
-                  <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>Loop accepts <b>1</b>, <b>2</b>, <b>Loop 2</b>, or <b>blitz</b>. Owner accepts Tom / Britton (blank = unassigned). Header row optional.</div>
+                  <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>Loop accepts <b>1</b>, <b>2</b>, <b>Loop 2</b>, or <b>blitz</b>. Owner accepts Tom / Britton (blank = unassigned). Source (community/event) applies to Loop 2 rows. Header row optional.</div>
                   <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
                     <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
                     <Box as="button" onClick={importCsv} style={css("border:none; background:#1a1a1a; color:#fff; padding:9px 16px; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;")} hover={css("background:#333;")}>Import contacts</Box>

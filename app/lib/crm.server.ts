@@ -19,13 +19,19 @@ function dayDiff(fromMs: number, toMs: number): number {
   return Math.floor((startOfUTCDay(toMs) - startOfUTCDay(fromMs)) / DAY);
 }
 
-/** "Jul 20"-style label, matching the original fmtDate() output. */
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/**
+ * "Jul 20"-style label, matching the original fmtDate() output. Hand-rolled
+ * (no Intl/toLocaleDateString) so it has zero runtime locale/timezone
+ * dependency on the Workers runtime.
+ */
 function dateLabel(ms: number): string {
-  return new Date(ms).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
+  const d = new Date(ms);
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
 function parseLoops(raw: string): number[] {
@@ -53,7 +59,9 @@ type ContactRow = {
   owner: string | null;
   status: string;
   loops: string;
+  source: string | null;
   follow_up_at: string | null;
+  resumed_to_loop1_at: string | null;
   created_at: string;
 };
 
@@ -74,7 +82,7 @@ export async function listContacts(db: D1Database, now: number): Promise<Contact
   const [contactsRes, notesRes] = await Promise.all([
     db
       .prepare(
-        "SELECT id, name, company, owner, status, loops, follow_up_at, created_at FROM contacts ORDER BY created_at DESC",
+        "SELECT id, name, company, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, created_at FROM contacts ORDER BY created_at DESC",
       )
       .all<ContactRow>(),
     db
@@ -103,6 +111,9 @@ export async function listContacts(db: D1Database, now: number): Promise<Contact
       followUp = -dayDiff(now, dueMs); // due today -> 0, due in 3 days -> -3
       followUpDateLabel = dateLabel(dueMs);
     }
+    const resumedLabel = row.resumed_to_loop1_at
+      ? "Resumed to Loop 1 · " + dateLabel(Date.parse(row.resumed_to_loop1_at))
+      : null;
     return {
       id: row.id,
       name: row.name,
@@ -114,6 +125,9 @@ export async function listContacts(db: D1Database, now: number): Promise<Contact
       notes: notesByContact.get(row.id) ?? [],
       followUp,
       followUpDateLabel,
+      source: row.source ?? null,
+      resumedToLoop1At: row.resumed_to_loop1_at ?? null,
+      resumedLabel,
       opts: {},
     };
   });
@@ -125,14 +139,16 @@ export type NewContactInput = {
   loops?: number[];
   owner?: string | null;
   status?: string;
+  source?: string | null;
 };
 
 function insertContactStmt(db: D1Database, input: NewContactInput) {
   const name = input.name.trim();
   const followUpAt = new Date().toISOString(); // new contacts are "due today"
+  const source = (input.source || "").trim() || null;
   return db
     .prepare(
-      "INSERT INTO contacts (id, name, company, owner, status, loops, follow_up_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO contacts (id, name, company, owner, status, loops, source, follow_up_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       crypto.randomUUID(),
@@ -141,6 +157,7 @@ function insertContactStmt(db: D1Database, input: NewContactInput) {
       input.owner ?? null,
       input.status || "New",
       JSON.stringify(normalizeLoops(input.loops)),
+      source,
       followUpAt,
     );
 }
@@ -188,6 +205,24 @@ export async function clearFollowUp(db: D1Database, id: string): Promise<void> {
   await db
     .prepare("UPDATE contacts SET follow_up_at = NULL WHERE id = ?")
     .bind(id)
+    .run();
+}
+
+/**
+ * "Resume to Loop 1" — a non-converting Loop 2 contact flows back into general
+ * outbound. Adds Loop 1 to its loops (keeping Loop 2 for provenance) and stamps
+ * the resume time. Read-modify-write since `loops` is a JSON text column.
+ */
+export async function resumeToLoop1(db: D1Database, id: string): Promise<void> {
+  const row = await db
+    .prepare("SELECT loops FROM contacts WHERE id = ?")
+    .bind(id)
+    .first<{ loops: string }>();
+  if (!row) return;
+  const loops = normalizeLoops([...parseLoops(row.loops), 1]);
+  await db
+    .prepare("UPDATE contacts SET loops = ?, resumed_to_loop1_at = ? WHERE id = ?")
+    .bind(JSON.stringify(loops), new Date().toISOString(), id)
     .run();
 }
 

@@ -27,6 +27,12 @@ export type Contact = {
   // Absolute due-date label ("Jul 20") for followUp, precomputed server-side so
   // no Date math runs during render. Null when there is no follow-up.
   followUpDateLabel?: string | null;
+  // Loop 2 origin — the community/event a contact came from (e.g. "Newtopia").
+  source?: string | null;
+  // When a Loop 2 contact was resumed into Loop 1 outbound: raw ISO timestamp
+  // plus a precomputed "Jul 20"-style label (null when never resumed).
+  resumedToLoop1At?: string | null;
+  resumedLabel?: string | null;
   opts: ContactOpts;
 };
 
@@ -108,6 +114,50 @@ export function peopleInvolved(c: Contact) {
 }
 export function hasConflict(c: Contact) {
   return peopleInvolved(c).size > 1;
+}
+
+// --- Duplicate / cross-owner conflict detection ---------------------------
+// Touchpoints have no write path, so touch-owner conflict (`hasConflict`) never
+// fires. Instead we flag when the SAME contact name is held by two different
+// owners — e.g. both Tom and Britton have a "Jane Smith". Detection needs the
+// whole contact list, so it's built once into a name index.
+
+export type NameIndex = Map<string, Contact[]>;
+
+export function normalizeName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+export function buildNameIndex(contacts: Contact[]): NameIndex {
+  const idx: NameIndex = new Map();
+  for (const c of contacts) {
+    const key = normalizeName(c.name);
+    if (!key) continue;
+    const list = idx.get(key) ?? [];
+    list.push(c);
+    idx.set(key, list);
+  }
+  return idx;
+}
+
+// Distinct non-null owners across every contact sharing c's name.
+function ownersForName(c: Contact, index: NameIndex): string[] {
+  const peers = index.get(normalizeName(c.name)) ?? [];
+  const owners = new Set<string>();
+  for (const p of peers) if (p.owner) owners.add(p.owner);
+  return [...owners];
+}
+
+// True when c's name is held by 2+ distinct owners (a cross-owner duplicate).
+export function hasNameConflict(c: Contact, index: NameIndex): boolean {
+  return ownersForName(c, index).length >= 2;
+}
+
+// The OTHER owners (relative to c) in a cross-owner duplicate; [] if no conflict.
+export function conflictOwners(c: Contact, index: NameIndex): string[] {
+  const all = ownersForName(c, index);
+  if (all.length < 2) return [];
+  return all.filter((o) => o !== c.owner);
 }
 export function statusMeta(id: string) {
   return STATUSES.find((s) => s.id === id) || STATUSES[0];

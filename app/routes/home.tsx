@@ -8,6 +8,7 @@ import {
   createContact,
   createManyContacts,
   listContacts,
+  resumeToLoop1,
   snoozeFollowUp,
   updateContactStatus,
   type NewContactInput,
@@ -36,7 +37,15 @@ export function links() {
 
 export async function loader({ context }: Route.LoaderArgs) {
   const { DB } = context.get(appContext);
-  return { contacts: await listContacts(DB, Date.now()) };
+  try {
+    return { contacts: await listContacts(DB, Date.now()) };
+  } catch (err) {
+    // Surface the real cause in `wrangler tail` — the production ErrorBoundary
+    // hides it. A throw here usually means the D1 schema is missing/outdated
+    // (run `npm run db:migrate:remote`, or the migrations/ ALTERs).
+    console.error("[loader] failed to load contacts:", err);
+    throw err;
+  }
 }
 
 type ActionResult = { ok: true } | { ok: false; error: string };
@@ -99,7 +108,14 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           loops: parseLoopsField(form.get("loops")),
           owner: normalizeOwner(form.get("owner")),
           status: form.get("status")?.toString() || "New",
+          source: form.get("source")?.toString() ?? null,
         });
+        return { ok: true };
+      }
+      case "resumeLoop1": {
+        const id = form.get("id")?.toString();
+        if (!id) return { ok: false, error: "Missing id." };
+        await resumeToLoop1(DB, id);
         return { ok: true };
       }
       case "importContacts": {
