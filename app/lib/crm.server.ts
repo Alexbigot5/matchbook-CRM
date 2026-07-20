@@ -19,13 +19,19 @@ function dayDiff(fromMs: number, toMs: number): number {
   return Math.floor((startOfUTCDay(toMs) - startOfUTCDay(fromMs)) / DAY);
 }
 
-/** "Jul 20"-style label, matching the original fmtDate() output. */
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/**
+ * "Jul 20"-style label, matching the original fmtDate() output. Hand-rolled
+ * (no Intl/toLocaleDateString) so it has zero runtime locale/timezone
+ * dependency on the Workers runtime.
+ */
 function dateLabel(ms: number): string {
-  return new Date(ms).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
+  const d = new Date(ms);
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
 function parseLoops(raw: string): number[] {

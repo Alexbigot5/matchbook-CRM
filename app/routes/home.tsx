@@ -36,7 +36,15 @@ export function links() {
 
 export async function loader({ context }: Route.LoaderArgs) {
   const { DB } = context.get(appContext);
-  return { contacts: await listContacts(DB, Date.now()) };
+  try {
+    return { contacts: await listContacts(DB, Date.now()) };
+  } catch (err) {
+    // Surface the real cause in `wrangler tail` — the production ErrorBoundary
+    // hides it. A throw here usually means the D1 schema is missing/outdated
+    // (run `npm run db:migrate:remote`).
+    console.error("[loader] failed to load contacts:", err);
+    throw err;
+  }
 }
 
 type ActionResult = { ok: true } | { ok: false; error: string };
