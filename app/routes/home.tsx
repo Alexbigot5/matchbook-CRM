@@ -1,5 +1,17 @@
 import type { Route } from "./+types/home";
 import { SalesLoopCRM } from "../crm/sales-loop-crm";
+import { appContext } from "../../load-context";
+import { VIEWER } from "../crm/data";
+import {
+  addNote,
+  clearFollowUp,
+  createContact,
+  createManyContacts,
+  listContacts,
+  snoozeFollowUp,
+  updateContactStatus,
+  type NewContactInput,
+} from "../lib/crm.server";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -22,6 +34,95 @@ export function links() {
   ];
 }
 
-export default function Home() {
-  return <SalesLoopCRM />;
+export async function loader({ context }: Route.LoaderArgs) {
+  const { DB } = context.get(appContext);
+  return { contacts: await listContacts(DB, Date.now()) };
+}
+
+type ActionResult = { ok: true } | { ok: false; error: string };
+
+function normalizeOwner(value: FormDataEntryValue | null): string | null {
+  const owner = (value ?? "").toString().trim();
+  if (!owner || owner === "Unassigned") return null;
+  return owner;
+}
+
+function parseLoopsField(value: FormDataEntryValue | null): number[] {
+  try {
+    const arr = JSON.parse((value ?? "[1]").toString());
+    if (Array.isArray(arr)) return arr;
+  } catch {
+    // ignore — fall through to default
+  }
+  return [1];
+}
+
+export async function action({ request, context }: Route.ActionArgs): Promise<ActionResult> {
+  const { DB } = context.get(appContext);
+  const form = await request.formData();
+  const intent = form.get("intent")?.toString();
+
+  try {
+    switch (intent) {
+      case "setStatus": {
+        const id = form.get("id")?.toString();
+        const status = form.get("status")?.toString();
+        if (!id || !status) return { ok: false, error: "Missing id or status." };
+        await updateContactStatus(DB, id, status);
+        return { ok: true };
+      }
+      case "addNote": {
+        const id = form.get("id")?.toString();
+        const text = (form.get("text")?.toString() ?? "").trim();
+        if (!id || !text) return { ok: false, error: "Missing id or note text." };
+        await addNote(DB, id, VIEWER, text);
+        return { ok: true };
+      }
+      case "snooze": {
+        const id = form.get("id")?.toString();
+        if (!id) return { ok: false, error: "Missing id." };
+        await snoozeFollowUp(DB, id);
+        return { ok: true };
+      }
+      case "clearFollow": {
+        const id = form.get("id")?.toString();
+        if (!id) return { ok: false, error: "Missing id." };
+        await clearFollowUp(DB, id);
+        return { ok: true };
+      }
+      case "addContact": {
+        const name = (form.get("name")?.toString() ?? "").trim();
+        if (!name) return { ok: false, error: "Name is required." };
+        await createContact(DB, {
+          name,
+          company: form.get("company")?.toString() ?? "",
+          loops: parseLoopsField(form.get("loops")),
+          owner: normalizeOwner(form.get("owner")),
+          status: form.get("status")?.toString() || "New",
+        });
+        return { ok: true };
+      }
+      case "importContacts": {
+        let rows: NewContactInput[];
+        try {
+          rows = JSON.parse(form.get("rows")?.toString() ?? "[]");
+        } catch {
+          return { ok: false, error: "Couldn’t read the imported rows." };
+        }
+        if (!Array.isArray(rows) || !rows.some((r) => r?.name?.trim())) {
+          return { ok: false, error: "No valid contacts to import." };
+        }
+        await createManyContacts(DB, rows);
+        return { ok: true };
+      }
+      default:
+        return { ok: false, error: "Unknown action." };
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Something went wrong." };
+  }
+}
+
+export default function Home({ loaderData }: Route.ComponentProps) {
+  return <SalesLoopCRM contacts={loaderData.contacts} />;
 }
