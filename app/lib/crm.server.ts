@@ -4,7 +4,7 @@
 // calculation here (against a single `now` captured in the loader) is what keeps
 // SSR and client hydration deterministic — no `Date` runs in the render path.
 
-import type { Contact, Note } from "../crm/data";
+import type { Contact, Note, Touch } from "../crm/data";
 
 const DAY = 86_400_000;
 
@@ -56,6 +56,9 @@ type ContactRow = {
   id: string;
   name: string;
   company: string | null;
+  email: string | null;
+  phone: string | null;
+  linkedin: string | null;
   owner: string | null;
   status: string;
   loops: string;
@@ -73,16 +76,26 @@ type NoteRow = {
   created_at: string;
 };
 
+type TouchpointRow = {
+  id: string;
+  contact_id: string;
+  type: string | null;
+  loop: number | null;
+  owner: string | null;
+  note: string | null;
+  created_at: string;
+};
+
 /**
  * Load every contact with its notes, shaped to satisfy the existing `Contact`
  * type. `touches` is always empty (no write path creates touchpoints yet) and
  * `opts` is always `{}`. `now` is the loader's single reference instant.
  */
 export async function listContacts(db: D1Database, now: number): Promise<Contact[]> {
-  const [contactsRes, notesRes] = await Promise.all([
+  const [contactsRes, notesRes, touchesRes] = await Promise.all([
     db
       .prepare(
-        "SELECT id, name, company, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, created_at FROM contacts ORDER BY created_at DESC",
+        "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, created_at FROM contacts ORDER BY created_at DESC",
       )
       .all<ContactRow>(),
     db
@@ -90,6 +103,11 @@ export async function listContacts(db: D1Database, now: number): Promise<Contact
         "SELECT id, contact_id, author, text, created_at FROM notes ORDER BY created_at DESC",
       )
       .all<NoteRow>(),
+    db
+      .prepare(
+        "SELECT id, contact_id, type, loop, owner, note, created_at FROM touchpoints ORDER BY created_at DESC",
+      )
+      .all<TouchpointRow>(),
   ]);
 
   const notesByContact = new Map<string, Note[]>();
@@ -101,6 +119,22 @@ export async function listContacts(db: D1Database, now: number): Promise<Contact
       daysAgo: dayDiff(Date.parse(n.created_at), now),
     });
     notesByContact.set(n.contact_id, list);
+  }
+
+  // Touchpoints are ordered newest-first (matching the detail timeline, which
+  // reads touches[0] as the most recent). created_at → relative daysAgo here so
+  // no Date math runs in the render path.
+  const touchesByContact = new Map<string, Touch[]>();
+  for (const t of touchesRes.results ?? []) {
+    const list = touchesByContact.get(t.contact_id) ?? [];
+    list.push({
+      owner: t.owner ?? "",
+      ch: t.type ?? "email",
+      loop: Number(t.loop) || 1,
+      daysAgo: dayDiff(Date.parse(t.created_at), now),
+      note: t.note ?? "",
+    });
+    touchesByContact.set(t.contact_id, list);
   }
 
   return (contactsRes.results ?? []).map((row): Contact => {
@@ -118,10 +152,13 @@ export async function listContacts(db: D1Database, now: number): Promise<Contact
       id: row.id,
       name: row.name,
       company: row.company ?? "",
+      email: row.email ?? null,
+      phone: row.phone ?? null,
+      linkedin: row.linkedin ?? null,
       loops: parseLoops(row.loops),
       owner: row.owner ?? null,
       status: row.status,
-      touches: [],
+      touches: touchesByContact.get(row.id) ?? [],
       notes: notesByContact.get(row.id) ?? [],
       followUp,
       followUpDateLabel,
@@ -136,6 +173,9 @@ export async function listContacts(db: D1Database, now: number): Promise<Contact
 export type NewContactInput = {
   name: string;
   company?: string;
+  email?: string | null;
+  phone?: string | null;
+  linkedin?: string | null;
   loops?: number[];
   owner?: string | null;
   status?: string;
@@ -146,14 +186,20 @@ function insertContactStmt(db: D1Database, input: NewContactInput) {
   const name = input.name.trim();
   const followUpAt = new Date().toISOString(); // new contacts are "due today"
   const source = (input.source || "").trim() || null;
+  const email = (input.email || "").trim() || null;
+  const phone = (input.phone || "").trim() || null;
+  const linkedin = (input.linkedin || "").trim() || null;
   return db
     .prepare(
-      "INSERT INTO contacts (id, name, company, owner, status, loops, source, follow_up_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO contacts (id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       crypto.randomUUID(),
       name,
       (input.company || "").trim(),
+      email,
+      phone,
+      linkedin,
       input.owner ?? null,
       input.status || "New",
       JSON.stringify(normalizeLoops(input.loops)),
@@ -237,5 +283,35 @@ export async function addNote(
       "INSERT INTO notes (id, contact_id, author, text) VALUES (?, ?, ?, ?)",
     )
     .bind(crypto.randomUUID(), contactId, author, text.trim())
+    .run();
+}
+
+/**
+ * Record a touchpoint in the contact's timeline. `type` is the channel key
+ * (ad | email | linkedin | call | meeting). When `loop` is omitted, the contact's
+ * primary (lowest) loop is stamped — resolved server-side so the client can't
+ * pass a bogus value. `created_at` defaults to now via the column default.
+ */
+export async function logTouchpoint(
+  db: D1Database,
+  contactId: string,
+  type: string,
+  owner: string,
+  note: string,
+  loop?: number,
+): Promise<void> {
+  let resolvedLoop = loop;
+  if (resolvedLoop === undefined) {
+    const row = await db
+      .prepare("SELECT loops FROM contacts WHERE id = ?")
+      .bind(contactId)
+      .first<{ loops: string }>();
+    resolvedLoop = row ? Math.min(...parseLoops(row.loops)) : 1;
+  }
+  await db
+    .prepare(
+      "INSERT INTO touchpoints (id, contact_id, type, loop, owner, note) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(crypto.randomUUID(), contactId, type, resolvedLoop, owner, note.trim())
     .run();
 }

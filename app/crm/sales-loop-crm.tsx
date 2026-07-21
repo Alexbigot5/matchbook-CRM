@@ -34,6 +34,9 @@ import {
 type FormState = {
   name: string;
   company: string;
+  email: string;
+  phone: string;
+  linkedin: string;
   loops: number[];
   owner: string;
   status: string;
@@ -60,6 +63,9 @@ type ActionResult = { ok: true } | { ok: false; error: string };
 const blankForm = (loops?: number[]): FormState => ({
   name: "",
   company: "",
+  email: "",
+  phone: "",
+  linkedin: "",
   loops: loops || [1],
   owner: "Tom",
   status: "New",
@@ -143,6 +149,12 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     patch({ noteDraft: "" });
     submit({ intent: "addNote", id: S.selectedId, text: txt });
   };
+  const logMeeting = () => {
+    const txt = (S.noteDraft || "").trim();
+    if (!txt || !S.selectedId) return;
+    patch({ noteDraft: "" });
+    submit({ intent: "logMeeting", id: S.selectedId, text: txt });
+  };
   const onNoteKey = (e: any) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
@@ -182,6 +194,9 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       intent: "addContact",
       name: f.name.trim(),
       company: (f.company || "").trim(),
+      email: (f.email || "").trim(),
+      phone: (f.phone || "").trim(),
+      linkedin: (f.linkedin || "").trim(),
       loops: JSON.stringify(f.loops.length ? f.loops : [1]),
       owner: f.owner === "Unassigned" ? "" : f.owner,
       status: f.status || "New",
@@ -218,7 +233,10 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     };
     let start = 0;
     const first = rows[0].toLowerCase();
-    if (/name/.test(first) && /company|loop|owner|source|community|event/.test(first))
+    if (
+      /name/.test(first) &&
+      /company|loop|owner|source|community|event|email|phone|linkedin/.test(first)
+    )
       start = 1;
     const made = [];
     for (let i = start; i < rows.length; i++) {
@@ -232,12 +250,15 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
         owner: parseOwner(cols[3]),
         status: parseStatus(cols[4]),
         source: loops.includes(2) ? cols[5] || "" : "",
+        email: cols[6] || "",
+        phone: cols[7] || "",
+        linkedin: cols[8] || "",
       });
     }
     if (!made.length) {
       patch({
         csvError:
-          "Couldn’t read any contacts. Use: Name, Company, Loop, Owner, Status, Source",
+          "Couldn’t read any contacts. Use: Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn",
       });
       return;
     }
@@ -444,9 +465,48 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       followLabel = "No reminder set";
     }
     const vc = OWNERS[VIEWER];
+    // Contact-info rows — only the channels that have a value. Icons reuse the
+    // channel SVG strings from CH (rendered via dangerouslySetInnerHTML below).
+    const linkedinRaw = (sel.linkedin || "").trim();
+    const linkedinHref = linkedinRaw
+      ? /^https?:\/\//i.test(linkedinRaw)
+        ? linkedinRaw
+        : "https://" + linkedinRaw
+      : "";
+    const contactInfo = [
+      sel.email && sel.email.trim()
+        ? {
+            iconHtml: { __html: CH.email.icon },
+            iconWrap: `width:30px;height:30px;border-radius:8px;background:${CH.email.bg};color:${CH.email.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
+            label: sel.email.trim(),
+            href: "mailto:" + sel.email.trim(),
+            external: false,
+          }
+        : null,
+      sel.phone && sel.phone.trim()
+        ? {
+            iconHtml: { __html: CH.call.icon },
+            iconWrap: `width:30px;height:30px;border-radius:8px;background:${CH.call.bg};color:${CH.call.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
+            label: sel.phone.trim(),
+            href: "tel:" + sel.phone.trim().replace(/[^\d+]/g, ""),
+            external: false,
+          }
+        : null,
+      linkedinRaw
+        ? {
+            iconHtml: { __html: CH.linkedin.icon },
+            iconWrap: `width:30px;height:30px;border-radius:8px;background:${CH.linkedin.bg};color:${CH.linkedin.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
+            label: linkedinRaw.replace(/^https?:\/\//i, ""),
+            href: linkedinHref,
+            external: true,
+          }
+        : null,
+    ].filter(Boolean);
     detail = {
       name: sel.name,
       company: sel.company,
+      contactInfo,
+      hasContactInfo: contactInfo.length > 0,
       ownerName: sel.owner || "Unassigned",
       ownerColor: o ? o.color : "#b0b0aa",
       ownerInitial: o ? o.initial : "?",
@@ -796,6 +856,30 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                 </div>
               )}
 
+              {detail.hasContactInfo && (
+                <div style={css("margin-top:16px;")}>
+                  <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px;")}>Contact info</div>
+                  <div style={css("border:1px solid #ededea; border-radius:11px; overflow:hidden; background:#fff;")}>
+                    {detail.contactInfo.map((ci: any, j: number) => (
+                      <Box
+                        as="a"
+                        key={j}
+                        href={ci.href}
+                        {...(ci.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                        style={css(`display:flex; align-items:center; gap:11px; padding:11px 13px; text-decoration:none; color:#2a2a28; ${j > 0 ? "border-top:1px solid #f2f2f0;" : ""}`)}
+                        hover={css("background:#faf9f6;")}
+                      >
+                        <span style={css(ci.iconWrap)}>
+                          <span dangerouslySetInnerHTML={ci.iconHtml} style={css("display:flex;")} />
+                        </span>
+                        <span style={css("font-size:13px; color:#2a2a28; word-break:break-all; min-width:0; flex:1;")}>{ci.label}</span>
+                        {ci.external && <IconChevronRight />}
+                      </Box>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div style={css("margin-top:16px; border:1px solid #ededea; border-radius:11px; padding:14px; background:#fbfbfa;")}>
                 <div style={css("display:flex; align-items:center; justify-content:space-between; gap:12px;")}>
                   <div style={css("display:flex; align-items:center; gap:9px;")}>
@@ -844,7 +928,11 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                       style={css("width:100%; min-height:58px; resize:vertical; padding:9px 11px; border:1px solid #e6e6e2; border-radius:9px; font-size:13px; font-family:inherit; background:#fff; outline:none; color:#1a1a1a; line-height:1.5;")}
                       focus={css("border-color:#c9c9c3;")}
                     />
-                    <div style={css("display:flex; justify-content:flex-end; margin-top:7px;")}>
+                    <div style={css("display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:7px;")}>
+                      <Box as="button" onClick={logMeeting} style={css("display:flex; align-items:center; gap:6px; border:1px solid #e6e6e2; background:#fff; color:#575753; padding:7px 12px; border-radius:8px; font-size:12.5px; font-family:inherit; cursor:pointer;")} hover={css("background:#f4f4f1;")}>
+                        <IconCalendar style={css("width:14px; height:14px; color:#75756f;")} />
+                        Log as meeting note
+                      </Box>
                       <button onClick={addNote} style={css("border:none; background:#1a1a1a; color:#fff; padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;")}>Add note</button>
                     </div>
                   </div>
@@ -918,6 +1006,20 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                       <Box as="input" value={f.company} onChange={(e: any) => setForm({ company: e.target.value })} placeholder="Company" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
                     </label>
                   </div>
+                  <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
+                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Email</span>
+                      <Box as="input" type="email" value={f.email} onChange={(e: any) => setForm({ email: e.target.value })} placeholder="name@company.com" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                    </label>
+                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Phone</span>
+                      <Box as="input" value={f.phone} onChange={(e: any) => setForm({ phone: e.target.value })} placeholder="+1 (555) 000-0000" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                    </label>
+                  </div>
+                  <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+                    <span style={css("font-size:12px; font-weight:500; color:#575753;")}>LinkedIn</span>
+                    <Box as="input" value={f.linkedin} onChange={(e: any) => setForm({ linkedin: e.target.value })} placeholder="linkedin.com/in/handle" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                  </label>
                   <div style={css("display:flex; flex-direction:column; gap:7px;")}>
                     <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Loops</span>
                     <div style={css("display:flex; gap:8px;")}>
@@ -972,17 +1074,17 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                   <Box as="button" onClick={closeModal} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
                 </div>
                 <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:12px;")}>
-                  <div style={css("font-size:12.5px; color:#75756f; line-height:1.5;")}>Paste one contact per line, comma-separated:<br /><code style={css("font-size:11.5px; background:#f4f4f1; padding:2px 6px; border-radius:5px; color:#3a3a38;" + MONO)}>Name, Company, Loop, Owner, Status, Source</code></div>
+                  <div style={css("font-size:12.5px; color:#75756f; line-height:1.5;")}>Paste one contact per line, comma-separated:<br /><code style={css("font-size:11.5px; background:#f4f4f1; padding:2px 6px; border-radius:5px; color:#3a3a38;" + MONO)}>Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn</code></div>
                   <Box
                     as="textarea"
                     value={S.csvText}
                     onChange={(e: any) => patch({ csvText: e.target.value, csvError: "" })}
-                    placeholder={"Ada Byron, Analytical Co, Loop 2, Britton, New, Newtopia\nGrace Hopper, Cobol Systems, 2, Tom, Contacted, Naturally Network Denver"}
+                    placeholder={"Ada Byron, Analytical Co, Loop 2, Britton, New, Newtopia, ada@analytical.co, +1 555 0100, linkedin.com/in/ada\nGrace Hopper, Cobol Systems, 2, Tom, Contacted, Naturally Network Denver"}
                     style={css("width:100%; min-height:150px; resize:vertical; padding:11px; border:1px solid #e6e6e2; border-radius:10px; font-size:12.5px; background:#fff; outline:none; color:#1a1a1a; line-height:1.6;" + MONO)}
                     focus={css("border-color:#c9c9c3;")}
                   />
                   {S.csvError && <div style={css("font-size:12px; color:#c2410c;")}>{S.csvError}</div>}
-                  <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>Loop accepts <b>1</b>, <b>2</b>, <b>Loop 2</b>, or <b>blitz</b>. Owner accepts Tom / Britton (blank = unassigned). Source (community/event) applies to Loop 2 rows. Header row optional.</div>
+                  <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>Loop accepts <b>1</b>, <b>2</b>, <b>Loop 2</b>, or <b>blitz</b>. Owner accepts Tom / Britton (blank = unassigned). Source (community/event) applies to Loop 2 rows. Email, Phone &amp; LinkedIn are optional trailing columns. Header row optional.</div>
                   <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
                     <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
                     <Box as="button" onClick={importCsv} style={css("border:none; background:#1a1a1a; color:#fff; padding:9px 16px; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;")} hover={css("background:#333;")}>Import contacts</Box>

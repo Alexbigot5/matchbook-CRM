@@ -8,6 +8,7 @@ import {
   createContact,
   createManyContacts,
   listContacts,
+  logTouchpoint,
   resumeToLoop1,
   snoozeFollowUp,
   updateContactStatus,
@@ -87,6 +88,16 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         await addNote(DB, id, VIEWER, text);
         return { ok: true };
       }
+      case "logMeeting": {
+        const id = form.get("id")?.toString();
+        const text = (form.get("text")?.toString() ?? "").trim();
+        if (!id || !text) return { ok: false, error: "Missing id or note text." };
+        // Save the note AND record a Meeting touchpoint in the timeline. Status
+        // is left untouched (changed manually via the detail dropdown).
+        await addNote(DB, id, VIEWER, text);
+        await logTouchpoint(DB, id, "meeting", VIEWER, text);
+        return { ok: true };
+      }
       case "snooze": {
         const id = form.get("id")?.toString();
         if (!id) return { ok: false, error: "Missing id." };
@@ -105,6 +116,9 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         await createContact(DB, {
           name,
           company: form.get("company")?.toString() ?? "",
+          email: form.get("email")?.toString() ?? null,
+          phone: form.get("phone")?.toString() ?? null,
+          linkedin: form.get("linkedin")?.toString() ?? null,
           loops: parseLoopsField(form.get("loops")),
           owner: normalizeOwner(form.get("owner")),
           status: form.get("status")?.toString() || "New",
