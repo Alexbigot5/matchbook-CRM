@@ -18,6 +18,10 @@ export type Contact = {
   id: string;
   name: string;
   company: string;
+  // Contact-info channels (nullable — populated via the Add form / CSV import).
+  email?: string | null;
+  phone?: string | null;
+  linkedin?: string | null;
   loops: number[];
   owner: string | null;
   status: string;
@@ -64,6 +68,12 @@ export const CH: Record<string, Channel> = {
     bg: "#e5f3ea",
     fg: "#1f7a4d",
     icon: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M6 4h3l1.5 4.5-2 1.5a11 11 0 0 0 5 5l1.5-2 4.5 1.5V19a2 2 0 0 1-2 2A16 16 0 0 1 4 6a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>',
+  },
+  meeting: {
+    label: "Meeting",
+    bg: "#eaecfb",
+    fg: "#4457c9",
+    icon: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="16" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M3 9h18M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="m9 14 2 2 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   },
 };
 
