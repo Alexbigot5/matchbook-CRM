@@ -56,6 +56,8 @@ type State = {
   form: FormState;
   csvText: string;
   csvError: string;
+  csvDragging: boolean;
+  csvFileName: string;
 };
 
 type ActionResult = { ok: true } | { ok: false; error: string };
@@ -100,6 +102,8 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     form: blankForm([1]),
     csvText: "",
     csvError: "",
+    csvDragging: false,
+    csvFileName: "",
   }));
 
   const patch = (u: Partial<State> | ((s: State) => Partial<State>)) =>
@@ -176,8 +180,53 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
 
   const defaultLoops = () => (S.view === "loop2" ? [2] : [1]);
   const openAdd = () => patch({ modal: "add", form: blankForm(defaultLoops()) });
-  const openCsv = () => patch({ modal: "csv", csvText: "", csvError: "" });
-  const closeModal = () => patch({ modal: null, csvError: "" });
+  const openCsv = () =>
+    patch({ modal: "csv", csvText: "", csvError: "", csvDragging: false, csvFileName: "" });
+  const closeModal = () =>
+    patch({ modal: null, csvError: "", csvDragging: false, csvFileName: "" });
+
+  // Read a dropped/selected .csv into the paste textarea, then the existing
+  // importCsv parser handles it. FileReader only runs in these browser event
+  // handlers (never during SSR), so there's no hydration concern.
+  const readCsvFile = (file: File | null | undefined) => {
+    if (!file) return;
+    const isCsv =
+      /\.csv$/i.test(file.name) ||
+      file.type === "text/csv" ||
+      file.type === "application/vnd.ms-excel" ||
+      file.type === "text/plain";
+    if (!isCsv) {
+      patch({ csvError: "That doesn’t look like a .csv file.", csvDragging: false });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () =>
+      patch({
+        csvText: typeof reader.result === "string" ? reader.result : "",
+        csvError: "",
+        csvDragging: false,
+        csvFileName: file.name,
+      });
+    reader.onerror = () =>
+      patch({ csvError: "Couldn’t read that file.", csvDragging: false });
+    reader.readAsText(file);
+  };
+  const onCsvDrop = (e: any) => {
+    e.preventDefault();
+    readCsvFile(e.dataTransfer?.files?.[0]);
+  };
+  const onCsvDragOver = (e: any) => {
+    e.preventDefault();
+    if (!S.csvDragging) patch({ csvDragging: true });
+  };
+  const onCsvDragLeave = (e: any) => {
+    e.preventDefault();
+    patch({ csvDragging: false });
+  };
+  const onCsvFileInput = (e: any) => {
+    readCsvFile(e.target.files?.[0]);
+    e.target.value = ""; // allow re-selecting the same file
+  };
   const setForm = (p: Partial<FormState>) =>
     patch((s) => ({ form: { ...s.form, ...p } }));
   const toggleFormLoop = (n: number) =>
@@ -1074,11 +1123,33 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                   <Box as="button" onClick={closeModal} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
                 </div>
                 <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:12px;")}>
-                  <div style={css("font-size:12.5px; color:#75756f; line-height:1.5;")}>Paste one contact per line, comma-separated:<br /><code style={css("font-size:11.5px; background:#f4f4f1; padding:2px 6px; border-radius:5px; color:#3a3a38;" + MONO)}>Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn</code></div>
+                  <Box
+                    as="label"
+                    onDragOver={onCsvDragOver}
+                    onDragEnter={onCsvDragOver}
+                    onDragLeave={onCsvDragLeave}
+                    onDrop={onCsvDrop}
+                    style={css(
+                      `display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; text-align:center; padding:24px 18px; border:1.5px dashed ${S.csvDragging ? "#8a8a84" : "#d8d8d3"}; border-radius:12px; background:${S.csvDragging ? "#f4f4f1" : "#fbfbfa"}; cursor:pointer; transition:background 0.12s, border-color 0.12s;`,
+                    )}
+                    hover={css("background:#f4f4f1; border-color:#c9c9c3;")}
+                  >
+                    <input type="file" accept=".csv,text/csv" onChange={onCsvFileInput} style={css("display:none;")} />
+                    <span style={css("width:34px; height:34px; border-radius:9px; background:#eeeee9; color:#75756f; display:flex; align-items:center; justify-content:center;")}>
+                      <IconUpload />
+                    </span>
+                    <div style={css("font-size:13px; font-weight:500; color:#3a3a38;")}>
+                      {S.csvFileName ? `Loaded ${S.csvFileName}` : "Drag & drop a .csv, or click to browse"}
+                    </div>
+                    <div style={css("font-size:11.5px; color:#a3a39d;")}>
+                      {S.csvFileName ? "Review below, then Import — or drop another file." : "We’ll load it into the editor below so you can review before importing."}
+                    </div>
+                  </Box>
+                  <div style={css("font-size:12.5px; color:#75756f; line-height:1.5;")}>Or paste one contact per line, comma-separated:<br /><code style={css("font-size:11.5px; background:#f4f4f1; padding:2px 6px; border-radius:5px; color:#3a3a38;" + MONO)}>Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn</code></div>
                   <Box
                     as="textarea"
                     value={S.csvText}
-                    onChange={(e: any) => patch({ csvText: e.target.value, csvError: "" })}
+                    onChange={(e: any) => patch({ csvText: e.target.value, csvError: "", csvFileName: "" })}
                     placeholder={"Ada Byron, Analytical Co, Loop 2, Britton, New, Newtopia, ada@analytical.co, +1 555 0100, linkedin.com/in/ada\nGrace Hopper, Cobol Systems, 2, Tom, Contacted, Naturally Network Denver"}
                     style={css("width:100%; min-height:150px; resize:vertical; padding:11px; border:1px solid #e6e6e2; border-radius:10px; font-size:12.5px; background:#fff; outline:none; color:#1a1a1a; line-height:1.6;" + MONO)}
                     focus={css("border-color:#c9c9c3;")}
