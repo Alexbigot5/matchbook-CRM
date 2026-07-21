@@ -14,10 +14,9 @@ CREATE TABLE IF NOT EXISTS contacts (
   owner TEXT,                      -- 'Tom' | 'Britton' | NULL (unassigned)
   status TEXT NOT NULL DEFAULT 'New',
   loops TEXT NOT NULL DEFAULT '[1]', -- JSON array of loop numbers, e.g. "[1,2]"
-  source TEXT,                     -- Loop 2 origin: community/event name (e.g. "Newtopia"), or NULL
   follow_up_at TEXT,               -- absolute ISO date of the next follow-up, or NULL
-  resumed_to_loop1_at TEXT,        -- ISO timestamp a Loop 2 contact was resumed into Loop 1, or NULL
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  -- NOTE: `source` and `resumed_to_loop1_at` are added in 0002_loop2_fields.sql.
 );
 
 CREATE TABLE IF NOT EXISTS notes (
