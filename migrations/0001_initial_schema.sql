@@ -1,7 +1,11 @@
--- Sales Loop CRM schema. The in-memory Contact/Note model in app/crm/data.ts is
--- the source of truth; columns below mirror it. All timestamps are absolute
--- ISO strings — the loader converts them to the relative `daysAgo`/`followUp`
--- values the UI renders.
+-- Sales Loop CRM initial schema. The in-memory Contact/Note model in
+-- app/crm/data.ts is the source of truth; columns below mirror it. All
+-- timestamps are absolute ISO strings — the loader converts them to the
+-- relative `daysAgo`/`followUp` values the UI renders.
+--
+-- Applied via Wrangler's D1 migrations (tracked in the `d1_migrations` table):
+--   npm run db:migrate:local
+--   npm run db:migrate:remote
 
 CREATE TABLE IF NOT EXISTS contacts (
   id TEXT PRIMARY KEY,

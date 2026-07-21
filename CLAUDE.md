@@ -21,8 +21,9 @@ npm run start            # wrangler dev — run the built worker locally
 npm run build            # react-router build
 npm run deploy           # build + wrangler deploy
 npm run typecheck        # react-router typegen && tsc  ← run this to verify types
-npm run db:migrate:local   # apply schema.sql to local D1
-npm run db:migrate:remote  # apply schema.sql to remote D1
+npm run db:migrations:create  # scaffold a new numbered migration in migrations/
+npm run db:migrate:local      # apply pending migrations to local D1
+npm run db:migrate:remote     # apply pending migrations to remote D1
 ```
 
 There is **no test runner and no linter** configured. `npm run typecheck` is the only
@@ -85,12 +86,14 @@ Contacts, notes, and follow-ups **persist to Cloudflare D1**. `app/lib/crm.serve
 server-only data-access layer (raw D1 prepared statements, `crypto.randomUUID()` ids). It owns
 all conversion between stored **absolute** timestamps and the **relative** `daysAgo`/`followUp`
 values the UI renders — keeping every `Date` call server-side is what preserves SSR/hydration
-determinism. `schema.sql` mirrors the `data.ts` model: `contacts` stores `loops` as a JSON
+determinism. The schema lives in `migrations/` (applied via Wrangler's D1 migrations, tracked
+in a `d1_migrations` table) and mirrors the `data.ts` model: `contacts` stores `loops` as a JSON
 text array, a nullable `follow_up_at`, a nullable `source`, and a nullable
 `resumed_to_loop1_at`; `notes` uses a `text` column. The DB **starts empty** — contacts are
-created via the UI / CSV import. **Schema changes:** `schema.sql` uses `CREATE TABLE IF NOT
-EXISTS`, so new columns need a one-time `ALTER` on existing DBs — see `migrations/` (run once)
-or drop+recreate an empty DB.
+created via the UI / CSV import. **Schema changes:** run `npm run db:migrations:create <name>` to
+scaffold a new numbered file in `migrations/`, add your `CREATE`/`ALTER` SQL, then apply it with
+`npm run db:migrate:local` / `npm run db:migrate:remote`. Wrangler only runs migrations not yet
+recorded in `d1_migrations`, so files are applied once, in numeric order.
 
 Gotchas:
 - **No touchpoint write path.** Nothing inserts into the `touchpoints` table yet, so

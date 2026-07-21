@@ -8,8 +8,9 @@
     "start": "wrangler dev",
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "react-router typegen && tsc",
-    "db:migrate:local": "wrangler d1 execute crm-db --local --file=./schema.sql",
-    "db:migrate:remote": "wrangler d1 execute crm-db --remote --file=./schema.sql"
+    "db:migrations:create": "wrangler d1 migrations create crm-db",
+    "db:migrate:local": "wrangler d1 migrations apply crm-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply crm-db --remote"
   },
   "dependencies": {
     "better-auth": "^1.6.23",

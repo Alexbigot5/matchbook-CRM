@@ -42,7 +42,7 @@ export async function loader({ context }: Route.LoaderArgs) {
   } catch (err) {
     // Surface the real cause in `wrangler tail` — the production ErrorBoundary
     // hides it. A throw here usually means the D1 schema is missing/outdated
-    // (run `npm run db:migrate:remote`, or the migrations/ ALTERs).
+    // (run `npm run db:migrate:remote` to apply pending migrations).
     console.error("[loader] failed to load contacts:", err);
     throw err;
   }
