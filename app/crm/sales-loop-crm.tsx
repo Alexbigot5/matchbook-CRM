@@ -282,6 +282,12 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     if (!S.selectedId) return;
     submit({ intent: "resumeLoop1", id: S.selectedId });
   };
+  // Kick off a HyperAgent run for this contact. The agent drafts outreach and
+  // writes results back through /api/hyperagent; the loader then revalidates.
+  const draftOutreach = () => {
+    if (!S.selectedId) return;
+    submit({ intent: "triggerAgent", id: S.selectedId });
+  };
 
   const defaultLoops = () => (S.view === "loop2" ? [2] : [1]);
   const openAdd = () => patch({ modal: "add", form: blankForm(defaultLoops()) });
@@ -772,6 +778,8 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       isResumed: !!sel.resumedToLoop1At,
       resumedLabel: sel.resumedLabel || null,
       resumeLoop1: () => resumeLoop1(),
+      draftOutreach: () => draftOutreach(),
+      agentPending: fetcher.state !== "idle",
       hasConflict: conflict,
       conflictText: conflict
         ? sel.owner
@@ -1233,6 +1241,16 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                     <Box as="button" onClick={detail.snoozeFollow} style={css("border:1px solid #e6e6e2; background:#fff; padding:6px 11px; border-radius:8px; font-size:12px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>{detail.snoozeLabel}</Box>
                   </div>
                 </div>
+              </div>
+
+              <div style={css("margin-top:12px; border:1px solid #ededea; border-radius:11px; padding:14px; background:#fbfbfa; display:flex; align-items:center; justify-content:space-between; gap:12px;")}>
+                <div style={css("min-width:0;")}>
+                  <div style={css("font-size:13px; font-weight:500; color:#1a1a1a;")}>Draft outreach with HyperAgent</div>
+                  <div style={css("font-size:12px; color:#75756f; margin-top:1px;")}>Hand this contact to a HyperAgent run; results post back to the timeline.</div>
+                </div>
+                <Box as="button" onClick={detail.draftOutreach} disabled={detail.agentPending} style={css(`border:none; background:#1a1a1a; color:#fff; padding:7px 13px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:${detail.agentPending ? "default" : "pointer"}; white-space:nowrap; flex:0 0 auto; opacity:${detail.agentPending ? "0.6" : "1"};`)} hover={css("background:#333;")}>
+                  {detail.agentPending ? "Working…" : "Draft outreach"}
+                </Box>
               </div>
 
               {detail.canResume && (
