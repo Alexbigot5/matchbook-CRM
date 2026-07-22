@@ -547,7 +547,9 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     if (!selectedEmails.length) return;
     const esc = (v: string) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
     const csv =
-      "email\n" + selectedEmails.map((c) => esc(c.email)).join("\n") + "\n";
+      "name,email\n" +
+      selectedEmails.map((c) => esc(c.name) + "," + esc(c.email)).join("\n") +
+      "\n";
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
