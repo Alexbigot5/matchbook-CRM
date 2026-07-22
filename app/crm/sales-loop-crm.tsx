@@ -255,7 +255,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   const importCsv = () => {
     const raw = (S.csvText || "").trim();
     if (!raw) {
-      patch({ csvError: "Paste some rows first." });
+      patch({ csvError: "Drop a .csv file first." });
       return;
     }
     const rows = raw
@@ -1141,21 +1141,13 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                     <div style={css("font-size:13px; font-weight:500; color:#3a3a38;")}>
                       {S.csvFileName ? `Loaded ${S.csvFileName}` : "Drag & drop a .csv, or click to browse"}
                     </div>
-                    <div style={css("font-size:11.5px; color:#a3a39d;")}>
-                      {S.csvFileName ? "Review below, then Import — or drop another file." : "We’ll load it into the editor below so you can review before importing."}
+                    <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>
+                      {S.csvFileName
+                        ? "Click Import contacts to finish — or drop another file."
+                        : "One contact per line: Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn"}
                     </div>
                   </Box>
-                  <div style={css("font-size:12.5px; color:#75756f; line-height:1.5;")}>Or paste one contact per line, comma-separated:<br /><code style={css("font-size:11.5px; background:#f4f4f1; padding:2px 6px; border-radius:5px; color:#3a3a38;" + MONO)}>Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn</code></div>
-                  <Box
-                    as="textarea"
-                    value={S.csvText}
-                    onChange={(e: any) => patch({ csvText: e.target.value, csvError: "", csvFileName: "" })}
-                    placeholder={"Ada Byron, Analytical Co, Loop 2, Britton, New, Newtopia, ada@analytical.co, +1 555 0100, linkedin.com/in/ada\nGrace Hopper, Cobol Systems, 2, Tom, Contacted, Naturally Network Denver"}
-                    style={css("width:100%; min-height:150px; resize:vertical; padding:11px; border:1px solid #e6e6e2; border-radius:10px; font-size:12.5px; background:#fff; outline:none; color:#1a1a1a; line-height:1.6;" + MONO)}
-                    focus={css("border-color:#c9c9c3;")}
-                  />
                   {S.csvError && <div style={css("font-size:12px; color:#c2410c;")}>{S.csvError}</div>}
-                  <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>Loop accepts <b>1</b>, <b>2</b>, <b>Loop 2</b>, or <b>blitz</b>. Owner accepts Tom / Britton (blank = unassigned). Source (community/event) applies to Loop 2 rows. Email, Phone &amp; LinkedIn are optional trailing columns. Header row optional.</div>
                   <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
                     <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
                     <Box as="button" onClick={importCsv} style={css("border:none; background:#1a1a1a; color:#fff; padding:9px 16px; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;")} hover={css("background:#333;")}>Import contacts</Box>
