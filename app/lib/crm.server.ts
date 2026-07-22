@@ -315,3 +315,42 @@ export async function logTouchpoint(
     .bind(crypto.randomUUID(), contactId, type, resolvedLoop, owner, note.trim())
     .run();
 }
+
+/**
+ * Bulk "mark ads sent": log a Dark-ad (`type = "ad"`) touchpoint dated now for
+ * each given contact, stamping each contact's primary loop and its own owner
+ * (falling back to `actor` when unassigned). One batched write; returns the
+ * number of touchpoints created. `created_at` defaults to now, so the date it
+ * happened is recorded on each row.
+ */
+export async function markAdsSent(
+  db: D1Database,
+  ids: string[],
+  actor: string,
+): Promise<number> {
+  const unique = [...new Set(ids.filter((id) => typeof id === "string" && id))];
+  if (!unique.length) return 0;
+
+  const placeholders = unique.map(() => "?").join(", ");
+  const rowsRes = await db
+    .prepare(
+      `SELECT id, loops, owner FROM contacts WHERE id IN (${placeholders})`,
+    )
+    .bind(...unique)
+    .all<{ id: string; loops: string; owner: string | null }>();
+
+  const inserts = (rowsRes.results ?? []).map((row) =>
+    db
+      .prepare(
+        "INSERT INTO touchpoints (id, contact_id, type, loop, owner, note) VALUES (?, ?, 'ad', ?, ?, 'Ads sent')",
+      )
+      .bind(
+        crypto.randomUUID(),
+        row.id,
+        Math.min(...parseLoops(row.loops)),
+        row.owner || actor,
+      ),
+  );
+  if (inserts.length) await db.batch(inserts);
+  return inserts.length;
+}

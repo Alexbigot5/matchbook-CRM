@@ -9,6 +9,7 @@ import {
   createManyContacts,
   listContacts,
   logTouchpoint,
+  markAdsSent,
   resumeToLoop1,
   snoozeFollowUp,
   updateContactStatus,
@@ -130,6 +131,19 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         const id = form.get("id")?.toString();
         if (!id) return { ok: false, error: "Missing id." };
         await resumeToLoop1(DB, id);
+        return { ok: true };
+      }
+      case "markAdsSent": {
+        let ids: unknown;
+        try {
+          ids = JSON.parse(form.get("ids")?.toString() ?? "[]");
+        } catch {
+          return { ok: false, error: "Couldn’t read the selected contacts." };
+        }
+        if (!Array.isArray(ids) || !ids.length) {
+          return { ok: false, error: "No contacts selected." };
+        }
+        await markAdsSent(DB, ids.map(String), VIEWER);
         return { ok: true };
       }
       case "importContacts": {
