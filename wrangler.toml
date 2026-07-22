@@ -6,6 +6,14 @@ compatibility_flags = ["nodejs_compat"]
 [assets]
 directory = "./build/client"
 
+# Non-secret config. The HyperAgent trigger endpoint the CRM POSTs to when
+# kicking off an agent run (see app/lib/hyperagent.server.ts). Leave blank to
+# disable outbound triggering. The two API keys are secrets, NOT set here — use
+# `wrangler secret put CRM_API_KEY` and `wrangler secret put HYPERAGENT_API_KEY`
+# (and mirror all three in a local .dev.vars; see .dev.vars.example).
+[vars]
+HYPERAGENT_TRIGGER_URL = ""
+
 [[d1_databases]]
 binding = "DB"
 database_name = "crm-db"
