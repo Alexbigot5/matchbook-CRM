@@ -15,6 +15,7 @@ import {
   updateContactStatus,
   type NewContactInput,
 } from "../lib/crm.server";
+import { triggerAgent } from "../lib/hyperagent.server";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -69,7 +70,7 @@ function parseLoopsField(value: FormDataEntryValue | null): number[] {
 }
 
 export async function action({ request, context }: Route.ActionArgs): Promise<ActionResult> {
-  const { DB } = context.get(appContext);
+  const { DB, HYPERAGENT_TRIGGER_URL, HYPERAGENT_API_KEY } = context.get(appContext);
   const form = await request.formData();
   const intent = form.get("intent")?.toString();
 
@@ -157,6 +158,33 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           return { ok: false, error: "No valid contacts to import." };
         }
         await createManyContacts(DB, rows);
+        return { ok: true };
+      }
+      case "triggerAgent": {
+        const id = form.get("id")?.toString();
+        if (!id) return { ok: false, error: "Missing id." };
+        // Build the payload server-side from stored data so the client can't
+        // spoof it. The agent writes results back via /api/hyperagent.
+        const contact = (await listContacts(DB, Date.now())).find((c) => c.id === id);
+        if (!contact) return { ok: false, error: "Contact not found." };
+        const result = await triggerAgent(
+          { url: HYPERAGENT_TRIGGER_URL, key: HYPERAGENT_API_KEY },
+          {
+            task: "draft_outreach",
+            contact: {
+              id: contact.id,
+              name: contact.name,
+              company: contact.company,
+              email: contact.email ?? null,
+              phone: contact.phone ?? null,
+              linkedin: contact.linkedin ?? null,
+              status: contact.status,
+              loops: contact.loops,
+              source: contact.source ?? null,
+            },
+          },
+        );
+        if (!result.ok) return { ok: false, error: result.error };
         return { ok: true };
       }
       default:

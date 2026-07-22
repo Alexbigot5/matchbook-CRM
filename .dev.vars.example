@@ -1,0 +1,15 @@
+# Local dev secrets for the HyperAgent integration.
+# Copy to `.dev.vars` (gitignored) and fill in real values, then restart the
+# dev server. For the deployed Worker, set the two keys with
+# `wrangler secret put CRM_API_KEY` / `wrangler secret put HYPERAGENT_API_KEY`
+# and set HYPERAGENT_TRIGGER_URL in wrangler.toml [vars] (or as a secret).
+
+# Bearer token HyperAgent must present when calling INTO the CRM API
+# (GET/POST /api/hyperagent). Generate a long random string.
+CRM_API_KEY=""
+
+# Bearer token the CRM presents when calling OUT to HyperAgent's trigger URL.
+HYPERAGENT_API_KEY=""
+
+# HyperAgent agent trigger endpoint (HTTP/webhook) the CRM POSTs to.
+HYPERAGENT_TRIGGER_URL=""
