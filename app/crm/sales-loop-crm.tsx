@@ -47,7 +47,9 @@ type State = {
   view: string;
   owner: string;
   sourceFilter: string;
+  stage: string;
   query: string;
+  selectedIds: string[];
   selectedId: string | null;
   menuId: string | null;
   detailMenu: boolean;
@@ -143,13 +145,48 @@ function LinkedinButton({ href, stopProp }: { href: string; stopProp: (e: any) =
   );
 }
 
+// Custom checkbox for row/bulk selection. `indeterminate` renders the "some
+// selected" dash used by the header select-all.
+function Checkbox({
+  checked,
+  indeterminate,
+  onClick,
+  title,
+}: {
+  checked: boolean;
+  indeterminate?: boolean;
+  onClick: (e: any) => void;
+  title?: string;
+}) {
+  const on = checked || indeterminate;
+  return (
+    <Box
+      as="button"
+      onClick={onClick}
+      title={title}
+      style={css(
+        `flex:0 0 auto; width:17px; height:17px; border-radius:5px; display:flex; align-items:center; justify-content:center; cursor:pointer; padding:0; border:1.5px solid ${on ? "#1a1a1a" : "#cfcfc9"}; background:${on ? "#1a1a1a" : "#fff"}; color:#fff;`,
+      )}
+      hover={css(on ? "filter:brightness(1.15);" : "border-color:#a9a9a3;")}
+    >
+      {indeterminate ? (
+        <span style={css("width:8px; height:2px; border-radius:1px; background:#fff;")} />
+      ) : checked ? (
+        <IconCheck style={css("width:11px; height:11px;")} />
+      ) : null}
+    </Box>
+  );
+}
+
 export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   const fetcher = useFetcher();
   const [state, setState] = useState<State>(() => ({
     view: "all",
     owner: "all",
     sourceFilter: "all",
+    stage: "all",
     query: "",
+    selectedIds: [],
     selectedId: null,
     menuId: null,
     detailMenu: false,
@@ -188,7 +225,17 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   const setView = (v: string) => patch({ view: v, menuId: null });
   const setOwner = (o: string) => patch({ owner: o, menuId: null });
   const setSourceFilter = (s: string) => patch({ sourceFilter: s, menuId: null });
+  const setStage = (s: string) => patch({ stage: s, menuId: null });
   const onSearch = (e: any) => patch({ query: e.target.value });
+  const toggleSelect = (id: string, e?: any) => {
+    if (e) e.stopPropagation();
+    patch((s) => ({
+      selectedIds: s.selectedIds.includes(id)
+        ? s.selectedIds.filter((x) => x !== id)
+        : [...s.selectedIds, id],
+    }));
+  };
+  const clearSelection = () => patch({ selectedIds: [] });
   const open = (id: string) =>
     patch({ selectedId: id, noteDraft: "", menuId: null, detailMenu: false });
   const close = () => patch({ selectedId: null, detailMenu: false });
@@ -390,6 +437,12 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     c.company.toLowerCase().includes(q);
   const bySource = (c: Contact) =>
     S.sourceFilter === "all" || (c.source || "") === S.sourceFilter;
+  const byStage = (c: Contact) =>
+    S.stage === "all"
+      ? true
+      : S.stage === "untouched"
+        ? c.touches.length === 0
+        : c.status === S.stage;
 
   // Cross-owner duplicate detection (same name under 2+ owners).
   const nameIndex = buildNameIndex(contacts);
@@ -444,9 +497,71 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       }))
     : [];
 
-  const visible = contacts.filter(
+  // Base set for the STAGE filter bar — everything except the stage filter, so
+  // the per-stage counts reflect what's reachable under the current view.
+  const stageBase = contacts.filter(
     (c) => byView(c) && byOwner(c) && bySource(c) && byQuery(c),
   );
+  const stageTabs = [
+    { key: "all", label: "All stages", dot: "", count: stageBase.length },
+    {
+      key: "untouched",
+      label: "Not touched",
+      dot: "#c4c4be",
+      count: stageBase.filter((c) => c.touches.length === 0).length,
+    },
+    ...STATUSES.map((s) => ({
+      key: s.id,
+      label: s.id,
+      dot: s.dot,
+      count: stageBase.filter((c) => c.status === s.id).length,
+    })),
+  ].map((t) => ({ ...t, active: S.stage === t.key, onClick: () => setStage(t.key) }));
+
+  const visible = stageBase.filter(byStage);
+
+  // ---- selection / bulk actions ----
+  const visibleIds = visible.map((c) => c.id);
+  const selectedSet = new Set(S.selectedIds);
+  const selectedCount = S.selectedIds.length;
+  const allVisibleSelected =
+    visibleIds.length > 0 && visibleIds.every((id) => selectedSet.has(id));
+  const someVisibleSelected = visibleIds.some((id) => selectedSet.has(id));
+  const toggleSelectAll = () =>
+    patch((s) => {
+      const set = new Set(s.selectedIds);
+      if (visibleIds.every((id) => set.has(id))) {
+        // all visible already selected → clear just the visible ones
+        visibleIds.forEach((id) => set.delete(id));
+      } else {
+        visibleIds.forEach((id) => set.add(id));
+      }
+      return { selectedIds: [...set] };
+    });
+  // Selected contacts that actually have an email — the export subset.
+  const selectedContacts = contacts.filter((c) => selectedSet.has(c.id));
+  const selectedEmails = selectedContacts
+    .map((c) => ({ name: c.name, email: (c.email || "").trim() }))
+    .filter((c) => c.email);
+  const exportEmails = () => {
+    if (!selectedEmails.length) return;
+    const esc = (v: string) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
+    const csv =
+      "email\n" + selectedEmails.map((c) => esc(c.email)).join("\n") + "\n";
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "emails.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+  const markAdsSent = () => {
+    if (!selectedCount) return;
+    submit({ intent: "markAdsSent", ids: JSON.stringify(S.selectedIds) });
+  };
 
   const prio = (c: Contact) => {
     if (!c.owner) return 0;
@@ -511,6 +626,8 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       id: c.id,
       name: c.name,
       company: c.company,
+      selected: selectedSet.has(c.id),
+      onToggleSelect: (e: any) => toggleSelect(c.id, e),
       hasConflict: conflict,
       hasLinkedin: !!linkedinUrl(c.linkedin),
       linkedinHref: linkedinUrl(c.linkedin),
@@ -795,6 +912,24 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
         </div>
 
         <div style={css("flex:1; overflow-y:auto; overflow-x:hidden;")}>
+          <div style={css("display:flex; align-items:center; gap:8px; padding:14px 24px 2px; flex-wrap:wrap;")}>
+            <span style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; margin-right:2px;")}>Stage</span>
+            {stageTabs.map((t) => (
+              <Box
+                as="button"
+                key={t.key}
+                onClick={t.onClick}
+                style={css(
+                  `display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:8px; font-size:12.5px; font-family:inherit; cursor:pointer; white-space:nowrap; border:1px solid ${t.active ? "#d8d8d3" : "transparent"}; background:${t.active ? "#eeeee9" : "none"}; color:${t.active ? "#1a1a1a" : "#575753"}; font-weight:${t.active ? "500" : "450"};`,
+                )}
+                hover={css("background:#f4f4f1;")}
+              >
+                {t.dot && <span style={css(`width:6px; height:6px; border-radius:4px; background:${t.dot};`)} />}
+                {t.label}
+                <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{t.count}</span>
+              </Box>
+            ))}
+          </div>
           {queue.length > 0 && (
             <div style={css("padding:16px 24px 4px;")}>
               <div style={css("display:flex; align-items:center; gap:8px; margin-bottom:10px;")}>
@@ -844,7 +979,17 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
           )}
 
           <div style={css("padding:16px 24px 40px;")}>
-            <div style={css("display:grid; grid-template-columns:minmax(0,2.4fr) 88px minmax(0,1.3fr) 132px 44px 40px; gap:12px; padding:0 10px 8px; font-size:11px; font-weight:500; color:#a3a39d; text-transform:uppercase; letter-spacing:0.04em;")}>
+            <div style={css("display:grid; grid-template-columns:28px minmax(0,2.4fr) 88px minmax(0,1.3fr) 132px 44px 40px; gap:12px; padding:0 10px 8px; font-size:11px; font-weight:500; color:#a3a39d; text-transform:uppercase; letter-spacing:0.04em; align-items:center;")}>
+              <div style={css("display:flex; align-items:center;")}>
+                {visible.length > 0 && (
+                  <Checkbox
+                    checked={allVisibleSelected}
+                    indeterminate={!allVisibleSelected && someVisibleSelected}
+                    onClick={toggleSelectAll}
+                    title={allVisibleSelected ? "Clear selection" : "Select all"}
+                  />
+                )}
+              </div>
               <div>Contact</div>
               <div>Loops</div>
               <div>Last touch</div>
@@ -856,7 +1001,10 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
             <div style={css("border:1px solid #ededea; border-radius:11px; overflow:hidden; background:#fff;")}>
               {rows.map((row) => (
                 <div key={row.id} style={css(row.rowStyle)}>
-                  <Box onClick={row.onOpen} style={css("display:grid; grid-template-columns:minmax(0,2.4fr) 88px minmax(0,1.3fr) 132px 44px 40px; gap:12px; align-items:center; padding:11px 10px; cursor:pointer;")} hover={css("background:#fafaf9;")}>
+                  <Box onClick={row.onOpen} style={css(`display:grid; grid-template-columns:28px minmax(0,2.4fr) 88px minmax(0,1.3fr) 132px 44px 40px; gap:12px; align-items:center; padding:11px 10px; cursor:pointer; background:${row.selected ? "#f6f7fb" : "transparent"};`)} hover={css("background:#fafaf9;")}>
+                    <div style={css("display:flex; align-items:center;")} onClick={row.stopProp}>
+                      <Checkbox checked={row.selected} onClick={row.onToggleSelect} title="Select contact" />
+                    </div>
                     <div style={css("display:flex; align-items:center; gap:10px; min-width:0;")}>
                       {row.hasConflict && (
                         <span title="Both teammates involved" style={css("flex:0 0 auto; width:6px; height:6px; border-radius:4px; background:#dc2626;")} />
@@ -920,6 +1068,44 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
           </div>
         </div>
       </main>
+
+      {/* BULK ACTION BAR */}
+      {selectedCount > 0 && (
+        <div style={css("position:fixed; left:50%; bottom:24px; transform:translateX(-50%); z-index:45; display:flex; align-items:center; gap:8px; padding:8px 8px 8px 16px; background:#1a1a1a; border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,0.28); animation:slcrm-slideDown 0.16s ease;")}>
+          <span style={css("font-size:13px; font-weight:500; color:#fff; white-space:nowrap;")}>{selectedCount} selected</span>
+          <span style={css("width:1px; height:20px; background:rgba(255,255,255,0.16); margin:0 2px;")} />
+          <Box
+            as="button"
+            onClick={exportEmails}
+            disabled={selectedEmails.length === 0}
+            title={selectedEmails.length === 0 ? "None of the selected contacts have an email" : `Export ${selectedEmails.length} email${selectedEmails.length === 1 ? "" : "s"} as CSV`}
+            style={css(`display:flex; align-items:center; gap:7px; padding:7px 12px; border:none; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; background:rgba(255,255,255,0.12); color:#fff; cursor:${selectedEmails.length === 0 ? "default" : "pointer"}; opacity:${selectedEmails.length === 0 ? "0.45" : "1"}; white-space:nowrap;`)}
+            hover={css(selectedEmails.length === 0 ? "" : "background:rgba(255,255,255,0.2);")}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 4v10m0 0-4-4m4 4 4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /><path d="M5 18v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+            Export emails
+          </Box>
+          <Box
+            as="button"
+            onClick={markAdsSent}
+            title="Log a Dark-ad touchpoint (today) for every selected contact"
+            style={css("display:flex; align-items:center; gap:7px; padding:7px 13px; border:none; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; background:#6d3fc4; color:#fff; cursor:pointer; white-space:nowrap;")}
+            hover={css("background:#7d4ed6;")}
+          >
+            <span style={css("display:flex; color:#fff;")} dangerouslySetInnerHTML={{ __html: CH.ad.icon }} />
+            Mark ads sent
+          </Box>
+          <Box
+            as="button"
+            onClick={clearSelection}
+            title="Clear selection"
+            style={css("display:flex; align-items:center; justify-content:center; width:30px; height:30px; border:none; border-radius:8px; background:rgba(255,255,255,0.08); color:#cfcfcf; cursor:pointer; flex:0 0 auto;")}
+            hover={css("background:rgba(255,255,255,0.16);")}
+          >
+            <IconClose size={15} />
+          </Box>
+        </div>
+      )}
 
       {/* DETAIL SLIDE-OVER */}
       {detail && (
