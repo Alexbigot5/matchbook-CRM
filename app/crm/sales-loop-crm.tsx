@@ -222,7 +222,9 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   }, [fetcher.state, fetcher.data]);
 
   // ---- handlers ----
-  const setView = (v: string) => patch({ view: v, menuId: null });
+  // The source filter only applies inside Loop 2, so reset it when leaving.
+  const setView = (v: string) =>
+    patch(v === "loop2" ? { view: v, menuId: null } : { view: v, menuId: null, sourceFilter: "all" });
   const setOwner = (o: string) => patch({ owner: o, menuId: null });
   const setSourceFilter = (s: string) => patch({ sourceFilter: s, menuId: null });
   const setStage = (s: string) => patch({ stage: s, menuId: null });
@@ -486,13 +488,30 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     { key: "unassigned", label: "Unassigned", count: ownerCounts.unassigned, hasAvatar: false, color: "", initial: "" },
   ].map((o) => ({ ...o, style: tabBtn(S.owner === o.key), onClick: () => setOwner(o.key) }));
 
-  const sourceTabs = sources.length
+  // Base set for the SOURCE filter row (Loop 2 only) — everything except the
+  // source and stage filters, so per-source counts reflect the current view.
+  const sourceBase = contacts.filter(
+    (c) => byView(c) && byOwner(c) && byQuery(c),
+  );
+  const sourceInViewCounts = new Map<string, number>();
+  for (const c of sourceBase) {
+    const s = (c.source || "").trim();
+    if (s) sourceInViewCounts.set(s, (sourceInViewCounts.get(s) ?? 0) + 1);
+  }
+  const sourcesInView = [...sourceInViewCounts.keys()].sort((a, b) =>
+    a.localeCompare(b),
+  );
+  const sourceTabs = sourcesInView.length
     ? [
-        { key: "all", label: "All sources", count: counts.all },
-        ...sources.map((s) => ({ key: s, label: s, count: sourceCounts.get(s) ?? 0 })),
+        { key: "all", label: "All sources", count: sourceBase.length },
+        ...sourcesInView.map((s) => ({
+          key: s,
+          label: s,
+          count: sourceInViewCounts.get(s) ?? 0,
+        })),
       ].map((t) => ({
         ...t,
-        style: tabBtn(S.sourceFilter === t.key),
+        active: S.sourceFilter === t.key,
         onClick: () => setSourceFilter(t.key),
       }))
     : [];
@@ -863,21 +882,6 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
           </Box>
         ))}
 
-        {sourceTabs.length > 0 && (
-          <>
-            <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; padding:18px 8px 6px;")}>Community / Event</div>
-            {sourceTabs.map((t) => (
-              <Box as="button" key={t.key} onClick={t.onClick} style={css(t.style)} hover={css("background:#f0f0ec;")}>
-                <span style={css("display:flex; align-items:center; gap:9px; min-width:0;")}>
-                  <span style={css(`width:8px; height:8px; border-radius:3px; background:${t.key === "all" ? "#c4c4be" : "#e0930a"}; flex:0 0 auto;`)} />
-                  <span style={css("white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{t.label}</span>
-                </span>
-                <span style={css(MONO + "font-size:11px; color:#a3a39d; flex:0 0 auto;")}>{t.count}</span>
-              </Box>
-            ))}
-          </>
-        )}
-
         <div style={css("margin-top:auto; padding:12px 8px; border-top:1px solid #ededea; font-size:11px; color:#a3a39d; line-height:1.5;")}>
           <div><span style={css("color:#575753;")}>Loop 1</span> · always-on outbound</div>
           <div><span style={css("color:#b45309;")}>Loop 2</span> · event/community blitz</div>
@@ -914,6 +918,31 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
         </div>
 
         <div style={css("flex:1; overflow-y:auto; overflow-x:hidden;")}>
+          {S.view === "loop2" && sourceTabs.length > 0 && (
+            <div style={css("display:flex; align-items:center; gap:8px; padding:14px 24px 2px; flex-wrap:wrap;")}>
+              <span style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; margin-right:2px;")}>Source</span>
+              {sourceTabs.map((t) => (
+                <Box
+                  as="button"
+                  key={t.key}
+                  onClick={t.onClick}
+                  style={css(
+                    `display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:8px; font-size:12.5px; font-family:inherit; cursor:pointer; white-space:nowrap; border:1px solid ${t.active ? (t.key === "all" ? "#d8d8d3" : "#f0e4cf") : "transparent"}; background:${t.active ? (t.key === "all" ? "#eeeee9" : "#faf3e6") : "none"}; color:${t.active ? (t.key === "all" ? "#1a1a1a" : "#9a6f34") : "#575753"}; font-weight:${t.active ? "500" : "450"};`,
+                  )}
+                  hover={css("background:#f4f4f1;")}
+                >
+                  {t.key !== "all" && (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" style={css("flex:0 0 auto; color:#c69a4f;")}>
+                      <path d="M4 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2 2 2 0 0 0 0 4 2 2 0 0 1-2 2H6a2 2 0 0 1-2-2 2 2 0 0 0 0-4Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+                      <path d="M12 6v12" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1.5 2.5" />
+                    </svg>
+                  )}
+                  {t.label}
+                  <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{t.count}</span>
+                </Box>
+              ))}
+            </div>
+          )}
           <div style={css("display:flex; align-items:center; gap:8px; padding:14px 24px 2px; flex-wrap:wrap;")}>
             <span style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; margin-right:2px;")}>Stage</span>
             {stageTabs.map((t) => (
