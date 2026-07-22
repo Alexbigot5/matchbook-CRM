@@ -87,6 +87,62 @@ const GLOBAL_CSS = `
 
 const MONO = "font-family:'Geist Mono',monospace;";
 
+// Normalize a stored LinkedIn value (URL or bare handle) into an absolute href.
+// Empty when there's nothing to link to.
+const linkedinUrl = (raw: string | null | undefined) => {
+  const v = (raw || "").trim();
+  if (!v) return "";
+  return /^https?:\/\//i.test(v) ? v : "https://" + v;
+};
+
+// Small amber pill marking a Loop 2 contact's community/event of origin.
+function SourceTag({ label }: { label: string }) {
+  return (
+    <span
+      title={"From " + label}
+      style={css(
+        "display:inline-flex; align-items:center; gap:4px; max-width:150px; padding:1px 7px 1px 6px; border-radius:6px; font-size:11px; font-weight:500; background:#faf3e6; color:#9a6f34; border:1px solid #f0e4cf; white-space:nowrap; overflow:hidden; flex:0 0 auto;",
+      )}
+    >
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style={css("flex:0 0 auto;")}>
+        <path
+          d="M4 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2 2 2 0 0 0 0 4 2 2 0 0 1-2 2H6a2 2 0 0 1-2-2 2 2 0 0 0 0-4Z"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+        <path d="M12 6v12" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1.5 2.5" />
+      </svg>
+      <span style={css("overflow:hidden; text-overflow:ellipsis;")}>{label}</span>
+    </span>
+  );
+}
+
+// Small clickable LinkedIn glyph that opens the profile in a new tab. Stops
+// click propagation so it doesn't also open the contact detail panel.
+function LinkedinButton({ href, stopProp }: { href: string; stopProp: (e: any) => void }) {
+  return (
+    <Box
+      as="a"
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={stopProp}
+      title="Open LinkedIn profile"
+      style={css(
+        "flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:5px; color:" +
+          CH.linkedin.fg +
+          "; background:" +
+          CH.linkedin.bg +
+          "; text-decoration:none;",
+      )}
+      hover={css("filter:brightness(0.95);")}
+    >
+      <span dangerouslySetInnerHTML={{ __html: CH.linkedin.icon }} style={css("display:flex;")} />
+    </Box>
+  );
+}
+
 export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   const fetcher = useFetcher();
   const [state, setState] = useState<State>(() => ({
@@ -415,6 +471,8 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     return {
       name: c.name,
       company: c.company,
+      hasSource: c.loops.includes(2) && !!(c.source && c.source.trim()),
+      source: (c.source || "").trim(),
       reason: att.reason,
       ownerColor: o ? o.color : "#b0b0aa",
       ownerInitial: o ? o.initial : "?",
@@ -454,6 +512,10 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       name: c.name,
       company: c.company,
       hasConflict: conflict,
+      hasLinkedin: !!linkedinUrl(c.linkedin),
+      linkedinHref: linkedinUrl(c.linkedin),
+      hasSource: c.loops.includes(2) && !!(c.source && c.source.trim()),
+      source: (c.source || "").trim(),
       loops: c.loops.map((l) => loopBadge(l, true)),
       touch: {
         channel: ch.label,
@@ -753,7 +815,10 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                       <span style={css(`width:30px; height:30px; border-radius:8px; background:${qc.ownerColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; flex:0 0 auto;`)}>{qc.ownerInitial}</span>
                       <span style={css("display:flex; flex-direction:column; gap:1px; min-width:0; flex:1;")}>
                         <span style={css("font-size:13.5px; font-weight:500; color:#1a1a1a; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{qc.name}</span>
-                        <span style={css("font-size:11.5px; color:#9a9a95; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{qc.company}</span>
+                        <span style={css("display:flex; align-items:center; gap:5px; min-width:0;")}>
+                          <span style={css("font-size:11.5px; color:#9a9a95; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{qc.company}</span>
+                          {qc.hasSource && <SourceTag label={qc.source} />}
+                        </span>
                       </span>
                       <span style={css("display:flex; gap:3px; flex:0 0 auto;")}>
                         {qc.loops.map((lp, j) => (
@@ -797,8 +862,14 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                         <span title="Both teammates involved" style={css("flex:0 0 auto; width:6px; height:6px; border-radius:4px; background:#dc2626;")} />
                       )}
                       <div style={css("min-width:0;")}>
-                        <div style={css("font-size:13.5px; font-weight:500; color:#1a1a1a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.25;")}>{row.name}</div>
-                        <div style={css("font-size:12px; color:#9a9a95; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.25;")}>{row.company}</div>
+                        <div style={css("display:flex; align-items:center; gap:6px; min-width:0;")}>
+                          <span style={css("font-size:13.5px; font-weight:500; color:#1a1a1a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.25;")}>{row.name}</span>
+                          {row.hasLinkedin && <LinkedinButton href={row.linkedinHref} stopProp={row.stopProp} />}
+                        </div>
+                        <div style={css("display:flex; align-items:center; gap:6px; min-width:0;")}>
+                          <span style={css("font-size:12px; color:#9a9a95; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.25;")}>{row.company}</span>
+                          {row.hasSource && <SourceTag label={row.source} />}
+                        </div>
                       </div>
                     </div>
                     <div style={css("display:flex; gap:4px;")}>
