@@ -18,7 +18,7 @@ export type Contact = {
   id: string;
   name: string;
   company: string;
-  // Contact-info channels (nullable — populated via the Add form / CSV import).
+  // Contact-info channels (nullable - populated via the Add form / CSV import).
   email?: string | null;
   phone?: string | null;
   linkedin?: string | null;
@@ -31,7 +31,7 @@ export type Contact = {
   // Absolute due-date label ("Jul 20") for followUp, precomputed server-side so
   // no Date math runs during render. Null when there is no follow-up.
   followUpDateLabel?: string | null;
-  // Loop 2 origin — the community/event a contact came from (e.g. "Newtopia").
+  // Loop 2 origin - the community/event a contact came from (e.g. "Newtopia").
   source?: string | null;
   // When a Loop 2 contact was resumed into Loop 1 outbound: raw ISO timestamp
   // plus a precomputed "Jul 20"-style label (null when never resumed).
@@ -129,7 +129,7 @@ export function hasConflict(c: Contact) {
 // --- Duplicate / cross-owner conflict detection ---------------------------
 // Touchpoints have no write path, so touch-owner conflict (`hasConflict`) never
 // fires. Instead we flag when the SAME contact name is held by two different
-// owners — e.g. both Tom and Britton have a "Jane Smith". Detection needs the
+// owners - e.g. both Tom and Britton have a "Jane Smith". Detection needs the
 // whole contact list, so it's built once into a name index.
 
 export type NameIndex = Map<string, Contact[]>;

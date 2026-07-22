@@ -488,7 +488,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     { key: "unassigned", label: "Unassigned", count: ownerCounts.unassigned, hasAvatar: false, color: "", initial: "" },
   ].map((o) => ({ ...o, style: tabBtn(S.owner === o.key), onClick: () => setOwner(o.key) }));
 
-  // Base set for the SOURCE filter row (Loop 2 only) — everything except the
+  // Base set for the SOURCE filter row (Loop 2 only) - everything except the
   // source and stage filters, so per-source counts reflect the current view.
   const sourceBase = contacts.filter(
     (c) => byView(c) && byOwner(c) && byQuery(c),
@@ -516,7 +516,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       }))
     : [];
 
-  // Base set for the STAGE filter bar — everything except the stage filter, so
+  // Base set for the STAGE filter bar - everything except the stage filter, so
   // the per-stage counts reflect what's reachable under the current view.
   const stageBase = contacts.filter(
     (c) => byView(c) && byOwner(c) && bySource(c) && byQuery(c),
@@ -557,7 +557,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       }
       return { selectedIds: [...set] };
     });
-  // Selected contacts that actually have an email — the export subset.
+  // Selected contacts that actually have an email - the export subset.
   const selectedContacts = contacts.filter((c) => selectedSet.has(c.id));
   const selectedEmails = selectedContacts
     .map((c) => ({ name: c.name, email: (c.email || "").trim() }))
@@ -616,7 +616,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       statusStyle: statusPill(c.status, false),
       statusDot: m.dot,
       touchChannel: ch ? ch.label : "No touch",
-      touchAgo: last ? ago(last.daysAgo) : "—",
+      touchAgo: last ? ago(last.daysAgo) : "-",
       touchIconHtml: { __html: ch ? ch.icon : "" },
       touchWrap: `width:20px;height:20px;border-radius:5px;background:${ch ? ch.bg : "#f2f2f0"};color:${ch ? ch.fg : "#a3a39d"};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
       loops: c.loops.map((l) => loopBadge(l, true)),
@@ -657,7 +657,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       loops: c.loops.map((l) => loopBadge(l, true)),
       touch: {
         channel: ch.label,
-        ago: last ? ago(last.daysAgo) : "—",
+        ago: last ? ago(last.daysAgo) : "-",
         iconHtml: { __html: ch.icon },
         iconWrap: `width:22px;height:22px;border-radius:6px;background:${ch.bg};color:${ch.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
       },
@@ -714,7 +714,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       followLabel = "No reminder set";
     }
     const vc = OWNERS[VIEWER];
-    // Contact-info rows — only the channels that have a value. Icons reuse the
+    // Contact-info rows - only the channels that have a value. Icons reuse the
     // channel SVG strings from CH (rendered via dangerouslySetInnerHTML below).
     const linkedinRaw = (sel.linkedin || "").trim();
     const linkedinHref = linkedinRaw
@@ -775,7 +775,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       hasConflict: conflict,
       conflictText: conflict
         ? sel.owner
-          ? `Also owned by ${conflictWith.join(" & ")} — you both have a contact named “${sel.name}”. Confirm who's driving before the next outreach.`
+          ? `Also owned by ${conflictWith.join(" & ")} - you both have a contact named “${sel.name}”. Confirm who's driving before the next outreach.`
           : `${conflictWith.join(" & ")} ${conflictWith.length > 1 ? "each have" : "has"} a contact named “${sel.name}”. Assign one owner to avoid double-touching.`
         : "",
       followLabel,
@@ -795,7 +795,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
         color: (OWNERS[n.author] || { color: "#b0b0aa" }).color,
         initial: (OWNERS[n.author] || { initial: "?" }).initial,
       })),
-      lastBy: lastT ? lastT.owner : "—",
+      lastBy: lastT ? lastT.owner : "-",
       timeline: sel.touches.map((t, i) => {
         const c2 = CH[t.ch];
         return {
@@ -1431,7 +1431,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                     </div>
                     <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>
                       {S.csvFileName
-                        ? "Click Import contacts to finish — or drop another file."
+                        ? "Click Import contacts to finish - or drop another file."
                         : "One contact per line: Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn"}
                     </div>
                   </Box>
