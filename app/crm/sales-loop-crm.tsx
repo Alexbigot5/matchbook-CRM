@@ -27,6 +27,7 @@ import {
   IconClose,
   IconPlus,
   IconSearch,
+  IconTrash,
   IconUpload,
   IconWarn,
 } from "./ui";
@@ -60,6 +61,8 @@ type State = {
   csvError: string;
   csvDragging: boolean;
   csvFileName: string;
+  deleteIds: string[];
+  actionError: string;
 };
 
 type ActionResult = { ok: true } | { ok: false; error: string };
@@ -197,6 +200,8 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     csvError: "",
     csvDragging: false,
     csvFileName: "",
+    deleteIds: [],
+    actionError: "",
   }));
 
   const patch = (u: Partial<State> | ((s: State) => Partial<State>)) =>
@@ -214,12 +219,33 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     if (fetcher.state !== "idle" || !fetcher.data) return;
     const result = fetcher.data as ActionResult;
     if (result.ok) {
-      patch((s) => (s.modal ? { modal: null, csvText: "", csvError: "" } : {}));
+      patch((s) =>
+        s.modal
+          ? { modal: null, csvText: "", csvError: "", actionError: "", deleteIds: [] }
+          : {},
+      );
     } else {
-      patch({ csvError: result.error });
+      patch({ actionError: result.error });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.state, fetcher.data]);
+
+  // Contacts can vanish under the UI (deleted here or in another tab), so drop
+  // selection ids that no longer exist and close a detail panel whose contact is
+  // gone. Returning the same state object when nothing changed avoids a re-render.
+  useEffect(() => {
+    const live = new Set(contacts.map((c) => c.id));
+    setState((s) => {
+      const kept = s.selectedIds.filter((id) => live.has(id));
+      const staleDetail = !!s.selectedId && !live.has(s.selectedId);
+      if (kept.length === s.selectedIds.length && !staleDetail) return s;
+      return {
+        ...s,
+        selectedIds: kept,
+        ...(staleDetail ? { selectedId: null, detailMenu: false } : {}),
+      };
+    });
+  }, [contacts]);
 
   // ---- handlers ----
   // The source filter only applies inside Loop 2, so reset it when leaving.
@@ -290,11 +316,39 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
   };
 
   const defaultLoops = () => (S.view === "loop2" ? [2] : [1]);
-  const openAdd = () => patch({ modal: "add", form: blankForm(defaultLoops()) });
+  const openAdd = () =>
+    patch({ modal: "add", form: blankForm(defaultLoops()), actionError: "" });
   const openCsv = () =>
-    patch({ modal: "csv", csvText: "", csvError: "", csvDragging: false, csvFileName: "" });
+    patch({
+      modal: "csv",
+      csvText: "",
+      csvError: "",
+      actionError: "",
+      csvDragging: false,
+      csvFileName: "",
+    });
   const closeModal = () =>
-    patch({ modal: null, csvError: "", csvDragging: false, csvFileName: "" });
+    patch({
+      modal: null,
+      csvError: "",
+      actionError: "",
+      csvDragging: false,
+      csvFileName: "",
+      deleteIds: [],
+    });
+
+  // Deleting is irreversible (notes and touchpoints go with the contact), so it
+  // always routes through the confirm modal. `deleteIds` carries the pending
+  // targets, which is what makes one flow serve both the detail panel and the
+  // bulk selection bar.
+  const askDelete = (ids: string[]) => {
+    if (!ids.length) return;
+    patch({ modal: "delete", deleteIds: ids, actionError: "", menuId: null, detailMenu: false });
+  };
+  const confirmDelete = () => {
+    if (!S.deleteIds.length) return;
+    submit({ intent: "deleteContacts", ids: JSON.stringify(S.deleteIds) });
+  };
 
   // Read a dropped/selected .csv into the paste textarea, then the existing
   // importCsv parser handles it. FileReader only runs in these browser event
@@ -589,6 +643,16 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     if (!selectedCount) return;
     submit({ intent: "markAdsSent", ids: JSON.stringify(S.selectedIds) });
   };
+  const deleteSelected = () => askDelete([...S.selectedIds]);
+
+  // Pending-delete summary for the confirm modal. Resolved against `contacts` so
+  // a single target can be named; a count covers the bulk case.
+  const deleteTargets = contacts.filter((c) => S.deleteIds.includes(c.id));
+  const deleteLabel =
+    deleteTargets.length === 1
+      ? "“" + deleteTargets[0].name + "”"
+      : deleteTargets.length + " contacts";
+  const deletePending = fetcher.state !== "idle";
 
   const prio = (c: Contact) => {
     if (!c.owner) return 0;
@@ -780,6 +844,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       resumeLoop1: () => resumeLoop1(),
       draftOutreach: () => draftOutreach(),
       agentPending: fetcher.state !== "idle",
+      onDelete: () => askDelete([sel.id]),
       hasConflict: conflict,
       conflictText: conflict
         ? sel.owner
@@ -1136,6 +1201,16 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
           </Box>
           <Box
             as="button"
+            onClick={deleteSelected}
+            title={`Delete ${selectedCount} contact${selectedCount === 1 ? "" : "s"}`}
+            style={css("display:flex; align-items:center; gap:7px; padding:7px 12px; border:none; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; background:rgba(220,38,38,0.18); color:#fca5a5; cursor:pointer; white-space:nowrap;")}
+            hover={css("background:#dc2626; color:#fff;")}
+          >
+            <IconTrash />
+            Delete
+          </Box>
+          <Box
+            as="button"
             onClick={clearSelection}
             title="Clear selection"
             style={css("display:flex; align-items:center; justify-content:center; width:30px; height:30px; border:none; border-radius:8px; background:rgba(255,255,255,0.08); color:#cfcfcf; cursor:pointer; flex:0 0 auto;")}
@@ -1335,6 +1410,17 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                   ))}
                 </div>
               </div>
+
+              <div style={css("margin-top:18px; border:1px solid #f3dcdc; border-radius:11px; padding:14px; background:#fefafa; display:flex; align-items:center; justify-content:space-between; gap:12px;")}>
+                <div style={css("min-width:0;")}>
+                  <div style={css("font-size:13px; font-weight:500; color:#991b1b;")}>Delete contact</div>
+                  <div style={css("font-size:12px; color:#a16060; margin-top:1px;")}>Removes this contact with its notes and touchpoint history. Can’t be undone.</div>
+                </div>
+                <Box as="button" onClick={detail.onDelete} style={css("display:flex; align-items:center; gap:7px; border:1px solid #f0cccc; background:#fff; color:#b91c1c; padding:7px 13px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer; white-space:nowrap; flex:0 0 auto;")} hover={css("background:#dc2626; color:#fff; border-color:#dc2626;")}>
+                  <IconTrash />
+                  Delete
+                </Box>
+              </div>
             </div>
           </div>
         </>
@@ -1453,10 +1539,52 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
                         : "One contact per line: Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn"}
                     </div>
                   </Box>
-                  {S.csvError && <div style={css("font-size:12px; color:#c2410c;")}>{S.csvError}</div>}
+                  {(S.csvError || S.actionError) && (
+                    <div style={css("font-size:12px; color:#c2410c;")}>{S.csvError || S.actionError}</div>
+                  )}
                   <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
                     <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
                     <Box as="button" onClick={importCsv} style={css("border:none; background:#1a1a1a; color:#fff; padding:9px 16px; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;")} hover={css("background:#333;")}>Import contacts</Box>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {S.modal === "delete" && (
+              <>
+                <div style={css("padding:20px 22px 16px; border-bottom:1px solid #ededea; display:flex; align-items:center; justify-content:space-between;")}>
+                  <div style={css("font-size:16px; font-weight:600; letter-spacing:-0.01em;")}>
+                    Delete {deleteTargets.length === 1 ? "contact" : deleteTargets.length + " contacts"}
+                  </div>
+                  <Box as="button" onClick={closeModal} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
+                </div>
+                <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:14px;")}>
+                  <div style={css("display:flex; gap:11px; align-items:flex-start;")}>
+                    <span style={css("width:32px; height:32px; border-radius:9px; background:#fef2f2; color:#dc2626; display:flex; align-items:center; justify-content:center; flex:0 0 auto;")}>
+                      <IconTrash size={16} />
+                    </span>
+                    <div style={css("font-size:13px; color:#3a3a38; line-height:1.55;")}>
+                      Permanently delete {deleteLabel}, along with every note and touchpoint
+                      recorded against {deleteTargets.length === 1 ? "them" : "each of them"}. This can’t be undone.
+                    </div>
+                  </div>
+                  {deleteTargets.length > 1 && (
+                    <div style={css("max-height:150px; overflow-y:auto; border:1px solid #ededea; border-radius:10px; background:#fbfbfa;")}>
+                      {deleteTargets.map((c, j) => (
+                        <div key={c.id} style={css(`display:flex; align-items:center; gap:8px; padding:8px 12px; font-size:12.5px; color:#3a3a38; ${j > 0 ? "border-top:1px solid #f2f2f0;" : ""}`)}>
+                          <span style={css("font-weight:500;")}>{c.name}</span>
+                          {c.company && <span style={css("color:#9a9a95;")}>· {c.company}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {S.actionError && <div style={css("font-size:12px; color:#c2410c;")}>{S.actionError}</div>}
+                  <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
+                    <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
+                    <Box as="button" onClick={confirmDelete} disabled={deletePending} style={css(`display:flex; align-items:center; gap:7px; border:none; background:#dc2626; color:#fff; padding:9px 16px; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:${deletePending ? "default" : "pointer"}; opacity:${deletePending ? "0.6" : "1"};`)} hover={css(deletePending ? "" : "background:#b91c1c;")}>
+                      <IconTrash />
+                      {deletePending ? "Deleting…" : "Delete"}
+                    </Box>
                   </div>
                 </div>
               </>
