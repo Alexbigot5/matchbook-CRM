@@ -13,3 +13,17 @@ HYPERAGENT_API_KEY=""
 
 # HyperAgent agent trigger endpoint (HTTP/webhook) the CRM POSTs to.
 HYPERAGENT_TRIGGER_URL=""
+
+# --- Auth (magic-link sign-in) ------------------------------------------------
+# Signs session cookies. REQUIRED: better-auth throws on every request in a
+# production build if this is unset, so set it before deploying:
+#   openssl rand -base64 32 | wrangler secret put BETTER_AUTH_SECRET
+BETTER_AUTH_SECRET=""
+
+# Resend API key used to send sign-in links (wrangler secret put RESEND_API_KEY).
+RESEND_API_KEY=""
+
+# Optional. The auth base URL is normally derived from the incoming request, so
+# local dev, wrangler dev, and production all work with no config. Set this only
+# if a proxy rewrites the host.
+# BETTER_AUTH_URL=""

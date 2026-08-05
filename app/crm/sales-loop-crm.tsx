@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useFetcher } from "react-router";
+import { Form, useFetcher } from "react-router";
 import {
   ago,
   buildNameIndex,
@@ -15,7 +15,6 @@ import {
   statusMeta,
   statusPill,
   STATUSES,
-  VIEWER,
 } from "./data";
 import {
   Box,
@@ -181,7 +180,9 @@ function Checkbox({
   );
 }
 
-export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
+export type Viewer = { name: string; initial: string; color: string };
+
+export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer: Viewer }) {
   const fetcher = useFetcher();
   const [state, setState] = useState<State>(() => ({
     view: "all",
@@ -783,7 +784,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
     } else {
       followLabel = "No reminder set";
     }
-    const vc = OWNERS[VIEWER];
+    const vc = viewer;
     // Contact-info rows - only the channels that have a value. Icons reuse the
     // channel SVG strings from CH (rendered via dangerouslySetInnerHTML below).
     const linkedinRaw = (sel.linkedin || "").trim();
@@ -859,7 +860,7 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
       clearFollow: () => clearFollow(),
       viewerColor: vc.color,
       viewerInitial: vc.initial,
-      viewerName: VIEWER,
+      viewerName: viewer.name,
       hasNotes: sel.notes.length > 0,
       notes: sel.notes.map((n) => ({
         author: n.author,
@@ -955,9 +956,25 @@ export function SalesLoopCRM({ contacts }: { contacts: Contact[] }) {
           </Box>
         ))}
 
-        <div style={css("margin-top:auto; padding:12px 8px; border-top:1px solid #ededea; font-size:11px; color:#a3a39d; line-height:1.5;")}>
+        <div style={css("margin-top:auto; padding:12px 8px 10px; border-top:1px solid #ededea; font-size:11px; color:#a3a39d; line-height:1.5;")}>
           <div><span style={css("color:#575753;")}>Loop 1</span> · always-on outbound</div>
           <div><span style={css("color:#b45309;")}>Loop 2</span> · event/community blitz</div>
+        </div>
+
+        <div style={css("display:flex; align-items:center; gap:8px; padding:10px 8px 2px; border-top:1px solid #ededea;")}>
+          <span style={css(`width:20px; height:20px; border-radius:6px; background:${viewer.color}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; flex:0 0 auto;`)}>{viewer.initial}</span>
+          <span style={css("font-size:12px; font-weight:500; color:#575753; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}>{viewer.name}</span>
+          <Form method="post" action="/logout">
+            <Box
+              as="button"
+              type="submit"
+              title="Sign out"
+              style={css("background:none; border:none; padding:3px 6px; border-radius:6px; font-size:11px; font-family:inherit; color:#a3a39d; cursor:pointer;")}
+              hover={css("background:#f0f0ec; color:#575753;")}
+            >
+              Sign out
+            </Box>
+          </Form>
         </div>
       </aside>
 
