@@ -1,7 +1,8 @@
 import type { Route } from "./+types/home";
 import { SalesLoopCRM } from "../crm/sales-loop-crm";
 import { appContext } from "../../load-context";
-import { VIEWER } from "../crm/data";
+import { OWNERS } from "../crm/data";
+import { requireUser } from "../lib/session.server";
 import {
   addNote,
   clearFollowUp,
@@ -39,10 +40,21 @@ export function links() {
   ];
 }
 
-export async function loader({ context }: Route.LoaderArgs) {
-  const { DB } = context.get(appContext);
+export async function loader({ request, context }: Route.LoaderArgs) {
+  const ctx = context.get(appContext);
+  const { DB } = ctx;
+  // Throws a redirect to /login when there's no valid, allowlisted session.
+  const user = await requireUser(request, ctx);
+  // Resolve the avatar server-side so the UI renders purely from loader data.
+  const owner = OWNERS[user.name] ?? {
+    initial: (user.name.slice(0, 1) || "?").toUpperCase(),
+    color: "#b0b0aa",
+  };
   try {
-    return { contacts: await listContacts(DB, Date.now()) };
+    return {
+      contacts: await listContacts(DB, Date.now()),
+      viewer: { name: user.name, initial: owner.initial, color: owner.color },
+    };
   } catch (err) {
     // Surface the real cause in `wrangler tail` — the production ErrorBoundary
     // hides it. A throw here usually means the D1 schema is missing/outdated
@@ -71,7 +83,11 @@ function parseLoopsField(value: FormDataEntryValue | null): number[] {
 }
 
 export async function action({ request, context }: Route.ActionArgs): Promise<ActionResult> {
-  const { DB, HYPERAGENT_TRIGGER_URL, HYPERAGENT_API_KEY } = context.get(appContext);
+  const ctx = context.get(appContext);
+  const { DB, HYPERAGENT_TRIGGER_URL, HYPERAGENT_API_KEY } = ctx;
+  // Checked independently of the loader — otherwise every mutation below would
+  // still be reachable without a session.
+  const user = await requireUser(request, ctx);
   const form = await request.formData();
   const intent = form.get("intent")?.toString();
 
@@ -88,7 +104,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         const id = form.get("id")?.toString();
         const text = (form.get("text")?.toString() ?? "").trim();
         if (!id || !text) return { ok: false, error: "Missing id or note text." };
-        await addNote(DB, id, VIEWER, text);
+        await addNote(DB, id, user.name, text);
         return { ok: true };
       }
       case "logMeeting": {
@@ -97,8 +113,8 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         if (!id || !text) return { ok: false, error: "Missing id or note text." };
         // Save the note AND record a Meeting touchpoint in the timeline. Status
         // is left untouched (changed manually via the detail dropdown).
-        await addNote(DB, id, VIEWER, text);
-        await logTouchpoint(DB, id, "meeting", VIEWER, text);
+        await addNote(DB, id, user.name, text);
+        await logTouchpoint(DB, id, "meeting", user.name, text);
         return { ok: true };
       }
       case "snooze": {
@@ -145,7 +161,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         if (!Array.isArray(ids) || !ids.length) {
           return { ok: false, error: "No contacts selected." };
         }
-        await markAdsSent(DB, ids.map(String), VIEWER);
+        await markAdsSent(DB, ids.map(String), user.name);
         return { ok: true };
       }
       case "deleteContacts": {
@@ -213,5 +229,5 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
 }
 
 export default function Home({ loaderData }: Route.ComponentProps) {
-  return <SalesLoopCRM contacts={loaderData.contacts} />;
+  return <SalesLoopCRM contacts={loaderData.contacts} viewer={loaderData.viewer} />;
 }

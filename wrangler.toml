@@ -13,6 +13,8 @@ directory = "./build/client"
 # (and mirror all three in a local .dev.vars; see .dev.vars.example).
 [vars]
 HYPERAGENT_TRIGGER_URL = ""
+# Sender for magic-link sign-in emails. The domain must be verified in Resend.
+AUTH_EMAIL_FROM = "Matchbook CRM <noreply@onmatchbook.com>"
 
 [[d1_databases]]
 binding = "DB"

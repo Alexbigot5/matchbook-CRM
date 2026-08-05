@@ -9,7 +9,7 @@ React Router SSR app deployed to Cloudflare Workers.
 - **React Router v8** (`ssr: true`) — full-stack framework mode, not the library.
 - **Cloudflare Workers** runtime (`workers/app.ts` is the entry), with `nodejs_compat`.
 - **Cloudflare D1** (SQLite) via the `DB` binding — provisioned but see "Data" below.
-- **better-auth** (email + password) over D1 via `kysely-d1` — wired up, not yet used by any UI.
+- **better-auth** (magic link over email) on D1 — gates the whole CRM. See "Auth" below.
 - **Tailwind CSS v4** (via `@tailwindcss/vite`) — only lightly used; the CRM uses inline styles.
 - **Vite 8** + **TypeScript** (strict), React 19.
 
@@ -34,14 +34,18 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
 
 1. `workers/app.ts` — Cloudflare `fetch` handler. Builds a router context per request via
    `createRouterContext(env)` and delegates to React Router's request handler.
-2. `load-context.ts` — defines the load context (`{ DB, auth }`). React Router v8 uses a
-   `RouterContextProvider`, so **loaders/actions read context with `context.get(appContext)`**,
-   not a plain `context.DB`. `appContext` is the exported `createContext` handle.
-3. `app/routes.ts` — route table. Currently a **single index route** → `routes/home.tsx`.
+2. `load-context.ts` — defines the load context (`{ DB, getAuth, ...integration vars }`). React
+   Router v8 uses a `RouterContextProvider`, so **loaders/actions read context with
+   `context.get(appContext)`**, not a plain `context.DB`. `appContext` is the exported
+   `createContext` handle. It takes the `Request` as well as `env` so the auth base URL can be
+   derived per request; `getAuth()` is lazy so non-auth requests don't construct better-auth.
+3. `app/routes.ts` — route table: index → `routes/home.tsx`, plus `/login`, `/logout`,
+   `/api/auth/*` (better-auth's handler) and `/api/hyperagent`.
 4. `app/root.tsx` — HTML document shell (`Layout`), root `Outlet`, and `ErrorBoundary`.
-5. `app/routes/home.tsx` — the index route's `loader` reads contacts from D1
-   (`listContacts`), the `action` handles intent-dispatched writes, and the default export
-   renders `<SalesLoopCRM contacts={loaderData.contacts} />` and sets page `meta`/`links`.
+5. `app/routes/home.tsx` — the index route's `loader` requires a session then reads contacts
+   from D1 (`listContacts`), the `action` re-checks the session and handles intent-dispatched
+   writes, and the default export renders
+   `<SalesLoopCRM contacts={loaderData.contacts} viewer={loaderData.viewer} />`.
 
 `app/entry.server.tsx` is the standard streaming SSR entry (`renderToReadableStream`,
 5s `streamTimeout`, bot-detection via `isbot`).
@@ -51,7 +55,7 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
 The whole product lives in three files:
 
 - **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`), constants
-  (`CH` channels, `STATUSES`, `OWNERS`, `VIEWER = "Tom"`), and pure helpers:
+  (`CH` channels, `STATUSES`, `OWNERS`), and pure helpers:
   `needsAttention`, `hasConflict`, `statusMeta`, `loopBadge`, `statusPill`, date formatting
   (`ago`, `fmtDate`, `dateFrom`). The `Contact` shape (with relative `daysAgo`/`followUp`
   integers) is the contract between the server loader and the UI.
@@ -101,11 +105,40 @@ Gotchas:
   the touch-based `hasConflict`/`peopleInvolved` never fire (the live conflict flag is instead
   the name-based `hasNameConflict`/`conflictOwners`). Logging touchpoints is the natural next
   feature.
-- **better-auth is still orphaned** — instantiated per request into context, but no handler is
-  mounted and no auth tables exist. Login is not implemented; the app is a single shared
-  dataset with `VIEWER = "Tom"` as the note author.
 - Index-route **actions require `?index`** in the POST URL (the client's `useFetcher` adds it
   automatically; a raw `curl` to `/` hits the layout route and 405s).
+
+## Auth
+
+Magic-link sign-in via better-auth, with email delivered by **Resend**. The dataset is shared,
+but access is restricted to four hardcoded addresses.
+
+- **`app/lib/allowlist.ts`** — the four permitted emails mapped to display names. Isomorphic
+  (no secrets). Editing this is how you add or remove a user; a removal takes effect on that
+  person's next request even if they hold a live session cookie.
+- **`app/lib/auth.server.ts`** — `createAuth(env, baseURL)`. Passes the raw `DB` binding as
+  `database` (better-auth duck-types it and loads its own bundled D1 dialect — `kysely-d1` is
+  **not** used). `emailAndPassword` is off deliberately: mounting the handler would otherwise
+  publish a public `/api/auth/sign-up/email`. `session.cookieCache` is off so a revoked user
+  can't stay live for 5 minutes.
+- **The allowlist is enforced at four layers** — the `/login` action, better-auth's
+  `hooks.before` (covers direct POSTs to the public sign-in endpoint), the
+  `databaseHooks.user.create.before` hook, and `requireUser()` on every loader/action. Keep all
+  four when touching this; layer 2 is what guarantees no email is ever sent to a stranger.
+- **`app/lib/session.server.ts`** — `requireUser()` / `getOptionalUser()`. Gating is
+  **per-route, not in `root.tsx`**: every route is a child of root, so a root loader would also
+  gate `/login` and `/api/auth/*`. Actions must call `requireUser` independently of loaders.
+- **`/api/hyperagent` is deliberately not session-gated** — it authenticates with the
+  `CRM_API_KEY` bearer token for machine callers.
+- **Secrets**: `BETTER_AUTH_SECRET` (required — better-auth *throws* on every request in a
+  production build if unset) and `RESEND_API_KEY`. `AUTH_EMAIL_FROM` is a `[vars]` entry; its
+  domain must be verified in Resend or nothing sends.
+- **`migrations/0004_auth_tables.sql` is generated, not hand-written** — produced by
+  better-auth's own `getMigrations()` for the installed version. Regenerate it if better-auth
+  is upgraded or a plugin with its own schema is added; don't hand-edit the columns.
+- The note/touchpoint author is the signed-in user's display name, threaded from the loader as
+  the `viewer` prop. `OWNERS` in `data.ts` needs an entry for anyone who can sign in, or their
+  avatar lookup falls back to a grey placeholder.
 
 ## Conventions
 

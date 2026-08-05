@@ -89,12 +89,16 @@ export const STATUSES: StatusMeta[] = [
   { id: "Dead", dot: "#ef4444", bg: "#f4ecec", fg: "#9a5b5b" },
 ];
 
+// Avatar colours/initials, keyed by display name. Tom and Britton are the only
+// owners contacts get *assigned* to, but Alex and Mike can sign in and author
+// notes, so they need entries here too — the note-author lookups in
+// sales-loop-crm.tsx index straight into this map.
 export const OWNERS: Record<string, Owner> = {
   Tom: { initial: "T", color: "#4457c9" },
   Britton: { initial: "B", color: "#0d8f7a" },
+  Alex: { initial: "A", color: "#b45309" },
+  Mike: { initial: "M", color: "#7c3aed" },
 };
-
-export const VIEWER = "Tom";
 export const TODAY = new Date(2026, 6, 16);
 
 export function dateFrom(daysAgo: number) {
