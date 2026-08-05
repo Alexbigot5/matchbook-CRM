@@ -7,6 +7,7 @@ import {
   clearFollowUp,
   createContact,
   createManyContacts,
+  deleteContacts,
   listContacts,
   logTouchpoint,
   markAdsSent,
@@ -145,6 +146,22 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           return { ok: false, error: "No contacts selected." };
         }
         await markAdsSent(DB, ids.map(String), VIEWER);
+        return { ok: true };
+      }
+      case "deleteContacts": {
+        // One intent for both the single-contact delete (detail panel) and the
+        // bulk delete (selection bar) — the client always sends an id array.
+        let ids: unknown;
+        try {
+          ids = JSON.parse(form.get("ids")?.toString() ?? "[]");
+        } catch {
+          return { ok: false, error: "Couldn’t read the selected contacts." };
+        }
+        if (!Array.isArray(ids) || !ids.length) {
+          return { ok: false, error: "No contacts selected." };
+        }
+        const removed = await deleteContacts(DB, ids.map(String));
+        if (!removed) return { ok: false, error: "Those contacts no longer exist." };
         return { ok: true };
       }
       case "importContacts": {

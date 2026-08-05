@@ -65,8 +65,8 @@ The whole product lives in three files:
 - **`sales-loop-crm.tsx`** — the entire UI as **one big client component** taking a
   `contacts` prop from the route loader. A `useState` "God object" (`State`) holds only
   **UI** state (filters, selection, menus, form/CSV drafts) — patched through `patch()`; the
-  contact data itself lives in the loader. All six mutations (status changes, notes,
-  follow-up snooze/clear, add, CSV import) submit to the route `action` via a single
+  contact data itself lives in the loader. Every mutation (status changes, notes,
+  follow-up snooze/clear, add, CSV import, delete) submits to the route `action` via a single
   `useFetcher` + a hidden `intent` field; React Router revalidates the loader afterward (no
   optimistic UI). Contains all views: sidebar filters, "Needs attention" queue, contact
   table, detail slide-over, add/CSV-import modals.

@@ -226,6 +226,31 @@ export async function createManyContacts(
   return valid.length;
 }
 
+/**
+ * Permanently delete contacts along with everything hanging off them (notes and
+ * touchpoints). Children go first so the FK references stay satisfied, and each
+ * chunk is one batched (atomic) write. Returns how many contact rows actually
+ * went away — 0 means none of the ids existed.
+ */
+export async function deleteContacts(db: D1Database, ids: string[]): Promise<number> {
+  const unique = [...new Set(ids.filter((id) => typeof id === "string" && id))];
+  if (!unique.length) return 0;
+
+  const CHUNK = 50;
+  let deleted = 0;
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const chunk = unique.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const res = await db.batch([
+      db.prepare(`DELETE FROM notes WHERE contact_id IN (${placeholders})`).bind(...chunk),
+      db.prepare(`DELETE FROM touchpoints WHERE contact_id IN (${placeholders})`).bind(...chunk),
+      db.prepare(`DELETE FROM contacts WHERE id IN (${placeholders})`).bind(...chunk),
+    ]);
+    deleted += res[2]?.meta?.changes ?? 0;
+  }
+  return deleted;
+}
+
 export async function updateContactStatus(
   db: D1Database,
   id: string,
