@@ -118,8 +118,6 @@ Gotchas:
 
 ## Files that are NOT the app (ignore unless relevant)
 
-- `Sales Loop CRM (standalone) (4).html` — the original ~370KB standalone HTML prototype the
-  React app was ported from. Reference/design source only; not part of the build.
 - `app/welcome/` — leftover React Router starter scaffold. Not referenced by `routes.ts`.
 - `crm-app/` — gitignored leftover from an earlier migration.
 
