@@ -99,6 +99,25 @@ scaffold a new numbered file in `migrations/`, add your `CREATE`/`ALTER` SQL, th
 `npm run db:migrate:local` / `npm run db:migrate:remote`. Wrangler only runs migrations not yet
 recorded in `d1_migrations`, so files are applied once, in numeric order.
 
+**Input validation lives in `app/lib/validate.ts`** — shared by the session action
+(`home.tsx`) and the machine API (`api.hyperagent.ts`), which previously disagreed about what
+was acceptable. It owns the field length limits (`LIMITS`), the import/bulk-id caps, the
+`status`/`owner`/`loop`/touch-type whitelists, the email format check, and two output
+escapers: `csvCell` (RFC 4180 quoting **plus** neutralizing a leading `= + - @ \t \r`, which
+Excel and Sheets execute as a formula) and `safeMailto` (returns null unless the address is
+plain, so a stored `…?bcc=…&body=…` can't prefill an attacker's draft). It is isomorphic —
+the client imports `LIMITS` for `maxLength` and the CSV caps. **Add new write paths through
+this module rather than validating inline.**
+
+Deletion is recorded in an append-only `audit_log` table with a JSON snapshot of each removed
+row and the acting user — contact deletion is a hard delete that also drops the contact's
+notes and touchpoints, on a dataset shared by all four users.
+
+Security headers (CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS on https, etc.) are set in
+`workers/app.ts`, wrapping every dynamic response. They do **not** apply under
+`npm run dev` (the Vite dev server doesn't route through the Worker entry) — use
+`npm run start` to see them.
+
 Gotchas:
 - **No touchpoint write path.** Nothing inserts into the `touchpoints` table yet, so
   `touches` is always `[]`: the "Last touch" column and the detail timeline render empty, and
@@ -121,10 +140,28 @@ but access is restricted to four hardcoded addresses.
   **not** used). `emailAndPassword` is off deliberately: mounting the handler would otherwise
   publish a public `/api/auth/sign-up/email`. `session.cookieCache` is off so a revoked user
   can't stay live for 5 minutes.
-- **The allowlist is enforced at four layers** — the `/login` action, better-auth's
+- **The allowlist is enforced at five layers** — the `/login` action, better-auth's
   `hooks.before` (covers direct POSTs to the public sign-in endpoint), the
-  `databaseHooks.user.create.before` hook, and `requireUser()` on every loader/action. Keep all
-  four when touching this; layer 2 is what guarantees no email is ever sent to a stranger.
+  `databaseHooks.user.create.before` hook, `requireUser()` on every loader/action, and a
+  re-check in `app/routes/api.auth.$.ts` before proxying to better-auth's own handler (that
+  route bypasses `requireUser`, so a de-allowlisted user with a live cookie could otherwise
+  still reach `get-session`/`update-user`). Keep all five when touching this; layer 2 is what
+  guarantees no email is ever sent to a stranger. `isAllowed` uses `Object.hasOwn`, not `in`
+  — `in` walks the prototype chain, so `"constructor"` and `"__proto__"` passed.
+- **`createAuth` throws when `BETTER_AUTH_SECRET` is unset.** Don't remove that assertion:
+  better-auth only throws on its own when it *also* believes it's in production
+  (`secret === DEFAULT_SECRET && !isProduction`, keyed on `NODE_ENV`). If `NODE_ENV` isn't
+  `"production"` in the deployed isolate it silently falls back to a published default secret,
+  which means forgeable session cookies.
+- **Rate limiting** — `app/lib/ratelimit.server.ts`, backed by a D1 `rate_limits` table.
+  Durable because a module-level `Map` is per-isolate on Workers and evicted constantly (which
+  is also why better-auth's limiter is configured with `storage: "database"`). Metered:
+  `POST /login` (per IP *and* per target address — that action calls `auth.api.*` directly and
+  so bypasses better-auth's own limiter) and `/api/hyperagent` (per IP, plus a tighter bucket
+  for failed bearer-token attempts). The limiter **fails open** on a D1 error — it is an
+  availability control, not the authorization gate.
+- **`POST /login` passes `request`**, not just `headers`. better-auth's origin check and CSRF
+  middleware both short-circuit on `if (!ctx.request) return`, so omitting it disables them.
 - **`app/lib/session.server.ts`** — `requireUser()` / `getOptionalUser()`. Gating is
   **per-route, not in `root.tsx`**: every route is a child of root, so a root loader would also
   gate `/login` and `/api/auth/*`. Actions must call `requireUser` independently of loaders.

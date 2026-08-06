@@ -8,12 +8,18 @@
 // Removing an email here revokes access on that person's next request, even if
 // they still hold a valid session cookie, because requireUser() re-checks it.
 
-export const ALLOWED_USERS: Record<string, string> = {
-  "alexbigot5@gmail.com": "Alex",
-  "tom@onmatchbook.com": "Tom",
-  "britton@onmatchbook.com": "Britton",
-  "mikehennesse@gmail.com": "Mike",
-};
+// Null-prototype so the map carries nothing but these four keys. With a plain
+// object literal, `"constructor" in ALLOWED_USERS` and `ALLOWED_USERS["__proto__"]`
+// both hit Object.prototype — see the note on isAllowed below.
+export const ALLOWED_USERS: Record<string, string> = Object.assign(
+  Object.create(null) as Record<string, string>,
+  {
+    "alexbigot5@gmail.com": "Alex",
+    "tom@onmatchbook.com": "Tom",
+    "britton@onmatchbook.com": "Britton",
+    "mikehennesse@gmail.com": "Mike",
+  },
+);
 
 /**
  * better-auth lowercases emails on write, and users type inconsistently, so every
@@ -23,11 +29,20 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+/**
+ * `Object.hasOwn`, not the `in` operator: `in` walks the prototype chain, and
+ * `Object.prototype` has all-lowercase members that survive normalizeEmail — so
+ * `isAllowed("constructor")` and `isAllowed("__proto__")` both returned true.
+ * Nothing could reach this with such a value today (better-auth validates the
+ * body as an email first), but this is the function the whole gate rests on, so
+ * it should be correct on its own terms rather than by upstream accident.
+ */
 export function isAllowed(email: string): boolean {
-  return normalizeEmail(email) in ALLOWED_USERS;
+  return Object.hasOwn(ALLOWED_USERS, normalizeEmail(email));
 }
 
 /** Display name for an allowlisted email, or "" if it isn't on the list. */
 export function displayNameFor(email: string): string {
-  return ALLOWED_USERS[normalizeEmail(email)] ?? "";
+  const key = normalizeEmail(email);
+  return Object.hasOwn(ALLOWED_USERS, key) ? ALLOWED_USERS[key] : "";
 }

@@ -4,6 +4,12 @@ import { appContext } from "../../load-context";
 import { Box, css } from "../crm/ui";
 import { isAllowed, normalizeEmail } from "../lib/allowlist";
 import { getOptionalUser } from "../lib/session.server";
+import {
+  clientKey,
+  rateLimit,
+  LOGIN_EMAIL_RULE,
+  LOGIN_IP_RULE,
+} from "../lib/ratelimit.server";
 // Server-only: referenced from the action, which React Router strips from the
 // client build. Never reference this from the component below.
 import { MAGIC_LINK_TTL_SECONDS } from "../lib/auth.server";
@@ -41,8 +47,52 @@ type ActionResult =
   | { sent: true; email: string; expiresInMinutes: number }
   | { sent: false; error: string };
 
+/**
+ * Same-origin check for this action.
+ *
+ * The sign-in form is a cookie-less POST, so SameSite gives it no protection at
+ * all: any site can post here and cause a real magic link to be emailed. This is
+ * the CSRF defence for the /login route specifically. Requests with no Origin
+ * and no Referer (curl, some older clients) are allowed through — the rate
+ * limits below bound what that permits.
+ */
+function isSameOrigin(request: Request): boolean {
+  const expected = new URL(request.url).origin;
+  const origin = request.headers.get("origin");
+  if (origin) return origin === expected;
+  const referer = request.headers.get("referer");
+  if (referer) {
+    try {
+      return new URL(referer).origin === expected;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * better-auth validates `callbackURL` again when the link is *redeemed*, using a
+ * stricter pattern than a `startsWith("/")` check. Matching it here means a bad
+ * value is rejected at submit time with a readable message, rather than emailing
+ * a link that dead-ends on `403 INVALID_CALLBACK_URL` when clicked.
+ *
+ * The previous check also missed `/\evil.com`, which browsers normalize to a
+ * protocol-relative `//evil.com`.
+ */
+const SAFE_NEXT_RE = /^\/(?!\/|\\|%2f|%5c)[\w\-.+/@]*(?:\?[\w\-.+/=&%@]*)?$/i;
+
+function safeNext(raw: string): string {
+  return SAFE_NEXT_RE.test(raw) ? raw : "/";
+}
+
 export async function action({ request, context }: Route.ActionArgs): Promise<ActionResult> {
   const ctx = context.get(appContext);
+
+  if (!isSameOrigin(request)) {
+    return { sent: false, error: "Request blocked. Please sign in from the app itself." };
+  }
+
   const form = await request.formData();
   const email = normalizeEmail(form.get("email")?.toString() ?? "");
 
@@ -54,15 +104,31 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
     return { sent: false, error: "This email address isn't authorized for Matchbook CRM." };
   }
 
+  // Metered here rather than by better-auth: this action calls the server API
+  // directly, and the library's limiter (like its CSRF middleware) lives in the
+  // HTTP handler path we bypass. Both an IP limit and a per-address limit, so
+  // neither one IP nor one distributed campaign can flood a single inbox.
+  const tooManyFromIp = await rateLimit(ctx.DB, LOGIN_IP_RULE, clientKey(request));
+  if (!tooManyFromIp.allowed) {
+    return { sent: false, error: "Too many sign-in attempts. Try again in a few minutes." };
+  }
+  const tooManyForEmail = await rateLimit(ctx.DB, LOGIN_EMAIL_RULE, email);
+  if (!tooManyForEmail.allowed) {
+    return { sent: false, error: "Too many sign-in links requested for that address. Try again shortly." };
+  }
+
   // `next` lets the magic link land back on the page the user originally wanted.
   // Constrained to a same-site path so it can't be used as an open redirect.
-  const raw = form.get("next")?.toString() ?? "/";
-  const next = raw.startsWith("/") && !raw.startsWith("//") ? raw : "/";
+  const next = safeNext(form.get("next")?.toString() ?? "/");
 
   try {
+    // `request` is passed, not just its headers: better-auth's origin check and
+    // CSRF middleware both short-circuit on `if (!ctx.request) return`, so
+    // omitting it silently disabled them.
     await ctx.getAuth().api.signInMagicLink({
       body: { email, callbackURL: next, errorCallbackURL: "/login" },
       headers: request.headers,
+      request,
     });
   } catch (err) {
     // Most likely an unverified Resend sender domain or a missing API key — the
@@ -99,9 +165,14 @@ export default function Login({ actionData }: Route.ComponentProps) {
 
   const next = params.get("next") ?? "/";
   const urlError = params.get("error");
+  // Object.hasOwn, not a bare index: `?error=constructor` would otherwise
+  // resolve through the prototype chain to a function and get rendered as a
+  // React child.
+  const errorCopy =
+    urlError && Object.hasOwn(ERROR_COPY, urlError) ? ERROR_COPY[urlError] : null;
   const error =
     (actionData && !actionData.sent ? actionData.error : null) ??
-    (urlError ? ERROR_COPY[urlError] ?? "Something went wrong signing you in. Try again." : null);
+    (urlError ? errorCopy ?? "Something went wrong signing you in. Try again." : null);
 
   const sent = actionData?.sent ? actionData : null;
 
