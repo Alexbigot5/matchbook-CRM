@@ -87,6 +87,18 @@ export function createAuth(env: AuthEnv, baseURL: string) {
       max: 30,
     },
 
+    // Without this better-auth cannot resolve a client IP on Workers and logs
+    // "falling back to a single shared per-path bucket" — meaning all four users
+    // (and every unauthenticated caller) share one 30-per-minute counter, so one
+    // noisy client locks everyone out of sign-in. CF-Connecting-IP is set by
+    // Cloudflare's edge and cannot be spoofed by the client, which is the same
+    // header app/lib/ratelimit.server.ts trusts.
+    advanced: {
+      ipAddress: {
+        ipAddressHeaders: ["cf-connecting-ip"],
+      },
+    },
+
     // Pin the origins allowed to receive a redirect and mint a sign-in link.
     // baseURL is derived per request, so without this any host routing to this
     // Worker — including the default *.workers.dev subdomain — could issue a
