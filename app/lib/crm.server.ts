@@ -91,13 +91,32 @@ type TouchpointRow = {
  * type. `touches` is always empty (no write path creates touchpoints yet) and
  * `opts` is always `{}`. `now` is the loader's single reference instant.
  */
-export async function listContacts(db: D1Database, now: number): Promise<Contact[]> {
+export async function listContacts(
+  db: D1Database,
+  now: number,
+  page?: { limit?: number; offset?: number },
+): Promise<Contact[]> {
+  // Pagination is opt-in and used only by the machine API, which would otherwise
+  // return the entire contact book — with notes — in a single response. The app
+  // loader passes nothing and still gets everything, because the UI filters and
+  // sorts client-side over the full set.
+  //
+  // Both values are coerced to non-negative integers and bound as parameters;
+  // they are never interpolated into the SQL text.
+  const limit = page?.limit !== undefined ? Math.max(0, Math.floor(page.limit)) : null;
+  const offset = page?.offset !== undefined ? Math.max(0, Math.floor(page.offset)) : 0;
+
   const [contactsRes, notesRes, touchesRes] = await Promise.all([
-    db
-      .prepare(
-        "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, created_at FROM contacts ORDER BY created_at DESC",
-      )
-      .all<ContactRow>(),
+    (limit === null
+      ? db.prepare(
+          "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, created_at FROM contacts ORDER BY created_at DESC",
+        )
+      : db
+          .prepare(
+            "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
+          )
+          .bind(limit, offset)
+    ).all<ContactRow>(),
     db
       .prepare(
         "SELECT id, contact_id, author, text, created_at FROM notes ORDER BY created_at DESC",
@@ -182,13 +201,22 @@ export type NewContactInput = {
   source?: string | null;
 };
 
+/**
+ * Coerce to a trimmed string. Callers now validate through app/lib/validate.ts,
+ * but this layer is reachable with whatever JSON.parse produced, and a bare
+ * `.trim()` on a number threw a TypeError rather than rejecting cleanly.
+ */
+function str(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function insertContactStmt(db: D1Database, input: NewContactInput) {
-  const name = input.name.trim();
+  const name = str(input.name);
   const followUpAt = new Date().toISOString(); // new contacts are "due today"
-  const source = (input.source || "").trim() || null;
-  const email = (input.email || "").trim() || null;
-  const phone = (input.phone || "").trim() || null;
-  const linkedin = (input.linkedin || "").trim() || null;
+  const source = str(input.source) || null;
+  const email = str(input.email) || null;
+  const phone = str(input.phone) || null;
+  const linkedin = str(input.linkedin) || null;
   return db
     .prepare(
       "INSERT INTO contacts (id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -196,12 +224,12 @@ function insertContactStmt(db: D1Database, input: NewContactInput) {
     .bind(
       crypto.randomUUID(),
       name,
-      (input.company || "").trim(),
+      str(input.company),
       email,
       phone,
       linkedin,
-      input.owner ?? null,
-      input.status || "New",
+      str(input.owner) || null,
+      str(input.status) || "New",
       JSON.stringify(normalizeLoops(input.loops)),
       source,
       followUpAt,
@@ -232,7 +260,11 @@ export async function createManyContacts(
  * chunk is one batched (atomic) write. Returns how many contact rows actually
  * went away — 0 means none of the ids existed.
  */
-export async function deleteContacts(db: D1Database, ids: string[]): Promise<number> {
+export async function deleteContacts(
+  db: D1Database,
+  ids: string[],
+  actor: string,
+): Promise<number> {
   const unique = [...new Set(ids.filter((id) => typeof id === "string" && id))];
   if (!unique.length) return 0;
 
@@ -241,12 +273,33 @@ export async function deleteContacts(db: D1Database, ids: string[]): Promise<num
   for (let i = 0; i < unique.length; i += CHUNK) {
     const chunk = unique.slice(i, i + CHUNK);
     const placeholders = chunk.map(() => "?").join(", ");
+
+    // Snapshot before the delete. The dataset is shared across all four users and
+    // this is a hard delete that takes the contact's notes and touchpoints with
+    // it, so without a record there is no way to tell what went missing or who
+    // removed it. Read and write in the same batch as the delete so a failure
+    // can't leave the log and the table disagreeing.
+    const existing = await db
+      .prepare(`SELECT * FROM contacts WHERE id IN (${placeholders})`)
+      .bind(...chunk)
+      .all<ContactRow>();
+
+    const auditRows = (existing.results ?? []).map((row) =>
+      db
+        .prepare(
+          `INSERT INTO audit_log (id, actor, action, entity_type, entity_id, snapshot)
+           VALUES (?, ?, 'contact.delete', 'contact', ?, ?)`,
+        )
+        .bind(crypto.randomUUID(), actor, row.id, JSON.stringify(row)),
+    );
+
     const res = await db.batch([
+      ...auditRows,
       db.prepare(`DELETE FROM notes WHERE contact_id IN (${placeholders})`).bind(...chunk),
       db.prepare(`DELETE FROM touchpoints WHERE contact_id IN (${placeholders})`).bind(...chunk),
       db.prepare(`DELETE FROM contacts WHERE id IN (${placeholders})`).bind(...chunk),
     ]);
-    deleted += res[2]?.meta?.changes ?? 0;
+    deleted += res[res.length - 1]?.meta?.changes ?? 0;
   }
   return deleted;
 }
@@ -307,15 +360,16 @@ export async function addNote(
     .prepare(
       "INSERT INTO notes (id, contact_id, author, text) VALUES (?, ?, ?, ?)",
     )
-    .bind(crypto.randomUUID(), contactId, author, text.trim())
+    .bind(crypto.randomUUID(), contactId, author, str(text))
     .run();
 }
 
 /**
  * Record a touchpoint in the contact's timeline. `type` is the channel key
- * (ad | email | linkedin | call | meeting). When `loop` is omitted, the contact's
- * primary (lowest) loop is stamped — resolved server-side so the client can't
- * pass a bogus value. `created_at` defaults to now via the column default.
+ * (ad | email | linkedin | call | meeting) — callers validate it against
+ * isValidTouchType(). When `loop` is omitted *or out of range*, the contact's
+ * primary (lowest) loop is stamped. `created_at` defaults to now via the column
+ * default.
  */
 export async function logTouchpoint(
   db: D1Database,
@@ -325,7 +379,11 @@ export async function logTouchpoint(
   note: string,
   loop?: number,
 ): Promise<void> {
-  let resolvedLoop = loop;
+  // An explicitly supplied loop is range-checked, not trusted: the doc comment
+  // above claimed the client couldn't pass a bogus value, but that only held for
+  // the resolve-from-contact branch. Anything outside the closed set falls back
+  // to the contact's own primary loop.
+  let resolvedLoop = loop === 1 || loop === 2 ? loop : undefined;
   if (resolvedLoop === undefined) {
     const row = await db
       .prepare("SELECT loops FROM contacts WHERE id = ?")
@@ -337,7 +395,7 @@ export async function logTouchpoint(
     .prepare(
       "INSERT INTO touchpoints (id, contact_id, type, loop, owner, note) VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .bind(crypto.randomUUID(), contactId, type, resolvedLoop, owner, note.trim())
+    .bind(crypto.randomUUID(), contactId, type, resolvedLoop, owner, str(note))
     .run();
 }
 
@@ -356,26 +414,35 @@ export async function markAdsSent(
   const unique = [...new Set(ids.filter((id) => typeof id === "string" && id))];
   if (!unique.length) return 0;
 
-  const placeholders = unique.map(() => "?").join(", ");
-  const rowsRes = await db
-    .prepare(
-      `SELECT id, loops, owner FROM contacts WHERE id IN (${placeholders})`,
-    )
-    .bind(...unique)
-    .all<{ id: string; loops: string; owner: string | null }>();
-
-  const inserts = (rowsRes.results ?? []).map((row) =>
-    db
+  // Chunked like deleteContacts. Previously this expanded one placeholder per id
+  // into a single statement, so a large selection blew past D1's bound-parameter
+  // ceiling and hard-failed instead of doing the work.
+  const CHUNK = 50;
+  let created = 0;
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const chunk = unique.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rowsRes = await db
       .prepare(
-        "INSERT INTO touchpoints (id, contact_id, type, loop, owner, note) VALUES (?, ?, 'ad', ?, ?, 'Ads sent')",
+        `SELECT id, loops, owner FROM contacts WHERE id IN (${placeholders})`,
       )
-      .bind(
-        crypto.randomUUID(),
-        row.id,
-        Math.min(...parseLoops(row.loops)),
-        row.owner || actor,
-      ),
-  );
-  if (inserts.length) await db.batch(inserts);
-  return inserts.length;
+      .bind(...chunk)
+      .all<{ id: string; loops: string; owner: string | null }>();
+
+    const inserts = (rowsRes.results ?? []).map((row) =>
+      db
+        .prepare(
+          "INSERT INTO touchpoints (id, contact_id, type, loop, owner, note) VALUES (?, ?, 'ad', ?, ?, 'Ads sent')",
+        )
+        .bind(
+          crypto.randomUUID(),
+          row.id,
+          Math.min(...parseLoops(row.loops)),
+          row.owner || actor,
+        ),
+    );
+    if (inserts.length) await db.batch(inserts);
+    created += inserts.length;
+  }
+  return created;
 }

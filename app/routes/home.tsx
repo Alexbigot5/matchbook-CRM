@@ -15,9 +15,15 @@ import {
   resumeToLoop1,
   snoozeFollowUp,
   updateContactStatus,
-  type NewContactInput,
 } from "../lib/crm.server";
 import { triggerAgent } from "../lib/hyperagent.server";
+import {
+  isValidStatus,
+  validateContact,
+  validateIds,
+  validateImportRows,
+  validateNote,
+} from "../lib/validate";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -64,22 +70,23 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   }
 }
 
-type ActionResult = { ok: true } | { ok: false; error: string };
+type ActionResult = { ok: true; message?: string } | { ok: false; error: string };
 
-function normalizeOwner(value: FormDataEntryValue | null): string | null {
-  const owner = (value ?? "").toString().trim();
-  if (!owner || owner === "Unassigned") return null;
-  return owner;
+function parseLoopsField(value: FormDataEntryValue | null): unknown {
+  try {
+    return JSON.parse((value ?? "[1]").toString());
+  } catch {
+    // ignore — validateContact treats undefined as "use the default"
+  }
+  return undefined;
 }
 
-function parseLoopsField(value: FormDataEntryValue | null): number[] {
+function parseJsonField(value: FormDataEntryValue | null): unknown {
   try {
-    const arr = JSON.parse((value ?? "[1]").toString());
-    if (Array.isArray(arr)) return arr;
+    return JSON.parse((value ?? "[]").toString());
   } catch {
-    // ignore — fall through to default
+    return null;
   }
-  return [1];
 }
 
 export async function action({ request, context }: Route.ActionArgs): Promise<ActionResult> {
@@ -97,24 +104,33 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         const id = form.get("id")?.toString();
         const status = form.get("status")?.toString();
         if (!id || !status) return { ok: false, error: "Missing id or status." };
+        // Whitelisted, matching what the machine API has always enforced. An
+        // arbitrary string here isn't an injection risk (the query is bound) but
+        // it silently escapes the owner filter, the queue priority ordering and
+        // the cross-owner conflict check.
+        if (!isValidStatus(status)) {
+          return { ok: false, error: "Unknown status." };
+        }
         await updateContactStatus(DB, id, status);
         return { ok: true };
       }
       case "addNote": {
         const id = form.get("id")?.toString();
-        const text = (form.get("text")?.toString() ?? "").trim();
-        if (!id || !text) return { ok: false, error: "Missing id or note text." };
-        await addNote(DB, id, user.name, text);
+        if (!id) return { ok: false, error: "Missing id." };
+        const note = validateNote(form.get("text"));
+        if (!note.ok) return { ok: false, error: note.error };
+        await addNote(DB, id, user.name, note.text);
         return { ok: true };
       }
       case "logMeeting": {
         const id = form.get("id")?.toString();
-        const text = (form.get("text")?.toString() ?? "").trim();
-        if (!id || !text) return { ok: false, error: "Missing id or note text." };
+        if (!id) return { ok: false, error: "Missing id." };
+        const note = validateNote(form.get("text"));
+        if (!note.ok) return { ok: false, error: note.error };
         // Save the note AND record a Meeting touchpoint in the timeline. Status
         // is left untouched (changed manually via the detail dropdown).
-        await addNote(DB, id, user.name, text);
-        await logTouchpoint(DB, id, "meeting", user.name, text);
+        await addNote(DB, id, user.name, note.text);
+        await logTouchpoint(DB, id, "meeting", user.name, note.text);
         return { ok: true };
       }
       case "snooze": {
@@ -130,19 +146,21 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         return { ok: true };
       }
       case "addContact": {
-        const name = (form.get("name")?.toString() ?? "").trim();
-        if (!name) return { ok: false, error: "Name is required." };
-        await createContact(DB, {
-          name,
-          company: form.get("company")?.toString() ?? "",
-          email: form.get("email")?.toString() ?? null,
-          phone: form.get("phone")?.toString() ?? null,
-          linkedin: form.get("linkedin")?.toString() ?? null,
+        // One validator shared with the machine API — bounds every string,
+        // whitelists owner/status/loops, and checks the email format.
+        const result = validateContact({
+          name: form.get("name")?.toString(),
+          company: form.get("company")?.toString(),
+          email: form.get("email")?.toString(),
+          phone: form.get("phone")?.toString(),
+          linkedin: form.get("linkedin")?.toString(),
           loops: parseLoopsField(form.get("loops")),
-          owner: normalizeOwner(form.get("owner")),
-          status: form.get("status")?.toString() || "New",
-          source: form.get("source")?.toString() ?? null,
+          owner: form.get("owner")?.toString(),
+          status: form.get("status")?.toString(),
+          source: form.get("source")?.toString(),
         });
+        if (!result.ok) return { ok: false, error: result.error };
+        await createContact(DB, result.value);
         return { ok: true };
       }
       case "resumeLoop1": {
@@ -152,46 +170,48 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         return { ok: true };
       }
       case "markAdsSent": {
-        let ids: unknown;
-        try {
-          ids = JSON.parse(form.get("ids")?.toString() ?? "[]");
-        } catch {
+        const parsed = parseJsonField(form.get("ids"));
+        if (parsed === null) {
           return { ok: false, error: "Couldn’t read the selected contacts." };
         }
-        if (!Array.isArray(ids) || !ids.length) {
-          return { ok: false, error: "No contacts selected." };
-        }
-        await markAdsSent(DB, ids.map(String), user.name);
+        const ids = validateIds(parsed);
+        if (!ids.ok) return { ok: false, error: ids.error };
+        await markAdsSent(DB, ids.ids, user.name);
         return { ok: true };
       }
       case "deleteContacts": {
         // One intent for both the single-contact delete (detail panel) and the
         // bulk delete (selection bar) — the client always sends an id array.
-        let ids: unknown;
-        try {
-          ids = JSON.parse(form.get("ids")?.toString() ?? "[]");
-        } catch {
+        const parsed = parseJsonField(form.get("ids"));
+        if (parsed === null) {
           return { ok: false, error: "Couldn’t read the selected contacts." };
         }
-        if (!Array.isArray(ids) || !ids.length) {
-          return { ok: false, error: "No contacts selected." };
-        }
-        const removed = await deleteContacts(DB, ids.map(String));
+        const ids = validateIds(parsed);
+        if (!ids.ok) return { ok: false, error: ids.error };
+        // The signed-in user's name is recorded in audit_log alongside a snapshot
+        // of each deleted row — this is a hard delete on a shared dataset.
+        const removed = await deleteContacts(DB, ids.ids, user.name);
         if (!removed) return { ok: false, error: "Those contacts no longer exist." };
         return { ok: true };
       }
       case "importContacts": {
-        let rows: NewContactInput[];
-        try {
-          rows = JSON.parse(form.get("rows")?.toString() ?? "[]");
-        } catch {
+        const parsed = parseJsonField(form.get("rows"));
+        if (parsed === null) {
           return { ok: false, error: "Couldn’t read the imported rows." };
         }
-        if (!Array.isArray(rows) || !rows.some((r) => r?.name?.trim())) {
-          return { ok: false, error: "No valid contacts to import." };
-        }
-        await createManyContacts(DB, rows);
-        return { ok: true };
+        // Every row is validated, not just probed with `.some()` — previously one
+        // valid row admitted the whole array unchecked, with no cap on its length.
+        const result = validateImportRows(parsed);
+        if (!result.ok) return { ok: false, error: result.error };
+        await createManyContacts(DB, result.rows);
+        return {
+          ok: true,
+          message: result.skipped
+            ? `Imported ${result.rows.length}. Skipped ${result.skipped} invalid row${
+                result.skipped === 1 ? "" : "s"
+              }${result.firstError ? ` — first problem: ${result.firstError}` : "."}`
+            : undefined,
+        };
       }
       case "triggerAgent": {
         const id = form.get("id")?.toString();
@@ -224,7 +244,14 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         return { ok: false, error: "Unknown action." };
     }
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Something went wrong." };
+    // Log the real cause, return an opaque one. D1 exception text carries table,
+    // column and constraint names ("no such column: source", "NOT NULL
+    // constraint failed: contacts.name"), and this value is rendered straight
+    // into the UI — so returning it handed the client a schema readout while
+    // leaving the operator with nothing. The reference id ties the two together.
+    const ref = crypto.randomUUID().slice(0, 8);
+    console.error(`[action:${intent}] ref=${ref}`, err);
+    return { ok: false, error: `Something went wrong. Reference: ${ref}` };
   }
 }
 

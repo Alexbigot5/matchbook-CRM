@@ -20,7 +20,28 @@ export type AuthEnv = EmailEnv & {
 /** How long a sign-in link stays valid. */
 export const MAGIC_LINK_TTL_SECONDS = 60 * 15;
 
+/** Absolute session lifetime. Re-authenticating weekly is not a burden at four users. */
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
+
+/** How often an active session's expiry is pushed forward. */
+const SESSION_UPDATE_AGE_SECONDS = 60 * 60 * 24;
+
 export function createAuth(env: AuthEnv, baseURL: string) {
+  // Assert rather than trust the library's guard. better-auth only *throws* on a
+  // missing secret when it also believes it is in production — its check is
+  // `secret === DEFAULT_SECRET && !isProduction ? warn : throw`, keyed on
+  // NODE_ENV. If NODE_ENV isn't "production" inside the deployed isolate it
+  // silently falls back to a publicly published default secret, which means
+  // forgeable session cookies and a total auth bypass. Vite normally inlines
+  // NODE_ENV so this is unlikely — but the safety of the whole auth system
+  // should not rest on an assumption this repo never checks.
+  if (!env.BETTER_AUTH_SECRET) {
+    throw new Error(
+      "BETTER_AUTH_SECRET is not set. Refusing to start auth with a default secret — " +
+        "run `openssl rand -base64 32 | wrangler secret put BETTER_AUTH_SECRET`.",
+    );
+  }
+
   return betterAuth({
     database: env.DB,
 
@@ -40,10 +61,37 @@ export function createAuth(env: AuthEnv, baseURL: string) {
     // account-creation route that bypasses the magic-link gate entirely.
     emailAndPassword: { enabled: false },
 
-    // Off deliberately. The cached session cookie would keep a revoked user live
-    // for up to 5 minutes without touching D1. At four users a read per request
-    // costs nothing, so take the correctness.
-    session: { cookieCache: { enabled: false } },
+    // cookieCache off deliberately. The cached session cookie would keep a
+    // revoked user live for up to 5 minutes without touching D1. At four users a
+    // read per request costs nothing, so take the correctness.
+    //
+    // expiresIn/updateAge are explicit because the defaults (7d sliding, renewed
+    // daily) have no absolute cap — an active session renews forever and the
+    // user is never re-authenticated. These are the same numbers, stated rather
+    // than inherited, so a library default change can't quietly extend them.
+    session: {
+      cookieCache: { enabled: false },
+      expiresIn: SESSION_MAX_AGE_SECONDS,
+      updateAge: SESSION_UPDATE_AGE_SECONDS,
+    },
+
+    // The default limiter stores counters in a module-level Map. On Workers that
+    // is per-isolate and evicted constantly, so it does not actually limit
+    // anything — "database" puts them in D1 where every isolate sees them.
+    // Note this only covers the /api/auth/* handler; POST /login calls the
+    // server API directly and is metered separately (see app/lib/ratelimit.server.ts).
+    rateLimit: {
+      enabled: true,
+      storage: "database",
+      window: 60,
+      max: 30,
+    },
+
+    // Pin the origins allowed to receive a redirect and mint a sign-in link.
+    // baseURL is derived per request, so without this any host routing to this
+    // Worker — including the default *.workers.dev subdomain — could issue a
+    // real magic link pointing at itself.
+    trustedOrigins: [baseURL],
 
     plugins: [
       magicLink({
