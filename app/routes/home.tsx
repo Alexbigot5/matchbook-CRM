@@ -1,7 +1,8 @@
 import type { Route } from "./+types/home";
 import { SalesLoopCRM } from "../crm/sales-loop-crm";
 import { appContext } from "../../load-context";
-import { OWNERS } from "../crm/data";
+import { ownerAvatar } from "../crm/data";
+import { crmFontLinks } from "../crm/ui";
 import { requireUser } from "../lib/session.server";
 import {
   addNote,
@@ -18,7 +19,11 @@ import {
 } from "../lib/crm.server";
 import { triggerAgent } from "../lib/hyperagent.server";
 import {
+  asString,
+  isValidDeadReason,
   isValidStatus,
+  isValidTouchType,
+  LIMITS,
   validateContact,
   validateIds,
   validateImportRows,
@@ -35,16 +40,7 @@ export function meta({}: Route.MetaArgs) {
   ];
 }
 
-export function links() {
-  return [
-    { rel: "preconnect", href: "https://fonts.googleapis.com" },
-    { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
-    {
-      rel: "stylesheet",
-      href: "https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600;700;800&family=Geist+Mono:wght@400;500&display=swap",
-    },
-  ];
-}
+export const links = crmFontLinks;
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const ctx = context.get(appContext);
@@ -52,14 +48,11 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   // Throws a redirect to /login when there's no valid, allowlisted session.
   const user = await requireUser(request, ctx);
   // Resolve the avatar server-side so the UI renders purely from loader data.
-  const owner = OWNERS[user.name] ?? {
-    initial: (user.name.slice(0, 1) || "?").toUpperCase(),
-    color: "#b0b0aa",
-  };
+  const avatar = ownerAvatar(user.name);
   try {
     return {
       contacts: await listContacts(DB, Date.now()),
-      viewer: { name: user.name, initial: owner.initial, color: owner.color },
+      viewer: { name: user.name, initial: avatar.initial, color: avatar.color },
     };
   } catch (err) {
     // Surface the real cause in `wrangler tail` — the production ErrorBoundary
@@ -111,7 +104,28 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         if (!isValidStatus(status)) {
           return { ok: false, error: "Unknown status." };
         }
-        await updateContactStatus(DB, id, status);
+        // A reason only accompanies "Dead", and is optional even then (the picker
+        // offers a Skip). Reject an unrecognised one rather than dropping it
+        // silently — the analytics panel groups on this value exactly.
+        const reason = form.get("reason")?.toString() || "";
+        if (reason && !isValidDeadReason(reason)) {
+          return { ok: false, error: "Unknown reason." };
+        }
+        await updateContactStatus(DB, id, status, reason || null);
+        return { ok: true };
+      }
+      case "logTouch": {
+        // Records outreach on a specific channel. Unlike addNote the text is
+        // optional — logging that a call happened is useful on its own.
+        const id = form.get("id")?.toString();
+        const ch = form.get("ch")?.toString();
+        if (!id) return { ok: false, error: "Missing id." };
+        if (!isValidTouchType(ch)) return { ok: false, error: "Unknown channel." };
+        const text = asString(form.get("text"));
+        if (text.length > LIMITS.note) {
+          return { ok: false, error: `Notes must be ${LIMITS.note} characters or fewer.` };
+        }
+        await logTouchpoint(DB, id, ch, user.name, text);
         return { ok: true };
       }
       case "addNote": {

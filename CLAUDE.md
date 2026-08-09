@@ -39,22 +39,25 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    `context.get(appContext)`**, not a plain `context.DB`. `appContext` is the exported
    `createContext` handle. It takes the `Request` as well as `env` so the auth base URL can be
    derived per request; `getAuth()` is lazy so non-auth requests don't construct better-auth.
-3. `app/routes.ts` — route table: index → `routes/home.tsx`, plus `/login`, `/logout`,
-   `/api/auth/*` (better-auth's handler) and `/api/hyperagent`.
+3. `app/routes.ts` — route table: index → `routes/home.tsx`, `/analytics`, plus `/login`,
+   `/logout`, `/api/auth/*` (better-auth's handler) and `/api/hyperagent`.
 4. `app/root.tsx` — HTML document shell (`Layout`), root `Outlet`, and `ErrorBoundary`.
 5. `app/routes/home.tsx` — the index route's `loader` requires a session then reads contacts
    from D1 (`listContacts`), the `action` re-checks the session and handles intent-dispatched
    writes, and the default export renders
    `<SalesLoopCRM contacts={loaderData.contacts} viewer={loaderData.viewer} />`.
+6. `app/routes/analytics.tsx` — the `/analytics` loader mirrors home's (`requireUser` +
+   `listContacts` against one `now`) and additionally returns `buildAnalyticsLabels(now)`, the
+   precomputed date axis. **No `action`** — the page is read-only; all writes live on `/`.
 
 `app/entry.server.tsx` is the standard streaming SSR entry (`renderToReadableStream`,
 5s `streamTimeout`, bot-detection via `isbot`).
 
 ## The CRM (`app/crm/`)
 
-The whole product lives in three files:
+Two pages (contacts and analytics) over a shared shell:
 
-- **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`), constants
+- **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`, `Viewer`), constants
   (`CH` channels, `STATUSES`, `OWNERS`), and pure helpers:
   `needsAttention`, `hasConflict`, `statusMeta`, `loopBadge`, `statusPill`, date formatting
   (`ago`, `fmtDate`, `dateFrom`). The `Contact` shape (with relative `daysAgo`/`followUp`
@@ -64,8 +67,23 @@ The whole product lives in three files:
   hydration match. Don't introduce `Date.now()`/`Math.random()` into the render path.
 - **`ui.tsx`** — presentation primitives. `css(string)` parses an inline CSS **string** into a
   React style object (the app keeps the original template's style strings verbatim). `Box` is
-  a polymorphic element (`as=...`) that adds `hover`/`focus` style merging via local state.
-  Plus a set of inline SVG icon components.
+  a polymorphic element (`as=...`, any element type — the sidebar passes `Link`) that adds
+  `hover`/`focus` style merging via local state. Plus a set of inline SVG icon components,
+  and the shell constants both pages share: `GLOBAL_CSS`, `MONO`, and `crmFontLinks` (the
+  Geist webfonts — **every route rendering the CRM shell must re-export it as `links`**, or
+  the page silently falls back to the root route's Inter).
+- **`sidebar.tsx`** — the shared left rail: the Contacts/Analytics nav plus the VIEWS and
+  OWNER filter rows, built from `buildViewTabs`/`buildOwnerTabs` (counts are always over the
+  **unfiltered** list). Purely presentational — each page owns its own filter state and click
+  handlers, which is what keeps the contacts page's "reset the source filter when leaving
+  Loop 2" rule out of the sidebar.
+- **`analytics.ts`** — pure, isomorphic metric aggregation (`computeAnalytics`). No React, no
+  server imports, and **no `Date`** — the absolute date labels arrive from the loader. It also
+  precomputes colours and bar widths so the page component stays a plain mapper. Note the two
+  derived metrics: nothing records a reply or booking as an event, so "replied" and "meetings"
+  are read off the contact's *current* pipeline status.
+- **`analytics-page.tsx`** — the `/analytics` UI. Read-only (no fetcher, no action). Charts are
+  plain divs with percentage widths/heights — there is no charting dependency, deliberately.
 - **`sales-loop-crm.tsx`** — the entire UI as **one big client component** taking a
   `contacts` prop from the route loader. A `useState` "God object" (`State`) holds only
   **UI** state (filters, selection, menus, form/CSV drafts) — patched through `patch()`; the
@@ -119,11 +137,16 @@ Security headers (CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS on https, etc.
 `npm run start` to see them.
 
 Gotchas:
-- **No touchpoint write path.** Nothing inserts into the `touchpoints` table yet, so
-  `touches` is always `[]`: the "Last touch" column and the detail timeline render empty, and
-  the touch-based `hasConflict`/`peopleInvolved` never fire (the live conflict flag is instead
-  the name-based `hasNameConflict`/`conflictOwners`). Logging touchpoints is the natural next
-  feature.
+- **Touchpoints are written by three paths**: the `logTouch` intent (the detail panel's "Log
+  touch" channel chips), `logMeeting`, and the bulk `markAdsSent`. They only reflect activity
+  logged in-app — nothing backfills historical outreach, so the analytics channel and activity
+  panels start sparse. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
+  live conflict flag remains the name-based `hasNameConflict`/`conflictOwners`.
+- **`contacts.dead_reason`** is captured by a prompt that intercepts the shared `setStatus`
+  handler whenever a contact is set to Dead (covering both the row and detail status menus).
+  `updateContactStatus` writes the column on *every* status change, so moving a contact off
+  Dead clears it. Contacts marked Dead before migration `0007`, and anyone who skips the
+  prompt, are reported as "Unspecified".
 - Index-route **actions require `?index`** in the POST URL (the client's `useFetcher` adds it
   automatically; a raw `curl` to `/` hits the layout route and 405s).
 

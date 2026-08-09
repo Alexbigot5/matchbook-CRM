@@ -34,6 +34,27 @@ function dateLabel(ms: number): string {
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
+/**
+ * X-axis labels for the analytics activity chart, computed against the loader's
+ * single `now` so no Date runs during render.
+ *
+ * `dayLabels[0]` is (days - 1) days ago and the last entry is today, which is the
+ * exact inverse of the `daysAgo` that listContacts stamps on each touch: both
+ * bucket on UTC midnight via dayDiff/startOfUTCDay, so a touch with
+ * `daysAgo === k` belongs to `dayLabels[days - 1 - k]`. That alignment is what
+ * lets app/crm/analytics.ts bucket the chart without touching a Date — changing
+ * either side means changing both.
+ */
+export function buildAnalyticsLabels(
+  now: number,
+  days = 14,
+): { asOf: string; dayLabels: string[] } {
+  const today = startOfUTCDay(now);
+  const dayLabels: string[] = [];
+  for (let i = days - 1; i >= 0; i--) dayLabels.push(dateLabel(today - i * DAY));
+  return { asOf: dateLabel(now), dayLabels };
+}
+
 function parseLoops(raw: string): number[] {
   try {
     const arr = JSON.parse(raw);
@@ -65,6 +86,7 @@ type ContactRow = {
   source: string | null;
   follow_up_at: string | null;
   resumed_to_loop1_at: string | null;
+  dead_reason: string | null;
   created_at: string;
 };
 
@@ -87,9 +109,9 @@ type TouchpointRow = {
 };
 
 /**
- * Load every contact with its notes, shaped to satisfy the existing `Contact`
- * type. `touches` is always empty (no write path creates touchpoints yet) and
- * `opts` is always `{}`. `now` is the loader's single reference instant.
+ * Load every contact with its notes and touchpoints, shaped to satisfy the
+ * existing `Contact` type. `opts` is always `{}`. `now` is the loader's single
+ * reference instant.
  */
 export async function listContacts(
   db: D1Database,
@@ -109,11 +131,11 @@ export async function listContacts(
   const [contactsRes, notesRes, touchesRes] = await Promise.all([
     (limit === null
       ? db.prepare(
-          "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, created_at FROM contacts ORDER BY created_at DESC",
+          "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
         )
       : db
           .prepare(
-            "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
           )
           .bind(limit, offset)
     ).all<ContactRow>(),
@@ -184,6 +206,7 @@ export async function listContacts(
       source: row.source ?? null,
       resumedToLoop1At: row.resumed_to_loop1_at ?? null,
       resumedLabel,
+      deadReason: row.dead_reason ?? null,
       opts: {},
     };
   });
@@ -304,14 +327,21 @@ export async function deleteContacts(
   return deleted;
 }
 
+/**
+ * Set a contact's status, and with it the dead-reason that only makes sense
+ * alongside it. `deadReason` is written unconditionally — a contact moving off
+ * Dead must lose its reason, or a later re-death with the prompt skipped would
+ * silently inherit the old one. Callers pass null for every non-Dead status.
+ */
 export async function updateContactStatus(
   db: D1Database,
   id: string,
   status: string,
+  deadReason: string | null = null,
 ): Promise<void> {
   await db
-    .prepare("UPDATE contacts SET status = ? WHERE id = ?")
-    .bind(status, id)
+    .prepare("UPDATE contacts SET status = ?, dead_reason = ? WHERE id = ?")
+    .bind(status, status === "Dead" ? deadReason : null, id)
     .run();
 }
 

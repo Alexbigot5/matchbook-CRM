@@ -1,8 +1,39 @@
 import { useState } from "react";
-import type { CSSProperties, JSX, ReactNode } from "react";
+import type { CSSProperties, ElementType, ReactNode } from "react";
 
 function kebabToCamel(s: string) {
   return s.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+}
+
+// Document-level CSS for the CRM shell. Both pages render it into an inline
+// <style>, so it lives here rather than in either page component — importing it
+// from sales-loop-crm.tsx would pull that whole module into the analytics bundle.
+export const GLOBAL_CSS = `
+  .slcrm * { box-sizing: border-box; }
+  .slcrm { font-family: 'Geist', system-ui, sans-serif; color: #1a1a1a; -webkit-font-smoothing: antialiased; }
+  .slcrm ::-webkit-scrollbar { width: 10px; height: 10px; }
+  .slcrm ::-webkit-scrollbar-thumb { background: #e2e2df; border-radius: 6px; border: 3px solid #fff; }
+  .slcrm ::-webkit-scrollbar-thumb:hover { background: #d0d0cd; }
+  @keyframes slcrm-slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  @keyframes slcrm-fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes slcrm-slideDown { from { transform: translateY(-12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+`;
+
+// Prefix for every numeric in the CRM. GLOBAL_CSS only sets the sans stack.
+export const MONO = "font-family:'Geist Mono',monospace;";
+
+// The webfonts GLOBAL_CSS and MONO reference. Every route rendering the CRM shell
+// must re-export this as its own `links()` — the root route loads Inter, so a page
+// that forgets this silently renders in the wrong typeface with no mono at all.
+export function crmFontLinks() {
+  return [
+    { rel: "preconnect", href: "https://fonts.googleapis.com" },
+    { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
+    {
+      rel: "stylesheet",
+      href: "https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600;700;800&family=Geist+Mono:wght@400;500&display=swap",
+    },
+  ];
 }
 
 // Parse an inline CSS string (as used throughout the original template) into a
@@ -20,7 +51,9 @@ export function css(style: string): CSSProperties {
 }
 
 type BoxProps = {
-  as?: keyof JSX.IntrinsicElements;
+  // Any element type, not just intrinsic tags — the sidebar renders `as={Link}`
+  // so a router link can carry the same hover styling as everything else.
+  as?: ElementType;
   hover?: CSSProperties;
   focus?: CSSProperties;
   style?: CSSProperties;
@@ -143,6 +176,21 @@ export function IconTrash({ size = 14, style }: { size?: number; style?: CSSProp
       <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
       <path d="M6 7v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
       <path d="M10 11v6M14 11v6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+export function IconContacts({ style }: { style?: CSSProperties }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={style}>
+      <circle cx="12" cy="8" r="3.5" stroke="currentColor" strokeWidth="2" />
+      <path d="M5 20a7 7 0 0 1 14 0" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+export function IconChart({ style }: { style?: CSSProperties }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={style}>
+      <path d="M5 19V11M12 19V5M19 19v-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Form, useFetcher } from "react-router";
+import { useFetcher } from "react-router";
 import {
   ago,
   buildNameIndex,
@@ -15,10 +15,12 @@ import {
   statusMeta,
   statusPill,
   STATUSES,
+  type Viewer,
 } from "./data";
 import {
   Box,
   css,
+  GLOBAL_CSS,
   IconCalendar,
   IconCheck,
   IconChevronDown,
@@ -29,9 +31,12 @@ import {
   IconTrash,
   IconUpload,
   IconWarn,
+  MONO,
 } from "./ui";
+import { buildOwnerTabs, buildViewTabs, Sidebar } from "./sidebar";
 import {
   csvCell,
+  DEAD_REASONS,
   safeMailto,
   LIMITS,
   MAX_CSV_BYTES,
@@ -119,6 +124,8 @@ type State = {
   detailMenu: boolean;
   noteDraft: string;
   modal: string | null;
+  /** Contact awaiting a dead-reason choice in the "deadReason" modal. */
+  pendingDeadId: string | null;
   form: FormState;
   csvText: string;
   csvError: string;
@@ -144,18 +151,10 @@ const blankForm = (loops?: number[]): FormState => ({
   source: "",
 });
 
-const GLOBAL_CSS = `
-  .slcrm * { box-sizing: border-box; }
-  .slcrm { font-family: 'Geist', system-ui, sans-serif; color: #1a1a1a; -webkit-font-smoothing: antialiased; }
-  .slcrm ::-webkit-scrollbar { width: 10px; height: 10px; }
-  .slcrm ::-webkit-scrollbar-thumb { background: #e2e2df; border-radius: 6px; border: 3px solid #fff; }
-  .slcrm ::-webkit-scrollbar-thumb:hover { background: #d0d0cd; }
-  @keyframes slcrm-slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-  @keyframes slcrm-fadeIn { from { opacity: 0; } to { opacity: 1; } }
-  @keyframes slcrm-slideDown { from { transform: translateY(-12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-`;
-
-const MONO = "font-family:'Geist Mono',monospace;";
+// Outreach channels offered in the detail panel's "Log touch" row. `meeting` is
+// deliberately absent — the "Log as meeting note" button above already records
+// one, and it requires a note where these don't.
+const TOUCH_CHANNELS = ["ad", "email", "linkedin", "call"];
 
 // Normalize a stored LinkedIn value (URL or bare handle) into an absolute href.
 // Empty when there's nothing to link to.
@@ -246,7 +245,7 @@ function Checkbox({
   );
 }
 
-export type Viewer = { name: string; initial: string; color: string };
+export type { Viewer } from "./data";
 
 export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer: Viewer }) {
   const fetcher = useFetcher();
@@ -262,6 +261,7 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     detailMenu: false,
     noteDraft: "",
     modal: null,
+    pendingDeadId: null,
     form: blankForm([1]),
     csvText: "",
     csvError: "",
@@ -294,7 +294,7 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
         s.modal
           ? notice
             ? { csvText: "", csvError: notice, actionError: "", deleteIds: [] }
-            : { modal: null, csvText: "", csvError: "", actionError: "", deleteIds: [] }
+            : { modal: null, csvText: "", csvError: "", actionError: "", deleteIds: [], pendingDeadId: null }
           : {},
       );
     } else {
@@ -345,10 +345,26 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     patch((s) => ({ menuId: s.menuId === id ? null : id }));
   };
   const toggleDetailMenu = () => patch((s) => ({ detailMenu: !s.detailMenu }));
+  // Both status menus (row and detail) funnel through here, so intercepting Dead
+  // once covers both. The write is deferred until a reason is picked or skipped.
   const setStatus = (id: string, status: string, e?: any) => {
     if (e) e.stopPropagation();
+    if (status === "Dead") {
+      patch({ menuId: null, detailMenu: false, modal: "deadReason", pendingDeadId: id, actionError: "" });
+      return;
+    }
     patch({ menuId: null, detailMenu: false });
     submit({ intent: "setStatus", id, status });
+  };
+  const confirmDead = (reason: string) => {
+    if (!S.pendingDeadId) return;
+    submit({ intent: "setStatus", id: S.pendingDeadId, status: "Dead", reason });
+  };
+  const logTouch = (ch: string) => {
+    if (!S.selectedId) return;
+    const text = (S.noteDraft || "").trim();
+    patch({ noteDraft: "" });
+    submit({ intent: "logTouch", id: S.selectedId, ch, text });
   };
   const onNoteInput = (e: any) => patch({ noteDraft: e.target.value });
   const addNote = () => {
@@ -408,6 +424,9 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
       csvDragging: false,
       csvFileName: "",
       deleteIds: [],
+      // Dismissing the reason prompt abandons the status change entirely — the
+      // contact stays on whatever status it had.
+      pendingDeadId: null,
     });
 
   // Deleting is irreversible (notes and touchpoints go with the contact), so it
@@ -606,36 +625,10 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
   }
   const sources = [...sourceCounts.keys()].sort((a, b) => a.localeCompare(b));
 
-  const counts = {
-    all: contacts.length,
-    loop1: contacts.filter((c) => c.loops.includes(1)).length,
-    loop2: contacts.filter((c) => c.loops.includes(2)).length,
-  };
-  const ownerCounts = {
-    all: contacts.length,
-    Tom: contacts.filter((c) => c.owner === "Tom").length,
-    Britton: contacts.filter((c) => c.owner === "Britton").length,
-    unassigned: contacts.filter((c) => !c.owner).length,
-  };
-
-  const tabBtn = (active: boolean) =>
-    `display:flex;align-items:center;justify-content:space-between;width:100%;padding:7px 8px;border:none;background:${active ? "#eeeee9" : "none"};border-radius:8px;font-size:13px;font-weight:${active ? "500" : "450"};color:${active ? "#1a1a1a" : "#575753"};cursor:pointer;font-family:inherit;margin-bottom:1px;`;
-  const viewTabs = [
-    { key: "all", label: "All contacts", dot: "#c4c4be", count: counts.all },
-    { key: "loop1", label: "Loop 1", dot: "#9a9a95", count: counts.loop1 },
-    { key: "loop2", label: "Loop 2", dot: "#e0930a", count: counts.loop2 },
-  ].map((t) => ({
-    ...t,
-    style: tabBtn(S.view === t.key),
-    onClick: () => setView(t.key),
-  }));
-
-  const ownerTabs = [
-    { key: "all", label: "Everyone", count: ownerCounts.all, hasAvatar: false, color: "", initial: "" },
-    { key: "Tom", label: "Tom", count: ownerCounts.Tom, hasAvatar: true, color: OWNERS.Tom.color, initial: "T" },
-    { key: "Britton", label: "Britton", count: ownerCounts.Britton, hasAvatar: true, color: OWNERS.Britton.color, initial: "B" },
-    { key: "unassigned", label: "Unassigned", count: ownerCounts.unassigned, hasAvatar: false, color: "", initial: "" },
-  ].map((o) => ({ ...o, style: tabBtn(S.owner === o.key), onClick: () => setOwner(o.key) }));
+  // Counts are over the unfiltered list — see buildViewTabs. `setView` (not the
+  // sidebar) owns resetting the Loop 2 source filter when leaving that view.
+  const viewTabs = buildViewTabs(contacts, S.view, setView);
+  const ownerTabs = buildOwnerTabs(contacts, S.owner, setOwner);
 
   // Base set for the SOURCE filter row (Loop 2 only) - everything except the
   // source and stage filters, so per-source counts reflect the current view.
@@ -744,6 +737,10 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
       ? "“" + deleteTargets[0].name + "”"
       : deleteTargets.length + " contacts";
   const deletePending = fetcher.state !== "idle";
+
+  // The contact awaiting a dead-reason choice. Empty when it has been deleted out
+  // from under the modal, in which case the prompt just drops the name.
+  const deadTargetName = contacts.find((c) => c.id === S.pendingDeadId)?.name ?? "";
 
   const prio = (c: Contact) => {
     if (!c.owner) return 0;
@@ -1022,58 +1019,7 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     <div className="slcrm" style={css("display:flex; height:100vh; width:100%; overflow:hidden; background:#ffffff;")}>
       <style dangerouslySetInnerHTML={{ __html: GLOBAL_CSS }} />
 
-      {/* SIDEBAR */}
-      <aside style={css("width:236px; flex:0 0 236px; border-right:1px solid #ededea; background:#fbfbfa; display:flex; flex-direction:column; padding:16px 12px;")}>
-        <div style={css("display:flex; align-items:center; gap:9px; padding:4px 8px 16px 8px;")}>
-          <div style={css("width:24px; height:24px; border-radius:6px; background:#1a1a1a; color:#fff; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600;")}>S</div>
-          <div style={css("font-size:14px; font-weight:600; letter-spacing:-0.01em;")}>Sales Loops</div>
-        </div>
-
-        <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; padding:8px 8px 6px;")}>Views</div>
-        {viewTabs.map((tab) => (
-          <Box as="button" key={tab.key} onClick={tab.onClick} style={css(tab.style)} hover={css("background:#f0f0ec;")}>
-            <span style={css("display:flex; align-items:center; gap:9px;")}>
-              <span style={css(`width:8px; height:8px; border-radius:3px; background:${tab.dot};`)} />
-              <span>{tab.label}</span>
-            </span>
-            <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{tab.count}</span>
-          </Box>
-        ))}
-
-        <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; padding:18px 8px 6px;")}>Owner</div>
-        {ownerTabs.map((o) => (
-          <Box as="button" key={o.key} onClick={o.onClick} style={css(o.style)} hover={css("background:#f0f0ec;")}>
-            <span style={css("display:flex; align-items:center; gap:9px;")}>
-              {o.hasAvatar && (
-                <span style={css(`width:18px; height:18px; border-radius:5px; background:${o.color}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600;`)}>{o.initial}</span>
-              )}
-              <span>{o.label}</span>
-            </span>
-            <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{o.count}</span>
-          </Box>
-        ))}
-
-        <div style={css("margin-top:auto; padding:12px 8px 10px; border-top:1px solid #ededea; font-size:11px; color:#a3a39d; line-height:1.5;")}>
-          <div><span style={css("color:#575753;")}>Loop 1</span> · always-on outbound</div>
-          <div><span style={css("color:#b45309;")}>Loop 2</span> · event/community blitz</div>
-        </div>
-
-        <div style={css("display:flex; align-items:center; gap:8px; padding:10px 8px 2px; border-top:1px solid #ededea;")}>
-          <span style={css(`width:20px; height:20px; border-radius:6px; background:${viewer.color}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; flex:0 0 auto;`)}>{viewer.initial}</span>
-          <span style={css("font-size:12px; font-weight:500; color:#575753; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}>{viewer.name}</span>
-          <Form method="post" action="/logout">
-            <Box
-              as="button"
-              type="submit"
-              title="Sign out"
-              style={css("background:none; border:none; padding:3px 6px; border-radius:6px; font-size:11px; font-family:inherit; color:#a3a39d; cursor:pointer;")}
-              hover={css("background:#f0f0ec; color:#575753;")}
-            >
-              Sign out
-            </Box>
-          </Form>
-        </div>
-      </aside>
+      <Sidebar nav="contacts" viewTabs={viewTabs} ownerTabs={ownerTabs} viewer={viewer} />
 
       {/* MAIN */}
       <main style={css("flex:1; display:flex; flex-direction:column; min-width:0; background:#ffffff;")}>
@@ -1480,6 +1426,26 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
                       </Box>
                       <button onClick={addNote} style={css("border:none; background:#1a1a1a; color:#fff; padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;")}>Add note</button>
                     </div>
+
+                    {/* Records outreach on a channel, which is what the analytics
+                        channel breakdown and activity chart are built from. The
+                        draft above rides along as the touch note when present. */}
+                    <div style={css("display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:10px;")}>
+                      <span style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.04em; margin-right:2px;")}>Log touch</span>
+                      {TOUCH_CHANNELS.map((key) => (
+                        <Box
+                          as="button"
+                          key={key}
+                          onClick={() => logTouch(key)}
+                          title={`Log a ${CH[key].label.toLowerCase()} touchpoint`}
+                          style={css(`display:inline-flex; align-items:center; gap:5px; padding:4px 9px; border-radius:7px; border:1px solid #e6e6e2; background:#fff; color:${CH[key].fg}; font-size:12px; font-weight:500; font-family:inherit; cursor:pointer;`)}
+                          hover={css(`background:${CH[key].bg}; border-color:${CH[key].bg};`)}
+                        >
+                          <span style={css("display:flex; align-items:center;")} dangerouslySetInnerHTML={{ __html: CH[key].icon }} />
+                          {CH[key].label}
+                        </Box>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1700,6 +1666,46 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
                       <IconTrash />
                       {deletePending ? "Deleting…" : "Delete"}
                     </Box>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {S.modal === "deadReason" && (
+              <>
+                <div style={css("padding:20px 22px 16px; border-bottom:1px solid #ededea; display:flex; align-items:center; justify-content:space-between;")}>
+                  <div style={css("font-size:16px; font-weight:600; letter-spacing:-0.01em;")}>Why did this deal die?</div>
+                  <Box as="button" onClick={closeModal} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
+                </div>
+                <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:14px;")}>
+                  <div style={css("font-size:13px; color:#3a3a38; line-height:1.55;")}>
+                    {deadTargetName ? (
+                      <>Marking <span style={css("font-weight:500;")}>{deadTargetName}</span> as dead. The reason feeds the analytics breakdown.</>
+                    ) : (
+                      <>The reason feeds the analytics breakdown.</>
+                    )}
+                  </div>
+                  <div style={css("display:flex; flex-wrap:wrap; gap:8px;")}>
+                    {DEAD_REASONS.map((reason) => (
+                      <Box
+                        as="button"
+                        key={reason}
+                        onClick={() => confirmDead(reason)}
+                        style={css("border:1px solid #e6e6e2; background:#fff; color:#3a3a38; padding:9px 14px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer;")}
+                        hover={css("background:#f4ecec; border-color:#f0cccc; color:#9a5b5b;")}
+                      >
+                        {reason}
+                      </Box>
+                    ))}
+                  </div>
+                  {S.actionError && <div style={css("font-size:12px; color:#c2410c;")}>{S.actionError}</div>}
+                  <div style={css("display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:2px;")}>
+                    {/* Skipping still marks the contact dead — it just records no
+                        reason, which analytics reports as "Unspecified". */}
+                    <Box as="button" onClick={() => confirmDead("")} style={css("border:none; background:none; padding:9px 4px; font-size:12.5px; font-family:inherit; cursor:pointer; color:#9a9a95;")} hover={css("color:#575753;")}>
+                      Skip — mark dead without a reason
+                    </Box>
+                    <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
                   </div>
                 </div>
               </>
