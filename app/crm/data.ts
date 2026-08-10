@@ -37,12 +37,21 @@ export type Contact = {
   // plus a precomputed "Jul 20"-style label (null when never resumed).
   resumedToLoop1At?: string | null;
   resumedLabel?: string | null;
+  // Why a Dead contact died, captured when the status is set (see DEAD_REASONS in
+  // app/lib/validate.ts). Null for contacts marked Dead before the column existed,
+  // or when the person chose to skip the prompt.
+  deadReason?: string | null;
   opts: ContactOpts;
 };
 
 export type Channel = { label: string; bg: string; fg: string; icon: string };
 export type StatusMeta = { id: string; dot: string; bg: string; fg: string };
 export type Owner = { initial: string; color: string };
+
+// The signed-in user's avatar badge. Resolved server-side in each route loader
+// (see `viewerAvatar`) so the UI renders purely from loader data. Lives here
+// rather than in a component file because both pages' shells need it.
+export type Viewer = { name: string; initial: string; color: string };
 
 export const CH: Record<string, Channel> = {
   ad: {
@@ -99,6 +108,17 @@ export const OWNERS: Record<string, Owner> = {
   Alex: { initial: "A", color: "#b45309" },
   Mike: { initial: "M", color: "#7c3aed" },
 };
+const FALLBACK_AVATAR: Owner = { initial: "?", color: "#b0b0aa" };
+
+// Avatar for an arbitrary name from the DB or the session. `Object.hasOwn` rather
+// than a bare `OWNERS[name]`, which walks the prototype chain — "constructor"
+// returns a function, not undefined, so `?? fallback` never fires for it.
+export function ownerAvatar(name: string | null | undefined): Owner {
+  if (!name) return FALLBACK_AVATAR;
+  if (Object.hasOwn(OWNERS, name)) return OWNERS[name];
+  return { initial: (name.slice(0, 1) || "?").toUpperCase(), color: FALLBACK_AVATAR.color };
+}
+
 export const TODAY = new Date(2026, 6, 16);
 
 export function dateFrom(daysAgo: number) {

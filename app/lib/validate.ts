@@ -37,8 +37,23 @@ export const MAX_IDS = 1_000;
 /** Maximum size of an uploaded CSV file, in bytes. */
 export const MAX_CSV_BYTES = 2 * 1024 * 1024;
 
+/**
+ * Why a deal died, offered when a contact's status is set to Dead. A closed set
+ * rather than free text: the analytics panel groups on this value exactly, and a
+ * typo would silently become its own bucket. The client imports it to render the
+ * picker, so both ends offer and accept the same five.
+ */
+export const DEAD_REASONS = [
+  "No response",
+  "Not a fit",
+  "Timing",
+  "Price",
+  "Competitor",
+] as const;
+
 const STATUS_IDS: ReadonlySet<string> = new Set(STATUSES.map((s) => s.id));
 const TOUCH_TYPES: ReadonlySet<string> = new Set(Object.keys(CH));
+const DEAD_REASON_SET: ReadonlySet<string> = new Set(DEAD_REASONS);
 
 export function isValidStatus(value: unknown): value is string {
   return typeof value === "string" && STATUS_IDS.has(value);
@@ -46,6 +61,10 @@ export function isValidStatus(value: unknown): value is string {
 
 export function isValidTouchType(value: unknown): value is string {
   return typeof value === "string" && TOUCH_TYPES.has(value);
+}
+
+export function isValidDeadReason(value: unknown): value is string {
+  return typeof value === "string" && DEAD_REASON_SET.has(value);
 }
 
 /** Loop numbers are a closed set of two; anything else is a bug or an attack. */
