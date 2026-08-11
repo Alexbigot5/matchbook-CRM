@@ -3,6 +3,7 @@ import { type RouteConfig, index, route } from "@react-router/dev/routes";
 export default [
   index("routes/home.tsx"),
   route("analytics", "routes/analytics.tsx"),
+  route("templates", "routes/templates.tsx"),
   route("login", "routes/login.tsx"),
   route("logout", "routes/logout.tsx"),
   // better-auth's own HTTP handler (magic-link verify, get-session, sign-out).

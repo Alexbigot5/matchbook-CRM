@@ -16,6 +16,8 @@ import {
   validateIds,
   validateImportRows,
   validateNote,
+  validateStats,
+  validateVariantTarget,
   LIMITS,
 } from "../lib/validate";
 import {
@@ -24,8 +26,10 @@ import {
   createContact,
   createManyContacts,
   listContacts,
+  listTemplates,
   logTouchpoint,
   markAdsSent,
+  recordVariantStats,
   resumeToLoop1,
   snoozeFollowUp,
   updateContactStatus,
@@ -106,12 +110,25 @@ const DEFAULT_PAGE_LIMIT = 500;
 // GET /api/hyperagent — list contacts (same shape the app loader returns).
 // Supports ?limit= and ?offset= so a caller can page rather than pull the whole
 // database in one response.
+//
+// ?resource=templates returns the email templates instead. A separate resource
+// rather than an extra key on the contacts response, so the existing contract
+// stays byte-identical for any caller already polling this endpoint.
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { DB, CRM_API_KEY } = context.get(appContext);
   const fail = await authFailure(DB, request, CRM_API_KEY);
   if (fail) return fail;
 
   const url = new URL(request.url);
+
+  if (url.searchParams.get("resource") === "templates") {
+    // Includes each variant's `isDefault`, which is what makes the page's
+    // "Promote to default" button mean anything: the sending tool reads this to
+    // decide which copy to actually send. Without a consumer the button is
+    // theatre. Unpaginated — a team's template library is a handful of rows.
+    return json({ ok: true, templates: await listTemplates(DB, Date.now()) });
+  }
+
   const rawLimit = Number(url.searchParams.get("limit"));
   const rawOffset = Number(url.searchParams.get("offset"));
   const limit =
@@ -244,6 +261,31 @@ export async function action({ request, context }: Route.ActionArgs) {
         if (!ids.ok) return json({ ok: false, error: ids.error }, 400);
         const count = await markAdsSent(DB, ids.ids, actor);
         return json({ ok: true, count });
+      }
+      // Push performance counters for one email-template variant. Body:
+      //   { op, templateId, slot: "B" | variantId, sends?, opens?, replies?, meetings? }
+      //
+      // ABSOLUTE lifetime totals, not increments — see recordVariantStats. An
+      // omitted field leaves that counter untouched, so a caller that only knows
+      // replies can push replies alone.
+      //
+      // Addressing by `slot` is the intended form: the caller stores one id per
+      // template and keeps pushing to "B" even if B is added long after it was
+      // configured.
+      //
+      // Note what is deliberately NOT here: no createTemplate, saveVariant or
+      // deleteTemplate op. A bearer token that can rewrite outbound copy is a
+      // phishing primitive; one that can only move counters is not.
+      case "recordTemplateStats": {
+        // Both validators are the same ones the session action uses, in the same
+        // order, so the two entry points can't disagree about what's acceptable.
+        const target = validateVariantTarget(body);
+        if (!target.ok) return json({ ok: false, error: target.error }, 400);
+        const stats = validateStats(body);
+        if (!stats.ok) return json({ ok: false, error: stats.error }, 400);
+        const updated = await recordVariantStats(DB, target.value, stats.value);
+        if (!updated) return json({ ok: false, error: "No such template variant." }, 404);
+        return json({ ok: true });
       }
       default:
         return json({ ok: false, error: "Unknown op." }, 400);

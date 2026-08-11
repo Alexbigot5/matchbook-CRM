@@ -39,8 +39,8 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    `context.get(appContext)`**, not a plain `context.DB`. `appContext` is the exported
    `createContext` handle. It takes the `Request` as well as `env` so the auth base URL can be
    derived per request; `getAuth()` is lazy so non-auth requests don't construct better-auth.
-3. `app/routes.ts` — route table: index → `routes/home.tsx`, `/analytics`, plus `/login`,
-   `/logout`, `/api/auth/*` (better-auth's handler) and `/api/hyperagent`.
+3. `app/routes.ts` — route table: index → `routes/home.tsx`, `/analytics`, `/templates`, plus
+   `/login`, `/logout`, `/api/auth/*` (better-auth's handler) and `/api/hyperagent`.
 4. `app/root.tsx` — HTML document shell (`Layout`), root `Outlet`, and `ErrorBoundary`.
 5. `app/routes/home.tsx` — the index route's `loader` requires a session then reads contacts
    from D1 (`listContacts`), the `action` re-checks the session and handles intent-dispatched
@@ -49,13 +49,16 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
 6. `app/routes/analytics.tsx` — the `/analytics` loader mirrors home's (`requireUser` +
    `listContacts` against one `now`) and additionally returns `buildAnalyticsLabels(now)`, the
    precomputed date axis. **No `action`** — the page is read-only; all writes live on `/`.
+7. `app/routes/templates.tsx` — the `/templates` loader reads `listTemplates` **and**
+   `listContacts` (the latter only feeds the shared sidebar's OWNER counts) against one `now`.
+   It has its own `action` with nine intents. Being a named route, its POSTs need no `?index`.
 
 `app/entry.server.tsx` is the standard streaming SSR entry (`renderToReadableStream`,
 5s `streamTimeout`, bot-detection via `isbot`).
 
 ## The CRM (`app/crm/`)
 
-Two pages (contacts and analytics) over a shared shell:
+Three pages (contacts, analytics, email templates) over a shared shell:
 
 - **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`, `Viewer`), constants
   (`CH` channels, `STATUSES`, `OWNERS`), and pure helpers:
@@ -72,11 +75,16 @@ Two pages (contacts and analytics) over a shared shell:
   and the shell constants both pages share: `GLOBAL_CSS`, `MONO`, and `crmFontLinks` (the
   Geist webfonts — **every route rendering the CRM shell must re-export it as `links`**, or
   the page silently falls back to the root route's Inter).
-- **`sidebar.tsx`** — the shared left rail: the Contacts/Analytics nav plus the VIEWS and
-  OWNER filter rows, built from `buildViewTabs`/`buildOwnerTabs` (counts are always over the
-  **unfiltered** list). Purely presentational — each page owns its own filter state and click
-  handlers, which is what keeps the contacts page's "reset the source filter when leaving
-  Loop 2" rule out of the sidebar.
+- **`sidebar.tsx`** — the shared left rail: the Contacts/Analytics/Templates nav (a **vertical**
+  stack — three items don't fit a segmented control; every item carries
+  `border:1px solid transparent` so the active one's real border doesn't shift the others) plus
+  the VIEWS and OWNER filter rows, built from `buildViewTabs`/`buildOwnerTabs` (counts are
+  always over the **unfiltered** list). `buildViewTabs` takes optional `counts`/`allLabel`
+  overrides — `/templates` passes template counts there because its VIEWS rows filter
+  templates, not contacts. `Sidebar` also takes an optional `ownerNote`, which only
+  `/templates` passes (its OWNER rows are inert; templates have no owner). Purely
+  presentational — each page owns its own filter state and click handlers, which is what keeps
+  the contacts page's "reset the source filter when leaving Loop 2" rule out of the sidebar.
 - **`analytics.ts`** — pure, isomorphic metric aggregation (`computeAnalytics`). No React, no
   server imports, and **no `Date`** — the absolute date labels arrive from the loader. It also
   precomputes colours and bar widths so the page component stays a plain mapper. Note the two
@@ -84,6 +92,22 @@ Two pages (contacts and analytics) over a shared shell:
   are read off the contact's *current* pipeline status.
 - **`analytics-page.tsx`** — the `/analytics` UI. Read-only (no fetcher, no action). Charts are
   plain divs with percentage widths/heights — there is no charting dependency, deliberately.
+- **`templates.ts`** — the email-template model, deliberately separate from `data.ts` (which is
+  the *contacts* model). Types (`EmailTemplate`, `TemplateVariant`), the `TEMPLATE_STATUSES` /
+  `VARIANT_SLOTS` closed sets, `UNTITLED`, and `templateStatusPill`. Pure, isomorphic, **no
+  `Date`**. Note what `EmailTemplate` deliberately does *not* carry: the raw `started_at`
+  string. Only `runningDays`/`startedLabel` are exposed, so nothing can be tempted to call
+  `Date.now()` in the render path.
+- **`ab.ts`** — pure, isomorphic A/B aggregation (`computeTemplatesView`), the same contract as
+  `analytics.ts`. Precomputes every rate, bar width, colour and verdict sentence. Two things
+  worth knowing: it **resolves the selection** (a `selectedId` missing from the filtered list
+  falls back to the first card), which is why the templates page needs no reconciling
+  `useEffect` after a delete; and it holds the only statistics in the app — a two-proportion
+  z-test on reply rate with a hand-rolled normal CDF. Read the module header before touching
+  the verdict: the figure is `1 − p` for "the rates are equal", **not** the probability that
+  the leader is better, and it's a fixed-horizon test read continuously.
+- **`templates-page.tsx`** — the `/templates` UI, same one-client-component + `useState` God
+  object + single `useFetcher` idiom as `sales-loop-crm.tsx`.
 - **`sales-loop-crm.tsx`** — the entire UI as **one big client component** taking a
   `contacts` prop from the route loader. A `useState` "God object" (`State`) holds only
   **UI** state (filters, selection, menus, form/CSV drafts) — patched through `patch()`; the
@@ -104,14 +128,18 @@ surfaces a red "conflict" flag + detail banner.
 
 ## Data persistence
 
-Contacts, notes, and follow-ups **persist to Cloudflare D1**. `app/lib/crm.server.ts` is the
+Contacts, notes, follow-ups and email templates **persist to Cloudflare D1**. `app/lib/crm.server.ts` is the
 server-only data-access layer (raw D1 prepared statements, `crypto.randomUUID()` ids). It owns
 all conversion between stored **absolute** timestamps and the **relative** `daysAgo`/`followUp`
 values the UI renders — keeping every `Date` call server-side is what preserves SSR/hydration
 determinism. The schema lives in `migrations/` (applied via Wrangler's D1 migrations, tracked
 in a `d1_migrations` table) and mirrors the `data.ts` model: `contacts` stores `loops` as a JSON
 text array, a nullable `follow_up_at`, a nullable `source`, and a nullable
-`resumed_to_loop1_at`; `notes` uses a `text` column. The DB **starts empty** — contacts are
+`resumed_to_loop1_at`; `notes` uses a `text` column. `email_templates` + `template_variants`
+(migration `0008`) back the templates page — one row per variant, with a unique
+`(template_id, slot)` index that is the real guard behind "add variant B", and CHECKs only on
+`loop` and the four `>= 0` counters (`slot`/`status` are whitelisted in `validate.ts` instead,
+since SQLite can't drop a CHECK without rebuilding the table). The DB **starts empty** — contacts are
 created via the UI / CSV import. **Schema changes:** run `npm run db:migrations:create <name>` to
 scaffold a new numbered file in `migrations/`, add your `CREATE`/`ALTER` SQL, then apply it with
 `npm run db:migrate:local` / `npm run db:migrate:remote`. Wrangler only runs migrations not yet
@@ -120,7 +148,10 @@ recorded in `d1_migrations`, so files are applied once, in numeric order.
 **Input validation lives in `app/lib/validate.ts`** — shared by the session action
 (`home.tsx`) and the machine API (`api.hyperagent.ts`), which previously disagreed about what
 was acceptable. It owns the field length limits (`LIMITS`), the import/bulk-id caps, the
-`status`/`owner`/`loop`/touch-type whitelists, the email format check, and two output
+`status`/`owner`/`loop`/touch-type/template-status/variant-slot whitelists, the email format
+check, the template validators (`validateTemplate`, `validateVariantContent`, `validateStats`,
+`validateVariantTarget` — the last two shared verbatim by `templates.tsx` and the machine API),
+and two output
 escapers: `csvCell` (RFC 4180 quoting **plus** neutralizing a leading `= + - @ \t \r`, which
 Excel and Sheets execute as a formula) and `safeMailto` (returns null unless the address is
 plain, so a stored `…?bcc=…&body=…` can't prefill an attacker's draft). It is isomorphic —
@@ -129,7 +160,11 @@ this module rather than validating inline.**
 
 Deletion is recorded in an append-only `audit_log` table with a JSON snapshot of each removed
 row and the acting user — contact deletion is a hard delete that also drops the contact's
-notes and touchpoints, on a dataset shared by all four users.
+notes and touchpoints, on a dataset shared by all four users. Template and variant deletion
+audit too (`template.delete` / `template_variant.delete`); the template snapshot carries its
+variants as well, since the copy is the only irreplaceable thing on that page. Stat writes are
+**not** audited — they're non-destructive and re-pushable, and logging every poll would flood
+the table.
 
 Security headers (CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS on https, etc.) are set in
 `workers/app.ts`, wrapping every dynamic response. They do **not** apply under
@@ -148,7 +183,28 @@ Gotchas:
   Dead clears it. Contacts marked Dead before migration `0007`, and anyone who skips the
   prompt, are reported as "Unspecified".
 - Index-route **actions require `?index`** in the POST URL (the client's `useFetcher` adds it
-  automatically; a raw `curl` to `/` hits the layout route and 405s).
+  automatically; a raw `curl` to `/` hits the layout route and 405s). `/templates` is a named
+  route, so its POSTs don't need it.
+- **Template metrics are pushed, never derived.** Nothing in this app sends email or tracks
+  opens, so `template_variants.sends/opens/replies/meetings` are counters written by an external
+  sending tool via `POST /api/hyperagent {op:"recordTemplateStats"}` (or typed into the page's
+  "Record numbers" modal). They are **absolute lifetime totals, not increments** — the caller
+  has no idempotency key and Workers redelivery happens, so `SET sends = ?` is safely repeatable
+  where `sends = sends + ?` would double-count and permanently corrupt the verdict. An omitted
+  field COALESCEs to the stored value, which is why `validateStats` distinguishes absent from
+  zero. Every rate and the whole A/B verdict is **computed** in `ab.ts` from those four
+  integers, so a corrected push immediately corrects the verdict. The page therefore starts at
+  "No sends yet" on a fresh DB, and the `/templates` GET resource (`?resource=templates`)
+  exposes `isDefault` so "Promote to default" actually reaches the sender.
+- **Every `template_variants` write is constrained by `AND template_id = ?`**, not just the
+  variant's own id — otherwise a caller could pass another template's variant id and, through
+  `promoteVariant`, clear template X's default while setting Y's. `promoteVariant`'s clear is
+  additionally guarded by an `EXISTS` on the target: `db.batch` atomicity covers failure, not a
+  statement that legitimately matches zero rows, so without the guard a cross-template id
+  committed a template with **no** default at all.
+- **The machine API can move template counters but not template copy.** No
+  `createTemplate`/`saveVariant`/`deleteTemplate` op exists on `/api/hyperagent`, deliberately:
+  a bearer token that can rewrite outbound email copy is a phishing primitive.
 
 ## Auth
 

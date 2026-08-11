@@ -125,9 +125,11 @@ export function IconUpload() {
     </svg>
   );
 }
-export function IconPlus() {
+// `size`/`style` are optional additions, so no existing call site changes — the
+// templates page's compact "+ New" button needs a smaller glyph than 15px.
+export function IconPlus({ size = 15, style }: { size?: number; style?: CSSProperties } = {}) {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={style}>
       <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
     </svg>
   );
@@ -191,6 +193,22 @@ export function IconChart({ style }: { style?: CSSProperties }) {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={style}>
       <path d="M5 19V11M12 19V5M19 19v-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+// Same envelope geometry as CH.email.icon in ./data.ts, so the Templates nav
+// glyph and the Email channel chip read as the same object.
+export function IconMail({ style }: { style?: CSSProperties }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={style}>
+      <rect x="3" y="5" width="18" height="14" rx="2.5" stroke="currentColor" strokeWidth="2" />
+      <path
+        d="m4 8 8 5.5L20 8"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

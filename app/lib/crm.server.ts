@@ -5,6 +5,13 @@
 // SSR and client hydration deterministic — no `Date` runs in the render path.
 
 import type { Contact, Note, Touch } from "../crm/data";
+import {
+  TEMPLATE_STATUSES,
+  type EmailTemplate,
+  type TemplateStatus,
+  type TemplateVariant,
+} from "../crm/templates";
+import type { StatCounts, TemplateFields } from "./validate";
 
 const DAY = 86_400_000;
 
@@ -475,4 +482,418 @@ export async function markAdsSent(
     created += inserts.length;
   }
   return created;
+}
+
+// ---------------------------------------------------------------------------
+// Email templates
+//
+// Same conventions as the contacts layer above: `db` first, ids minted here with
+// crypto.randomUUID(), `created_at` left to the column default, bound parameters
+// only, and every multi-statement write in one db.batch so a failure can't leave
+// a half-applied state.
+//
+// One rule specific to variants: EVERY variant statement is constrained by
+// `AND template_id = ?`, not just the variant's own id. Without it a caller could
+// hand over a variant id belonging to a different template and — through
+// promoteVariant — clear template X's default while setting template Y's. Same
+// discipline as `Object.hasOwn` in validate.ts: constrain the lookup rather than
+// trusting the key.
+// ---------------------------------------------------------------------------
+
+type EmailTemplateRow = {
+  id: string;
+  name: string;
+  loop: number;
+  status: string;
+  send_day: number;
+  started_at: string | null;
+  concluded_at: string | null;
+  created_at: string;
+};
+
+type TemplateVariantRow = {
+  id: string;
+  template_id: string;
+  slot: string;
+  subject: string;
+  body: string;
+  is_default: number;
+  sends: number;
+  opens: number;
+  replies: number;
+  meetings: number;
+  created_at: string;
+};
+
+const TEMPLATE_STATUS_SET: ReadonlySet<string> = new Set(TEMPLATE_STATUSES);
+
+/**
+ * Coerce a stored status into the union. A hand-edited row carrying 'paused'
+ * would otherwise flow straight into templateStatusPill's exhaustive branches;
+ * falling back to 'draft' mirrors how parseLoops falls back to [1].
+ */
+function parseTemplateStatus(raw: string): TemplateStatus {
+  return TEMPLATE_STATUS_SET.has(raw) ? (raw as TemplateStatus) : "draft";
+}
+
+const TEMPLATE_COLS =
+  "id, name, loop, status, send_day, started_at, concluded_at, created_at";
+const VARIANT_COLS =
+  "id, template_id, slot, subject, body, is_default, sends, opens, replies, meetings, created_at";
+
+/**
+ * Load every template with its variants. `now` is the loader's single reference
+ * instant — the same one listContacts is called with, so both halves of the page
+ * agree on where "today" starts.
+ *
+ * Two unbounded SELECTs in one Promise.all, children grouped into a Map: the same
+ * parent/children fan-out listContacts uses. Unpaginated because a team's
+ * template library is a handful of rows, not a contact book.
+ */
+export async function listTemplates(db: D1Database, now: number): Promise<EmailTemplate[]> {
+  const [templatesRes, variantsRes] = await Promise.all([
+    // `created_at` defaults to datetime('now'), which has second resolution — two
+    // templates created in the same second tie. The id tiebreak keeps the list
+    // order fully determined rather than left to the query plan, the same reason
+    // analytics.ts sorts its source rows by name after count.
+    db
+      .prepare(`SELECT ${TEMPLATE_COLS} FROM email_templates ORDER BY created_at DESC, id DESC`)
+      .all<EmailTemplateRow>(),
+    // Slot-ascending so variants[0] is always A, which the UI relies on for the
+    // left/right card order and for "A can't be removed".
+    db
+      .prepare(`SELECT ${VARIANT_COLS} FROM template_variants ORDER BY slot ASC`)
+      .all<TemplateVariantRow>(),
+  ]);
+
+  const variantsByTemplate = new Map<string, TemplateVariant[]>();
+  for (const v of variantsRes.results ?? []) {
+    const list = variantsByTemplate.get(v.template_id) ?? [];
+    list.push({
+      id: v.id,
+      slot: v.slot,
+      subject: v.subject ?? "",
+      body: v.body ?? "",
+      isDefault: Boolean(v.is_default),
+      sends: Number(v.sends) || 0,
+      opens: Number(v.opens) || 0,
+      replies: Number(v.replies) || 0,
+      meetings: Number(v.meetings) || 0,
+    });
+    variantsByTemplate.set(v.template_id, list);
+  }
+
+  return (templatesRes.results ?? []).map((row): EmailTemplate => {
+    // started_at → a relative integer here, so nothing downstream needs a Date.
+    const runningDays = row.started_at ? dayDiff(Date.parse(row.started_at), now) : null;
+    return {
+      id: row.id,
+      name: row.name,
+      loop: Number(row.loop) === 2 ? 2 : 1,
+      status: parseTemplateStatus(row.status),
+      sendDay: Number(row.send_day) || 0,
+      runningDays,
+      startedLabel: row.started_at ? dateLabel(Date.parse(row.started_at)) : null,
+      concludedLabel: row.concluded_at ? dateLabel(Date.parse(row.concluded_at)) : null,
+      variants: variantsByTemplate.get(row.id) ?? [],
+    };
+  });
+}
+
+/**
+ * Create a template and its variant A in one atomic batch, and return the new
+ * template's id so the caller can select it.
+ *
+ * Batched rather than two awaits because a template with zero variants would
+ * render a detail pane with no variant grid — a state the UI has no design for
+ * and which nothing else could repair.
+ */
+export async function createTemplate(
+  db: D1Database,
+  input: TemplateFields,
+): Promise<string> {
+  const templateId = crypto.randomUUID();
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO email_templates (id, name, loop, status, send_day) VALUES (?, ?, ?, 'draft', ?)",
+      )
+      .bind(templateId, str(input.name), input.loop, input.sendDay),
+    db
+      .prepare(
+        "INSERT INTO template_variants (id, template_id, slot, subject, body, is_default) VALUES (?, ?, 'A', '', '', 1)",
+      )
+      .bind(crypto.randomUUID(), templateId),
+  ]);
+  return templateId;
+}
+
+/** Rename / re-loop / re-schedule a template. False when no row matched. */
+export async function updateTemplate(
+  db: D1Database,
+  id: string,
+  input: TemplateFields,
+): Promise<boolean> {
+  const res = await db
+    .prepare("UPDATE email_templates SET name = ?, loop = ?, send_day = ? WHERE id = ?")
+    .bind(str(input.name), input.loop, input.sendDay, id)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Move a template between draft / running / concluded, maintaining both
+ * timestamps in the same statement.
+ *
+ * One statement with CASE expressions rather than a read-modify-write so the
+ * status and its timestamps can never tear apart under a concurrent edit.
+ *
+ * The invariant: `started_at` is non-null exactly when the status is not 'draft'.
+ * That means sending a template *back* to draft restarts the "running Nd" clock
+ * rather than resuming a stale one — the honest reading, since a paused-then-
+ * restarted test's day count would otherwise include the gap.
+ */
+export async function setTemplateStatus(
+  db: D1Database,
+  id: string,
+  status: TemplateStatus,
+): Promise<boolean> {
+  const nowIso = new Date().toISOString();
+  const res = await db
+    .prepare(
+      `UPDATE email_templates
+          SET status = ?1,
+              started_at = CASE
+                WHEN ?1 = 'draft' THEN NULL
+                WHEN started_at IS NULL THEN ?2
+                ELSE started_at END,
+              concluded_at = CASE WHEN ?1 = 'concluded' THEN ?2 ELSE NULL END
+        WHERE id = ?3`,
+    )
+    .bind(status, nowIso, id)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/** Save one variant's copy. False when the variant isn't on that template. */
+export async function saveVariant(
+  db: D1Database,
+  templateId: string,
+  variantId: string,
+  subject: string,
+  body: string,
+): Promise<boolean> {
+  const res = await db
+    .prepare(
+      "UPDATE template_variants SET subject = ?, body = ? WHERE id = ? AND template_id = ?",
+    )
+    .bind(str(subject), str(body), variantId, templateId)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Add a variant in the given slot. The new variant is never the default — the
+ * point of an A/B test is that the incumbent keeps serving until someone
+ * promotes the challenger.
+ */
+export async function addVariant(
+  db: D1Database,
+  templateId: string,
+  slot: string,
+): Promise<{ ok: true } | { ok: false; reason: "exists" | "missing" }> {
+  const parent = await db
+    .prepare("SELECT id FROM email_templates WHERE id = ?")
+    .bind(templateId)
+    .first<{ id: string }>();
+  if (!parent) return { ok: false, reason: "missing" };
+
+  try {
+    await db
+      .prepare(
+        "INSERT INTO template_variants (id, template_id, slot, subject, body, is_default) VALUES (?, ?, ?, '', '', 0)",
+      )
+      .bind(crypto.randomUUID(), templateId, slot)
+      .run();
+    return { ok: true };
+  } catch (err) {
+    // The unique (template_id, slot) index is the real guard — the check above
+    // loses a double-click race. Map the constraint failure to a real answer;
+    // rethrowing would surface the opaque "Reference: …" for what is simply
+    // "you already have a variant B".
+    if (isUniqueViolation(err)) return { ok: false, reason: "exists" };
+    throw err;
+  }
+}
+
+/** True for a D1/SQLite UNIQUE constraint failure. Message-sniffing is the only option — D1 surfaces no error code. */
+function isUniqueViolation(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /UNIQUE constraint failed/i.test(message);
+}
+
+/**
+ * Make one variant the template's default, clearing the previous one. Batched so
+ * a failure can never leave a template with no default at all.
+ *
+ * The clear is guarded by an EXISTS on the target rather than just
+ * `WHERE template_id = ?`. Without that guard, passing a variant id belonging to
+ * a *different* template cleared this template's default and then matched nothing
+ * to set — committing a template with no default at all. The guard makes the pair
+ * all-or-nothing on its own terms, independent of the batch's atomicity, which
+ * only covers failure and not a statement that legitimately matches zero rows.
+ */
+export async function promoteVariant(
+  db: D1Database,
+  templateId: string,
+  variantId: string,
+): Promise<boolean> {
+  const res = await db.batch([
+    db
+      .prepare(
+        `UPDATE template_variants SET is_default = 0
+          WHERE template_id = ?1
+            AND EXISTS (
+              SELECT 1 FROM template_variants WHERE id = ?2 AND template_id = ?1
+            )`,
+      )
+      .bind(templateId, variantId),
+    db
+      .prepare("UPDATE template_variants SET is_default = 1 WHERE id = ? AND template_id = ?")
+      .bind(variantId, templateId),
+  ]);
+  return (res[1]?.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Remove a challenger variant. Slot A and the last remaining variant are refused
+ * — a template with no variants has nothing to send, and the UI has no state for
+ * it.
+ *
+ * Audited, because this destroys copy someone wrote and the dataset is shared by
+ * all four users.
+ */
+export async function removeVariant(
+  db: D1Database,
+  templateId: string,
+  variantId: string,
+  actor: string,
+): Promise<{ ok: true } | { ok: false; reason: "missing" | "lastVariant" | "slotA" }> {
+  const existing = await db
+    .prepare(`SELECT ${VARIANT_COLS} FROM template_variants WHERE template_id = ?`)
+    .bind(templateId)
+    .all<TemplateVariantRow>();
+  const rows = existing.results ?? [];
+  const target = rows.find((r) => r.id === variantId);
+  if (!target) return { ok: false, reason: "missing" };
+  if (rows.length <= 1) return { ok: false, reason: "lastVariant" };
+  if (target.slot === "A") return { ok: false, reason: "slotA" };
+
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_log (id, actor, action, entity_type, entity_id, snapshot)
+         VALUES (?, ?, 'template_variant.delete', 'template_variant', ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), actor, target.id, JSON.stringify(target)),
+    db
+      .prepare("DELETE FROM template_variants WHERE id = ? AND template_id = ?")
+      .bind(variantId, templateId),
+    // If the removed variant held the default, A inherits it. Unconditional
+    // because it is a no-op when A is already the default.
+    db
+      .prepare("UPDATE template_variants SET is_default = 1 WHERE template_id = ? AND slot = 'A'")
+      .bind(templateId),
+  ]);
+  return { ok: true };
+}
+
+/**
+ * Hard-delete a template and its variants, snapshotting the whole tree to
+ * audit_log first.
+ *
+ * The snapshot carries the variants as well as the template — unlike
+ * deleteContacts, which records the contact but loses its notes. Here the
+ * variants *are* the content: the copy is the only irreplaceable thing on the
+ * page, and the counters can always be re-pushed.
+ */
+export async function deleteTemplate(
+  db: D1Database,
+  id: string,
+  actor: string,
+): Promise<boolean> {
+  const [templateRes, variantsRes] = await Promise.all([
+    db
+      .prepare(`SELECT ${TEMPLATE_COLS} FROM email_templates WHERE id = ?`)
+      .bind(id)
+      .first<EmailTemplateRow>(),
+    db
+      .prepare(`SELECT ${VARIANT_COLS} FROM template_variants WHERE template_id = ?`)
+      .bind(id)
+      .all<TemplateVariantRow>(),
+  ]);
+  if (!templateRes) return false;
+
+  const snapshot = JSON.stringify({
+    template: templateRes,
+    variants: variantsRes.results ?? [],
+  });
+
+  const res = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_log (id, actor, action, entity_type, entity_id, snapshot)
+         VALUES (?, ?, 'template.delete', 'template', ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), actor, id, snapshot),
+    db.prepare("DELETE FROM template_variants WHERE template_id = ?").bind(id),
+    db.prepare("DELETE FROM email_templates WHERE id = ?").bind(id),
+  ]);
+  return (res[res.length - 1]?.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Write pushed performance counters onto one variant.
+ *
+ * **Absolute totals, not increments.** The machine caller has no idempotency key
+ * and Workers redelivery happens, so `SET sends = ?` is safely repeatable where
+ * `sends = sends + ?` would double-count and permanently corrupt the verdict. A
+ * caller that only knows deltas should GET the current values and PUT the sum.
+ *
+ * A null in `stats` means "leave that column alone", expressed as COALESCE rather
+ * than an assembled SET list — no part of the SQL text is ever built from input.
+ *
+ * `target` addresses the variant either by its opaque id or by its stable slot
+ * ("B"), the latter being unambiguous thanks to the unique (template_id, slot)
+ * index. Not audited: counters are non-destructive and re-pushable, and logging
+ * every poll would flood an append-only table.
+ */
+export async function recordVariantStats(
+  db: D1Database,
+  target: { templateId: string; variantId?: string; slot?: string },
+  stats: StatCounts,
+): Promise<boolean> {
+  let variantId = target.variantId;
+  if (!variantId) {
+    if (!target.slot) return false;
+    const row = await db
+      .prepare("SELECT id FROM template_variants WHERE template_id = ? AND slot = ?")
+      .bind(target.templateId, target.slot)
+      .first<{ id: string }>();
+    if (!row) return false;
+    variantId = row.id;
+  }
+
+  const res = await db
+    .prepare(
+      `UPDATE template_variants
+          SET sends    = COALESCE(?, sends),
+              opens    = COALESCE(?, opens),
+              replies  = COALESCE(?, replies),
+              meetings = COALESCE(?, meetings)
+        WHERE id = ? AND template_id = ?`,
+    )
+    .bind(stats.sends, stats.opens, stats.replies, stats.meetings, variantId, target.templateId)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
 }
