@@ -11,6 +11,12 @@
 // server agree on what will be rejected.
 
 import { CH, OWNERS, STATUSES } from "../crm/data";
+import {
+  TEMPLATE_STATUSES,
+  VARIANT_SLOTS,
+  type TemplateStatus,
+  type VariantSlot,
+} from "../crm/templates";
 
 /**
  * Per-field maximum lengths, in characters, applied after trimming. Generous
@@ -26,6 +32,12 @@ export const LIMITS = {
   source: 200,
   status: 60,
   note: 5_000,
+  // Email templates. `body` is twice `note` because an email body is not a CRM
+  // note — a real cold intro with merge tokens runs long, and truncating one at
+  // 5k would silently mangle the copy someone is about to send.
+  templateName: 120,
+  subject: 300,
+  body: 10_000,
 } as const;
 
 /** Maximum rows accepted in one CSV / API import. */
@@ -36,6 +48,17 @@ export const MAX_IDS = 1_000;
 
 /** Maximum size of an uploaded CSV file, in bytes. */
 export const MAX_CSV_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Largest counter a sender may push for one template variant. Ten million sends
+ * would be a bug in the sending tool, not a campaign — and an unbounded integer
+ * here feeds straight into the z-test, where a garbage denominator produces a
+ * confident, wrong verdict.
+ */
+export const MAX_STAT_COUNT = 10_000_000;
+
+/** Furthest day of a sequence a template may be scheduled on. */
+export const MAX_SEND_DAY = 365;
 
 /**
  * Why a deal died, offered when a contact's status is set to Dead. A closed set
@@ -54,6 +77,8 @@ export const DEAD_REASONS = [
 const STATUS_IDS: ReadonlySet<string> = new Set(STATUSES.map((s) => s.id));
 const TOUCH_TYPES: ReadonlySet<string> = new Set(Object.keys(CH));
 const DEAD_REASON_SET: ReadonlySet<string> = new Set(DEAD_REASONS);
+const TEMPLATE_STATUS_SET: ReadonlySet<string> = new Set(TEMPLATE_STATUSES);
+const VARIANT_SLOT_SET: ReadonlySet<string> = new Set(VARIANT_SLOTS);
 
 export function isValidStatus(value: unknown): value is string {
   return typeof value === "string" && STATUS_IDS.has(value);
@@ -65,6 +90,14 @@ export function isValidTouchType(value: unknown): value is string {
 
 export function isValidDeadReason(value: unknown): value is string {
   return typeof value === "string" && DEAD_REASON_SET.has(value);
+}
+
+export function isValidTemplateStatus(value: unknown): value is TemplateStatus {
+  return typeof value === "string" && TEMPLATE_STATUS_SET.has(value);
+}
+
+export function isValidVariantSlot(value: unknown): value is VariantSlot {
+  return typeof value === "string" && VARIANT_SLOT_SET.has(value);
 }
 
 /** Loop numbers are a closed set of two; anything else is a bug or an attack. */
@@ -292,6 +325,172 @@ export function validateNote(raw: unknown):
 /** Keep an echoed-back bad value short so an error message can't be a payload. */
 function truncateForMessage(value: string): string {
   return value.length > 40 ? value.slice(0, 40) + "…" : value;
+}
+
+// ---------------------------------------------------------------------------
+// Email templates
+// ---------------------------------------------------------------------------
+
+export type TemplateFields = { name: string; loop: number; sendDay: number };
+
+/**
+ * Validate a template's settings (name, loop, which day of the sequence it goes
+ * out on). Mirrors validateContact: accepts `unknown` for every field because
+ * both entry points hand over untrusted input.
+ *
+ * The *create* path does not call this — "+ New" writes the `UNTITLED` constant
+ * and the defaults, so a name is only ever required once someone edits it.
+ */
+export function validateTemplate(raw: unknown):
+  | { ok: true; value: TemplateFields }
+  | { ok: false; error: string } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+
+  const name = asString(r.name);
+  if (!name) return { ok: false, error: "Template name is required." };
+  if (name.length > LIMITS.templateName) {
+    return {
+      ok: false,
+      error: `Template name must be ${LIMITS.templateName} characters or fewer.`,
+    };
+  }
+
+  // Absent means "the default" — Loop 1, the always-on sequence.
+  const rawLoop = r.loop;
+  const loop = rawLoop === undefined || rawLoop === null || rawLoop === "" ? 1 : Number(rawLoop);
+  if (!isValidLoop(loop)) return { ok: false, error: "Loop must be 1 or 2." };
+
+  const rawSendDay = r.sendDay;
+  const sendDay =
+    rawSendDay === undefined || rawSendDay === null || rawSendDay === ""
+      ? 0
+      : Number(rawSendDay);
+  if (!Number.isInteger(sendDay) || sendDay < 0 || sendDay > MAX_SEND_DAY) {
+    return {
+      ok: false,
+      error: `Send day must be a whole number between 0 and ${MAX_SEND_DAY}.`,
+    };
+  }
+
+  return { ok: true, value: { name, loop, sendDay } };
+}
+
+/**
+ * Validate one variant's copy.
+ *
+ * Both fields may be **empty**: a draft in progress has to be savable, and the
+ * page renders a placeholder for each. Only over-length is an error.
+ *
+ * No sanitisation of the `{{first_name}}` / `{{company}}` / `{{sender}}` merge
+ * tokens, and none is wanted: the copy is stored verbatim and rendered as a text
+ * node, never as HTML and never interpolated. If a future feature does start
+ * substituting them, the escaping belongs at that point of use, not here.
+ */
+export function validateVariantContent(raw: unknown):
+  | { ok: true; value: { subject: string; body: string } }
+  | { ok: false; error: string } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+
+  const subject = asString(r.subject);
+  if (subject.length > LIMITS.subject) {
+    return { ok: false, error: `Subject must be ${LIMITS.subject} characters or fewer.` };
+  }
+
+  const body = asString(r.body);
+  if (body.length > LIMITS.body) {
+    return { ok: false, error: `Body must be ${LIMITS.body} characters or fewer.` };
+  }
+
+  return { ok: true, value: { subject, body } };
+}
+
+/**
+ * One pushed counter set. `null` means "leave this column alone" — see
+ * validateStats for why that is not the same as zero.
+ */
+export type StatCounts = {
+  sends: number | null;
+  opens: number | null;
+  replies: number | null;
+  meetings: number | null;
+};
+
+const STAT_KEYS = ["sends", "opens", "replies", "meetings"] as const;
+
+/**
+ * Validate a stats push. Every field is optional, and absent (`undefined`,
+ * `null` or `""`) maps to `null`, which recordVariantStats() COALESCEs into "keep
+ * the stored value".
+ *
+ * That distinction is load-bearing: `Number("")` is `0`, so coercing blindly
+ * would let a caller that mentions only `replies` silently zero the other three
+ * counters — and since the verdict is computed from them, that reads as a real
+ * change in performance rather than a bug.
+ *
+ * No cross-field validation (`opens <= sends`, `replies <= opens`). Pixel-blocking
+ * makes `replies > opens` genuinely common, and partial pushes arrive out of
+ * order, so those inequalities are false in the real world often enough that
+ * enforcing them would reject correct data.
+ */
+export function validateStats(raw: unknown):
+  | { ok: true; value: StatCounts }
+  | { ok: false; error: string } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const value: StatCounts = { sends: null, opens: null, replies: null, meetings: null };
+  let given = 0;
+
+  for (const key of STAT_KEYS) {
+    const rawValue = r[key];
+    if (rawValue === undefined || rawValue === null || rawValue === "") continue;
+    const n = Number(typeof rawValue === "string" ? rawValue.trim() : rawValue);
+    if (!Number.isInteger(n) || n < 0 || n > MAX_STAT_COUNT) {
+      const shown = truncateForMessage(String(rawValue));
+      return {
+        ok: false,
+        error: `"${shown}" is not a whole number between 0 and ${MAX_STAT_COUNT}.`,
+      };
+    }
+    value[key] = n;
+    given++;
+  }
+
+  if (!given) return { ok: false, error: "Nothing to record." };
+  return { ok: true, value };
+}
+
+/**
+ * Resolve which variant a write targets: an opaque `variantId`, or the stable
+ * `slot` ("A"/"B") within a template.
+ *
+ * The slot form exists for the machine caller — it can store one id per template
+ * and keep pushing to "B" even if B is added long after it was configured. It is
+ * unambiguous because of the unique (template_id, slot) index.
+ *
+ * Shared by the form action and /api/hyperagent so the two can't drift, which is
+ * the entire reason this module exists.
+ */
+export function validateVariantTarget(raw: unknown):
+  | { ok: true; value: { templateId: string; variantId?: string; slot?: string } }
+  | { ok: false; error: string } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+
+  const templateId = asString(r.templateId);
+  if (!templateId) return { ok: false, error: "Missing template id." };
+
+  const variantId = asString(r.variantId);
+  const slot = asString(r.slot);
+
+  if (variantId && slot) {
+    return { ok: false, error: "Give either a variant id or a slot, not both." };
+  }
+  if (variantId) return { ok: true, value: { templateId, variantId } };
+  if (slot) {
+    if (!isValidVariantSlot(slot)) {
+      return { ok: false, error: `Unknown variant "${truncateForMessage(slot)}".` };
+    }
+    return { ok: true, value: { templateId, slot } };
+  }
+  return { ok: false, error: "Missing variant id or slot." };
 }
 
 // ---------------------------------------------------------------------------

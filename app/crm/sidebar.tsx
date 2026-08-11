@@ -1,4 +1,4 @@
-// The CRM's left rail, shared by the contacts page and the analytics page.
+// The CRM's left rail, shared by the contacts, analytics and templates pages.
 //
 // Imports only ./data, ./ui and react-router — deliberately NOT sales-loop-crm.tsx,
 // so /analytics doesn't pull that whole module into its bundle.
@@ -12,7 +12,7 @@
 import { Form, Link } from "react-router";
 import type { Contact, Viewer } from "./data";
 import { OWNERS } from "./data";
-import { Box, IconChart, IconContacts, MONO, css } from "./ui";
+import { Box, IconChart, IconContacts, IconMail, MONO, css } from "./ui";
 
 export type SidebarTab = {
   key: string;
@@ -34,25 +34,38 @@ const tabBtn = (active: boolean) =>
  * VIEWS rows. Counts are over the FULL contact list, not the filtered one — the
  * rail reports what each filter would yield, so it must not be filtered itself.
  * Loop 1 and Loop 2 overlap: a contact resumed into Loop 1 counts in both.
+ *
+ * `counts` overrides what each row reports, and `labels` what the "all" row is
+ * called. /templates passes both, because there these rows filter templates, not
+ * contacts — a row reading "Loop 1 · 21" beside a list of three templates would
+ * be telling the user something untrue. The other two pages omit them and keep
+ * the contact counts.
  */
 export function buildViewTabs(
   contacts: Contact[],
   active: string,
   onSelect: (key: string) => void,
+  counts?: { all: number; loop1: number; loop2: number },
+  allLabel = "All contacts",
 ): SidebarTab[] {
   return [
-    { key: "all", label: "All contacts", dot: "#c4c4be", count: contacts.length },
+    {
+      key: "all",
+      label: allLabel,
+      dot: "#c4c4be",
+      count: counts ? counts.all : contacts.length,
+    },
     {
       key: "loop1",
       label: "Loop 1",
       dot: "#9a9a95",
-      count: contacts.filter((c) => c.loops.includes(1)).length,
+      count: counts ? counts.loop1 : contacts.filter((c) => c.loops.includes(1)).length,
     },
     {
       key: "loop2",
       label: "Loop 2",
       dot: "#e0930a",
-      count: contacts.filter((c) => c.loops.includes(2)).length,
+      count: counts ? counts.loop2 : contacts.filter((c) => c.loops.includes(2)).length,
     },
   ].map((t) => ({ ...t, active: active === t.key, onClick: () => onSelect(t.key) }));
 }
@@ -115,8 +128,14 @@ function SidebarRow({ tab }: { tab: SidebarTab }) {
   );
 }
 
+// Stacked vertically rather than as a segmented control: with three destinations
+// a `flex:1` row compresses each to a third of 212px, which truncates "Analytics".
+//
+// The `border:1px solid transparent` is load-bearing — the active state adds a
+// real 1px border, and without a transparent one on the inactive state every item
+// jumps 2px as you navigate between pages.
 const NAV_ITEM =
-  "flex:1; display:flex; align-items:center; justify-content:center; gap:6px; padding:6px 8px; border-radius:7px; font-size:12.5px; text-decoration:none; font-family:inherit;";
+  "width:100%; display:flex; align-items:center; justify-content:flex-start; gap:8px; padding:6px 9px; border:1px solid transparent; border-radius:8px; font-size:12.5px; text-decoration:none; font-family:inherit;";
 
 function NavLink({
   to,
@@ -129,11 +148,14 @@ function NavLink({
   active: boolean;
   children: React.ReactNode;
 }) {
+  // The active item is a span, not a Link: there is nothing to navigate to, and
+  // the non-interactive element is the de facto "you are here" marker.
   if (active) {
     return (
       <span
         style={css(
-          NAV_ITEM + "background:#fff; color:#1a1a1a; font-weight:500; box-shadow:0 1px 2px rgba(0,0,0,0.06);",
+          NAV_ITEM +
+            "background:#fff; border-color:#e6e6e2; color:#1a1a1a; font-weight:500; box-shadow:0 1px 2px rgba(0,0,0,0.06);",
         )}
       >
         {children}
@@ -146,7 +168,7 @@ function NavLink({
       as={Link}
       to={to}
       style={css(NAV_ITEM + "background:none; color:#75756f; font-weight:450;")}
-      hover={css("color:#3a3a38;")}
+      hover={css("color:#3a3a38; background:#f2f2ee;")}
     >
       {children}
       {label}
@@ -159,11 +181,18 @@ export function Sidebar({
   viewTabs,
   ownerTabs,
   viewer,
+  ownerNote,
 }: {
-  nav: "contacts" | "analytics";
+  nav: "contacts" | "analytics" | "templates";
   viewTabs: SidebarTab[];
   ownerTabs: SidebarTab[];
   viewer: Viewer;
+  /**
+   * Optional caption under the OWNER group. /templates passes one because its
+   * owner rows are inert there — an unexplained control that does nothing when
+   * clicked is what generates bug reports.
+   */
+  ownerNote?: string;
 }) {
   return (
     <aside
@@ -177,21 +206,22 @@ export function Sidebar({
             "width:24px; height:24px; border-radius:6px; background:#1a1a1a; color:#fff; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600;",
           )}
         >
-          S
+          M
         </div>
-        <div style={css("font-size:14px; font-weight:600; letter-spacing:-0.01em;")}>Sales Loops</div>
+        <div style={css("font-size:14px; font-weight:600; letter-spacing:-0.01em;")}>
+          Match Book CRM
+        </div>
       </div>
 
-      <div
-        style={css(
-          "display:flex; gap:2px; padding:2px; margin:0 0 8px; background:#f0f0ec; border-radius:9px;",
-        )}
-      >
+      <div style={css("display:flex; flex-direction:column; gap:2px; margin:0 0 8px;")}>
         <NavLink to="/" label="Contacts" active={nav === "contacts"}>
           <IconContacts style={css("width:13px; height:13px;")} />
         </NavLink>
         <NavLink to="/analytics" label="Analytics" active={nav === "analytics"}>
           <IconChart style={css("width:13px; height:13px;")} />
+        </NavLink>
+        <NavLink to="/templates" label="Templates" active={nav === "templates"}>
+          <IconMail style={css("width:13px; height:13px;")} />
         </NavLink>
       </div>
 
@@ -216,6 +246,11 @@ export function Sidebar({
       {ownerTabs.map((tab) => (
         <SidebarRow key={tab.key} tab={tab} />
       ))}
+      {ownerNote && (
+        <div style={css("padding:6px 8px 0; font-size:11px; color:#a3a39d; line-height:1.45;")}>
+          {ownerNote}
+        </div>
+      )}
 
       {/* margin-top:auto pins the footer — nothing may be appended below it. */}
       <div
