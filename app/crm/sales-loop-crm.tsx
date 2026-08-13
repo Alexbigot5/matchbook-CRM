@@ -21,13 +21,29 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconClose,
+  IconFilter,
   IconPlus,
+  IconSave,
   IconSearch,
   IconTrash,
   IconUpload,
   IconWarn,
   MONO,
 } from "./ui";
+import {
+  defaultCondition,
+  defaultValueForField,
+  matchesConditions,
+  optionsForField,
+  resolveSavedView,
+  savedViewKey,
+  VIEW_FIELDS,
+  VIEW_OP_LABELS,
+  VIEW_OPS,
+  type SavedView,
+  type ViewCondition,
+  type ViewOp,
+} from "./views";
 import { buildOwnerTabs, buildViewTabs, Sidebar } from "./sidebar";
 import {
   ContactDetail,
@@ -40,7 +56,13 @@ import {
   ownerMeta,
   SourceTag,
 } from "./contact-detail";
-import { csvCell, LIMITS, MAX_CSV_BYTES, MAX_IMPORT_ROWS } from "../lib/validate";
+import {
+  csvCell,
+  LIMITS,
+  MAX_CSV_BYTES,
+  MAX_IMPORT_ROWS,
+  MAX_VIEW_CONDITIONS,
+} from "../lib/validate";
 
 /**
  * Split one CSV line into fields, honouring double-quoted values.
@@ -95,6 +117,12 @@ type FormState = {
 };
 
 type State = {
+  /**
+   * The single view selection: "all" | "loop1" | "loop2", or a saved view's
+   * `savedViewKey(id)`. Keeping saved views in this one slot rather than adding a
+   * parallel axis is what lets the owner, source, stage and search filters keep
+   * layering on top with no change.
+   */
   view: string;
   owner: string;
   sourceFilter: string;
@@ -115,11 +143,19 @@ type State = {
   csvFileName: string;
   deleteIds: string[];
   actionError: string;
+  /** The "New view" builder card, and the view being drafted in it. */
+  viewBuilder: boolean;
+  draftConditions: ViewCondition[];
+  viewName: string;
+  viewShared: boolean;
 };
 
 // Mirrors the route action's return type. `message` carries a partial-success
-// note — currently "imported N, skipped M invalid rows" from a CSV import.
-type ActionResult = { ok: true; message?: string } | { ok: false; error: string };
+// note — currently "imported N, skipped M invalid rows" from a CSV import;
+// `savedViewId` is present only on a successful createSavedView.
+type ActionResult =
+  | { ok: true; message?: string; savedViewId?: string }
+  | { ok: false; error: string };
 
 const blankForm = (loops?: number[]): FormState => ({
   name: "",
@@ -171,7 +207,15 @@ function Checkbox({
 
 export type { Viewer } from "./data";
 
-export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer: Viewer }) {
+export function SalesLoopCRM({
+  contacts,
+  savedViews,
+  viewer,
+}: {
+  contacts: Contact[];
+  savedViews: SavedView[];
+  viewer: Viewer;
+}) {
   const fetcher = useFetcher();
   const [state, setState] = useState<State>(() => ({
     view: "all",
@@ -193,6 +237,10 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     csvFileName: "",
     deleteIds: [],
     actionError: "",
+    viewBuilder: false,
+    draftConditions: [],
+    viewName: "",
+    viewShared: true,
   }));
 
   const patch = (u: Partial<State> | ((s: State) => Partial<State>)) =>
@@ -209,6 +257,24 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
     const result = fetcher.data as ActionResult;
+    if (result.ok && result.savedViewId) {
+      // Only createSavedView returns an id, which is what makes this safe to act
+      // on: a row's status menu is still reachable with the builder open, and
+      // closing the card on *any* successful intent would discard a half-written
+      // view. Selecting the returned id beats reading "the newest view" off the
+      // revalidated loader, which would race another user's save.
+      patch({
+        viewBuilder: false,
+        draftConditions: [],
+        viewName: "",
+        viewShared: true,
+        actionError: "",
+        menuId: null,
+        sourceFilter: "all",
+        view: savedViewKey(result.savedViewId),
+      });
+      return;
+    }
     if (result.ok) {
       // A partial success (some import rows rejected) holds the modal open so
       // the user actually sees which rows didn't land — closing it would report
@@ -352,6 +418,61 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
       // contact stays on whatever status it had.
       pendingDeadId: null,
     });
+
+  // ---- saved views ----
+  // The builder drafts a view; saving posts it and the settle effect above
+  // selects whatever id comes back.
+  const openViewBuilder = () =>
+    patch({
+      viewBuilder: true,
+      draftConditions: [defaultCondition()],
+      viewName: "",
+      viewShared: true,
+      actionError: "",
+      menuId: null,
+    });
+  const closeViewBuilder = () =>
+    patch({ viewBuilder: false, draftConditions: [], viewName: "", actionError: "" });
+  const addCondition = () =>
+    patch((s) =>
+      s.draftConditions.length >= MAX_VIEW_CONDITIONS
+        ? {}
+        : { draftConditions: [...s.draftConditions, defaultCondition()] },
+    );
+  const removeCondition = (i: number) =>
+    patch((s) => ({ draftConditions: s.draftConditions.filter((_, j) => j !== i) }));
+  // Changing a row's field resets its value: a status value surviving a switch to
+  // `owner` would leave a clause that silently matches nothing.
+  const setConditionField = (i: number, field: string) =>
+    patch((s) => ({
+      draftConditions: s.draftConditions.map((c, j) =>
+        j === i ? { ...c, field, value: defaultValueForField(field) } : c,
+      ),
+    }));
+  const setConditionOp = (i: number, op: ViewOp) =>
+    patch((s) => ({
+      draftConditions: s.draftConditions.map((c, j) => (j === i ? { ...c, op } : c)),
+    }));
+  const setConditionValue = (i: number, value: string) =>
+    patch((s) => ({
+      draftConditions: s.draftConditions.map((c, j) => (j === i ? { ...c, value } : c)),
+    }));
+  const saveView = () => {
+    // The server validates both of these too; checking here keeps the message
+    // instant rather than costing a round trip to say "name it".
+    if (!S.viewName.trim()) return patch({ actionError: "View name is required." });
+    if (!S.draftConditions.length) return patch({ actionError: "Add at least one condition." });
+    submit({
+      intent: "createSavedView",
+      name: S.viewName.trim(),
+      shared: S.viewShared ? "1" : "0",
+      conditions: JSON.stringify(S.draftConditions),
+    });
+  };
+  // No confirm modal, unlike a contact: a view is three dropdowns, and the audit
+  // snapshot makes it recoverable. If the deleted view was selected, byView's
+  // fallback puts the page back on "All contacts" — see `activeSavedView`.
+  const removeView = (id: string) => submit({ intent: "deleteSavedView", id });
 
   // Deleting is irreversible (notes and touchpoints go with the contact), so it
   // always routes through the confirm modal. `deleteIds` carries the pending
@@ -512,12 +633,24 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
   };
 
   // ---- derived ----
+  // A saved view can vanish under the UI (deleted here, or by another user in
+  // another tab). Resolving the selection during render rather than reconciling
+  // it in an effect means no frame is ever rendered against a dead id — the same
+  // choice ab.ts makes for the templates page's selected card.
+  const activeSavedView = resolveSavedView(savedViews, S.view);
+
+  // Three-way, not the two-way ternary this used to be: with a fourth kind of
+  // view key in play, an `else` branch meaning "Loop 2" would silently apply the
+  // Loop 2 filter to a saved view — and to a view that has just been deleted.
+  // Unrecognised keys fall back to "all".
   const byView = (c: Contact) =>
-    S.view === "all"
-      ? true
+    activeSavedView
+      ? matchesConditions(c, activeSavedView.conditions)
       : S.view === "loop1"
         ? c.loops.includes(1)
-        : c.loops.includes(2);
+        : S.view === "loop2"
+          ? c.loops.includes(2)
+          : true;
   const byOwner = (c: Contact) =>
     S.owner === "all"
       ? true
@@ -549,9 +682,29 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
   }
   const sources = [...sourceCounts.keys()].sort((a, b) => a.localeCompare(b));
 
+  // How many contacts the view being drafted would hold. Counted over `contacts`,
+  // never `visible`: a figure computed inside the currently active view/owner/
+  // stage/search would promise a number the saved view will never reproduce.
+  const draftMatches = contacts.filter((c) =>
+    matchesConditions(c, S.draftConditions),
+  ).length;
+
   // Counts are over the unfiltered list — see buildViewTabs. `setView` (not the
   // sidebar) owns resetting the Loop 2 source filter when leaving that view.
-  const viewTabs = buildViewTabs(contacts, S.view, setView);
+  // Saved views are appended as further rows of the same VIEWS group rather than
+  // taught to buildViewTabs, which stays the three built-ins shared by five pages.
+  const viewTabs = [
+    ...buildViewTabs(contacts, S.view, setView),
+    ...savedViews.map((v) => ({
+      key: savedViewKey(v.id),
+      label: v.name,
+      dot: "#6d3fc4",
+      count: contacts.filter((c) => matchesConditions(c, v.conditions)).length,
+      active: S.view === savedViewKey(v.id),
+      onClick: () => setView(savedViewKey(v.id)),
+      onDelete: () => removeView(v.id),
+    })),
+  ];
   const ownerTabs = buildOwnerTabs(contacts, S.owner, setOwner);
 
   // Base set for the SOURCE filter row (Loop 2 only) - everything except the
@@ -660,7 +813,10 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
     deleteTargets.length === 1
       ? "“" + deleteTargets[0].name + "”"
       : deleteTargets.length + " contacts";
-  const deletePending = fetcher.state !== "idle";
+  // One fetcher serves every write on this page, so "a submission is in flight"
+  // is a single fact — shared by the delete modal's confirm button and the view
+  // builder's Save.
+  const submitPending = fetcher.state !== "idle";
 
   // The contact awaiting a dead-reason choice. Empty when it has been deleted out
   // from under the modal, in which case the prompt just drops the name.
@@ -763,12 +919,14 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
   // The selected contact; the detail panel derives everything else itself.
   const sel = contacts.find((c) => c.id === S.selectedId) || null;
 
-  const headerTitle =
-    S.view === "all"
-      ? "All contacts"
-      : S.view === "loop1"
-        ? "Loop 1 · always-on"
-        : "Loop 2 · community blitz";
+  // Same three-way shape as byView, and for the same reason.
+  const headerTitle = activeSavedView
+    ? activeSavedView.name
+    : S.view === "loop1"
+      ? "Loop 1 · always-on"
+      : S.view === "loop2"
+        ? "Loop 2 · community blitz"
+        : "All contacts";
   const headerSub =
     visible.length +
     " contact" +
@@ -821,6 +979,13 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
               focus={css("border-color:#c9c9c3; background:#fff;")}
             />
           </div>
+          {/* Secondary, not primary: "Add contact" is the one black button in this
+              header, and the shell's pattern is one primary action per surface.
+              The black button for this flow is "Save view", inside the card. */}
+          <Box as="button" onClick={S.viewBuilder ? closeViewBuilder : openViewBuilder} style={css(`display:flex; align-items:center; gap:6px; padding:8px 12px; border:1px solid ${S.viewBuilder ? "#c9c9c3" : "#e6e6e2"}; background:${S.viewBuilder ? "#f0f0ec" : "#fff"}; border-radius:8px; font-size:13px; font-weight:500; font-family:inherit; color:#3a3a38; cursor:pointer; white-space:nowrap;`)} hover={css("background:#f4f4f1;")}>
+            <IconFilter />
+            New view
+          </Box>
           <Box as="button" onClick={openCsv} style={css("display:flex; align-items:center; gap:6px; padding:8px 12px; border:1px solid #e6e6e2; background:#fff; border-radius:8px; font-size:13px; font-weight:500; font-family:inherit; color:#3a3a38; cursor:pointer; white-space:nowrap;")} hover={css("background:#f4f4f1;")}>
             <IconUpload />
             Import CSV
@@ -832,6 +997,128 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
         </div>
 
         <div style={css("flex:1; overflow-y:auto; overflow-x:hidden;")}>
+          {/* NEW VIEW BUILDER. Scrolls with the body rather than sticking: a fixed
+              card would fight the SOURCE/STAGE rows for the same band, and the
+              live match count wants to sit beside the rows it will replace. */}
+          {S.viewBuilder && (
+            <div style={css("padding:16px 24px 0;")}>
+              <div style={css("border:1px solid #e6e6e2; border-radius:12px; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,0.04);")}>
+                <div style={css("display:flex; align-items:center; justify-content:space-between; padding:14px 16px 0;")}>
+                  <div style={css("font-size:13px; font-weight:600; letter-spacing:-0.01em;")}>New view</div>
+                  <Box as="button" onClick={closeViewBuilder} title="Close" style={css("border:none; background:#f2f2ef; width:24px; height:24px; border-radius:7px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}>
+                    <IconClose size={13} />
+                  </Box>
+                </div>
+
+                <div style={css("display:flex; flex-direction:column; gap:8px; padding:12px 16px 14px;")}>
+                  {/* Index keys, deliberately: all three controls are controlled
+                      <select>s with no internal DOM state, so re-keying after a
+                      middle removal costs a wasted diff and nothing else — where
+                      a synthetic id on ViewCondition would have to be stripped
+                      before every submit. */}
+                  {S.draftConditions.map((cond, i) => (
+                    <div key={i} style={css("display:flex; align-items:center; gap:8px;")}>
+                      <select
+                        value={cond.field}
+                        onChange={(e) => setConditionField(i, e.target.value)}
+                        aria-label="Field"
+                        style={css(inputStyle + "flex:1; min-width:0; cursor:pointer;")}
+                      >
+                        {VIEW_FIELDS.map((f) => (
+                          <option key={f.key} value={f.key}>{f.label}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={cond.op}
+                        onChange={(e) => setConditionOp(i, e.target.value as ViewOp)}
+                        aria-label="Operator"
+                        style={css(inputStyle + "width:96px; flex:0 0 auto; cursor:pointer;")}
+                      >
+                        {VIEW_OPS.map((op) => (
+                          <option key={op} value={op}>{VIEW_OP_LABELS[op]}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={cond.value}
+                        onChange={(e) => setConditionValue(i, e.target.value)}
+                        aria-label="Value"
+                        style={css(inputStyle + "flex:1.4; min-width:0; cursor:pointer;")}
+                      >
+                        {optionsForField(cond.field).map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      {/* Always rendered, even for the last row: removing it and
+                          hitting Save is how you find out a view needs a
+                          condition, which beats a disabled control with no
+                          explanation. */}
+                      <Box as="button" onClick={() => removeCondition(i)} title="Remove condition" style={css("border:none; background:none; padding:6px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:#b0b0aa; cursor:pointer; flex:0 0 auto;")} hover={css("background:#f2f2ef; color:#75756f;")}>
+                        <IconClose size={14} />
+                      </Box>
+                    </div>
+                  ))}
+
+                  <div>
+                    <Box
+                      as="button"
+                      onClick={addCondition}
+                      disabled={S.draftConditions.length >= MAX_VIEW_CONDITIONS}
+                      title={S.draftConditions.length >= MAX_VIEW_CONDITIONS ? `A view can have at most ${MAX_VIEW_CONDITIONS} conditions.` : undefined}
+                      style={css(`display:inline-flex; align-items:center; gap:6px; padding:7px 11px; border:1px solid #e6e6e2; background:#fff; border-radius:9px; font-size:12.5px; font-weight:500; font-family:inherit; color:${S.draftConditions.length >= MAX_VIEW_CONDITIONS ? "#b0b0aa" : "#3a3a38"}; cursor:${S.draftConditions.length >= MAX_VIEW_CONDITIONS ? "default" : "pointer"};`)}
+                      hover={css("background:#f4f4f1;")}
+                    >
+                      <IconPlus size={13} />
+                      Add condition
+                    </Box>
+                  </div>
+                </div>
+
+                {/* Conditions AND together, which "+ Add condition" rather implies
+                    an OR — so the count is the only honest preview available. */}
+                <div style={css("display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-top:1px solid #ededea;")}>
+                  <span style={css("font-size:12.5px; color:#9a9a95;")}>Matches</span>
+                  <span style={css(MONO + "font-size:11.5px; padding:3px 9px; border-radius:7px; background:#eef0fb; color:#4457c9;")}>
+                    {draftMatches} contact{draftMatches === 1 ? "" : "s"}
+                  </span>
+                </div>
+
+                {S.actionError && (
+                  <div style={css("padding:0 16px 10px; font-size:12px; color:#c2410c;")}>{S.actionError}</div>
+                )}
+
+                <div style={css("display:flex; align-items:center; gap:10px; padding:12px 16px; border-top:1px solid #ededea; flex-wrap:wrap;")}>
+                  <Box
+                    as="input"
+                    value={S.viewName}
+                    maxLength={LIMITS.viewName}
+                    onChange={(e: any) => patch({ viewName: e.target.value })}
+                    placeholder="Name this view"
+                    aria-label="View name"
+                    style={css(inputStyle + "flex:1; min-width:180px;")}
+                    focus={css("border-color:#c9c9c3;")}
+                  />
+                  <label style={css("display:flex; align-items:center; gap:7px; font-size:12.5px; color:#575753; cursor:pointer; white-space:nowrap;")}>
+                    <Checkbox
+                      checked={S.viewShared}
+                      onClick={() => patch((s) => ({ viewShared: !s.viewShared }))}
+                      title={S.viewShared ? "Everyone can see this view" : "Only you can see this view"}
+                    />
+                    Shared
+                  </label>
+                  <Box
+                    as="button"
+                    onClick={saveView}
+                    disabled={submitPending}
+                    style={css(`display:flex; align-items:center; gap:6px; padding:9px 15px; border:none; background:${submitPending ? "#c9c9c3" : "#1a1a1a"}; color:#fff; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:${submitPending ? "default" : "pointer"}; white-space:nowrap;`)}
+                    hover={css(submitPending ? "" : "background:#333;")}
+                  >
+                    <IconSave size={13} />
+                    Save view
+                  </Box>
+                </div>
+              </div>
+            </div>
+          )}
           {S.view === "loop2" && sourceTabs.length > 0 && (
             <div style={css("display:flex; align-items:center; gap:8px; padding:14px 24px 2px; flex-wrap:wrap;")}>
               <span style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em; margin-right:2px;")}>Source</span>
@@ -1215,7 +1502,7 @@ export function SalesLoopCRM({ contacts, viewer }: { contacts: Contact[]; viewer
             {S.modal === "delete" && (
               <DeleteContactsModal
                 targets={deleteTargets}
-                pending={deletePending}
+                pending={submitPending}
                 actionError={S.actionError}
                 onCancel={closeModal}
                 onConfirm={confirmDelete}

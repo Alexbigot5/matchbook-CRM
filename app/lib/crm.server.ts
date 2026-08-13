@@ -11,7 +11,8 @@ import {
   type TemplateStatus,
   type TemplateVariant,
 } from "../crm/templates";
-import type { StatCounts, TemplateFields } from "./validate";
+import { parseConditions, type SavedView } from "../crm/views";
+import { MAX_SAVED_VIEWS, type SavedViewFields, type StatCounts, type TemplateFields } from "./validate";
 
 const DAY = 86_400_000;
 
@@ -854,6 +855,144 @@ export async function deleteTemplate(
       .bind(crypto.randomUUID(), actor, id, snapshot),
     db.prepare("DELETE FROM template_variants WHERE template_id = ?").bind(id),
     db.prepare("DELETE FROM email_templates WHERE id = ?").bind(id),
+  ]);
+  return (res[res.length - 1]?.meta?.changes ?? 0) > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Saved views
+// ---------------------------------------------------------------------------
+
+const SAVED_VIEW_COLS =
+  "id, name, shared, created_by, created_by_name, conditions, created_at";
+
+type SavedViewRow = {
+  id: string;
+  name: string;
+  shared: number;
+  created_by: string;
+  created_by_name: string;
+  conditions: string;
+  created_at: string;
+};
+
+/**
+ * The visibility clause, used by BOTH the list read and the delete.
+ *
+ * Keeping it in one constant is the point: a delete that resolved its target
+ * without it would let a guessed or leaked id remove another user's *private*
+ * view. Same discipline as the `AND template_id = ?` on every template_variants
+ * write — constrain the lookup rather than trust the key.
+ */
+const VIEW_VISIBLE_TO = "(shared = 1 OR created_by = ?)";
+
+/**
+ * Views the viewer may see: every shared one, plus their own private ones.
+ *
+ * `created_by` is compared here and then dropped — the returned `mine` is what
+ * the UI gets, so three colleagues' email addresses never reach the page payload.
+ * Unpaginated for the same reason listTemplates is: this is tens of rows, capped
+ * at MAX_SAVED_VIEWS.
+ */
+export async function listSavedViews(
+  db: D1Database,
+  viewerEmail: string,
+): Promise<SavedView[]> {
+  const res = await db
+    .prepare(
+      // The id tiebreak is not decoration: created_at defaults to datetime('now'),
+      // which has second resolution, so two views saved in the same second would
+      // otherwise order by whatever the query plan felt like. Same note as
+      // listTemplates.
+      `SELECT ${SAVED_VIEW_COLS} FROM saved_views
+        WHERE ${VIEW_VISIBLE_TO}
+        ORDER BY created_at DESC, id DESC`,
+    )
+    .bind(viewerEmail)
+    .all<SavedViewRow>();
+
+  return (res.results ?? []).map((row): SavedView => ({
+    id: row.id,
+    name: row.name,
+    shared: Boolean(row.shared),
+    createdByName: row.created_by_name,
+    mine: row.created_by === viewerEmail,
+    // Tolerant on purpose — a corrupt blob yields a view that matches everything
+    // rather than throwing inside a loader and 500ing the whole page.
+    conditions: parseConditions(row.conditions),
+  }));
+}
+
+/**
+ * Save a new view and return its id, so the client can select the thing it just
+ * made rather than guessing "the newest one" from the revalidated loader and
+ * racing a concurrent save by one of the other three users.
+ *
+ * The count guard is a plain read-then-insert, not a constraint: MAX_SAVED_VIEWS
+ * is a payload-size ceiling, so two racing saves landing on 51 is harmless where
+ * an unbounded table would not be.
+ */
+export async function createSavedView(
+  db: D1Database,
+  input: SavedViewFields,
+  creator: { email: string; name: string },
+): Promise<{ ok: true; id: string } | { ok: false; reason: "tooMany" }> {
+  const countRes = await db
+    .prepare("SELECT COUNT(*) AS n FROM saved_views")
+    .first<{ n: number }>();
+  if ((countRes?.n ?? 0) >= MAX_SAVED_VIEWS) return { ok: false, reason: "tooMany" };
+
+  const id = crypto.randomUUID();
+  await db
+    .prepare(
+      `INSERT INTO saved_views (id, name, shared, created_by, created_by_name, conditions)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      str(input.name),
+      input.shared ? 1 : 0,
+      creator.email,
+      str(creator.name),
+      JSON.stringify(input.conditions),
+    )
+    .run();
+  return { ok: true, id };
+}
+
+/**
+ * Delete a saved view, recording it in the audit log first. False when no visible
+ * row matched.
+ *
+ * Deliberately NOT creator-only. Any of the four users can already hard-delete
+ * any contact and any template they did not create; inventing a permission model
+ * for the cheapest object in the system would be inconsistent, and it would make
+ * a shared view created by someone later removed from the allowlist permanently
+ * undeletable. The audit row is the accountability mechanism here, as everywhere
+ * else. What the visibility clause *does* protect is someone else's private view.
+ */
+export async function deleteSavedView(
+  db: D1Database,
+  id: string,
+  viewerEmail: string,
+  actor: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT ${SAVED_VIEW_COLS} FROM saved_views WHERE id = ? AND ${VIEW_VISIBLE_TO}`)
+    .bind(id, viewerEmail)
+    .first<SavedViewRow>();
+  if (!row) return false;
+
+  const res = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_log (id, actor, action, entity_type, entity_id, snapshot)
+         VALUES (?, ?, 'saved_view.delete', 'saved_view', ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), actor, id, JSON.stringify(row)),
+    db
+      .prepare(`DELETE FROM saved_views WHERE id = ? AND ${VIEW_VISIBLE_TO}`)
+      .bind(id, viewerEmail),
   ]);
   return (res[res.length - 1]?.meta?.changes ?? 0) > 0;
 }
