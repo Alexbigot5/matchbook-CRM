@@ -23,6 +23,21 @@ BETTER_AUTH_SECRET=""
 # Resend API key used to send sign-in links (wrangler secret put RESEND_API_KEY).
 RESEND_API_KEY=""
 
+# --- Smartlead.ai -------------------------------------------------------------
+# Drives the /smartlead page: pushing contacts into a campaign as leads, uploading
+# template copy as the campaign sequence, setting the sending schedule, and
+# pulling numbers back onto the template variants.
+#
+# NOTE: Smartlead authenticates with an `api_key` QUERY PARAMETER, not a bearer
+# header, so this value ends up inside request URLs. Never log a Smartlead URL —
+# app/lib/smartlead.server.ts redacts the key from everything it returns or logs.
+#
+# Find it at app.smartlead.ai → Settings → Profile. Leave blank to disable: the
+# page still renders and explains what's missing, exactly as HyperAgent does with
+# an empty trigger URL.
+#   wrangler secret put SMARTLEAD_API_KEY
+SMARTLEAD_API_KEY=""
+
 # Optional. The auth base URL is normally derived from the incoming request, so
 # local dev, wrangler dev, and production all work with no config. Set this only
 # if a proxy rewrites the host.

@@ -145,3 +145,22 @@ export const API_AUTH_FAIL_RULE: RateLimitRule = {
   limit: 10,
   windowMs: 15 * 60 * 1000,
 };
+
+/**
+ * Smartlead writes per signed-in user.
+ *
+ * The only session-gated page that gets a limiter, and it earns one: a single
+ * click there fans out to a dozen calls against a metered third-party API and can
+ * put hundreds of contacts into a live sending campaign. A stuck client
+ * re-submitting is how a Smartlead quota gets burned and people get mailed twice.
+ * Keyed on the user's email rather than the IP, because four people behind one
+ * office address shouldn't share a budget.
+ *
+ * Generous enough that no real session notices — twenty deliberate button presses
+ * in a minute is already someone hammering.
+ */
+export const SMARTLEAD_RULE: RateLimitRule = {
+  bucket: "smartlead:user",
+  limit: 20,
+  windowMs: 60 * 1000,
+};

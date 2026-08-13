@@ -8,9 +8,11 @@ directory = "./build/client"
 
 # Non-secret config. The HyperAgent trigger endpoint the CRM POSTs to when
 # kicking off an agent run (see app/lib/hyperagent.server.ts). Leave blank to
-# disable outbound triggering. The two API keys are secrets, NOT set here — use
-# `wrangler secret put CRM_API_KEY` and `wrangler secret put HYPERAGENT_API_KEY`
-# (and mirror all three in a local .dev.vars; see .dev.vars.example).
+# disable outbound triggering. The API keys are secrets, NOT set here — use
+# `wrangler secret put CRM_API_KEY`, `wrangler secret put HYPERAGENT_API_KEY` and
+# `wrangler secret put SMARTLEAD_API_KEY` (and mirror them all in a local
+# .dev.vars; see .dev.vars.example). SMARTLEAD_API_KEY in particular must never
+# be a [vars] entry — it travels in request URLs, so it is a secret twice over.
 [vars]
 HYPERAGENT_TRIGGER_URL = ""
 # Sender for magic-link sign-in emails. The domain must be verified in Resend.

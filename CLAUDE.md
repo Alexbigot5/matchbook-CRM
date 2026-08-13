@@ -40,7 +40,7 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    `createContext` handle. It takes the `Request` as well as `env` so the auth base URL can be
    derived per request; `getAuth()` is lazy so non-auth requests don't construct better-auth.
 3. `app/routes.ts` — route table: index → `routes/home.tsx`, `/lifecycle`, `/analytics`,
-   `/templates`, plus `/login`, `/logout`, `/api/auth/*` (better-auth's handler) and
+   `/templates`, `/smartlead`, plus `/login`, `/logout`, `/api/auth/*` (better-auth's handler) and
    `/api/hyperagent`.
 4. `app/root.tsx` — HTML document shell (`Layout`), root `Outlet`, and `ErrorBoundary`.
 5. `app/routes/home.tsx` — the index route's `loader` requires a session then reads contacts
@@ -57,13 +57,19 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
 7. `app/routes/templates.tsx` — the `/templates` loader reads `listTemplates` **and**
    `listContacts` (the latter only feeds the shared sidebar's OWNER counts) against one `now`.
    It has its own `action` with nine intents. Being a named route, its POSTs need no `?index`.
+8. `app/routes/smartlead.tsx` — the `/smartlead` loader reads contacts, templates and the
+   campaign bindings against one `now`, and **makes no Smartlead calls**: a loader that
+   reaches a third party makes the page 500 whenever that party is down, and every
+   operation here is a manual button anyway. Its `action` has nine intents (see
+   "Smartlead" below) and is the only session-gated action carrying a rate limiter.
 
 `app/entry.server.tsx` is the standard streaming SSR entry (`renderToReadableStream`,
 5s `streamTimeout`, bot-detection via `isbot`).
 
 ## The CRM (`app/crm/`)
 
-Four pages (contacts, lifecycle board, analytics, email templates) over a shared shell:
+Five pages (contacts, lifecycle board, analytics, email templates, Smartlead) over a
+shared shell:
 
 - **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`, `Viewer`), constants
   (`CH` channels, `STATUSES`, `OWNERS`), and pure helpers:
@@ -111,6 +117,21 @@ Four pages (contacts, lifecycle board, analytics, email templates) over a shared
   z-test on reply rate with a hand-rolled normal CDF. Read the module header before touching
   the verdict: the figure is `1 − p` for "the rates are equal", **not** the probability that
   the leader is better, and it's a fixed-horizon test read continuously.
+- **`smartlead-map.ts`** — pure, isomorphic translation to Smartlead's model
+  (`buildSequencePlan`, `toHtmlBody`, `planLeads`, `planImport`,
+  `totalStatsBySequence`). No React, no server imports, **no `Date`**. Three
+  non-obvious rules live here: a step's `delay_in_days` is the wait *relative to the
+  previous step*, so `sendDay` 0/3/7 becomes delays 0/3/4; a single-variant step must
+  be **flattened** (`subject`/`email_body` on the step) because Smartlead rejects a
+  one-entry `seq_variants`; and an **empty plan is blocking**, because
+  `POST /sequences` replaces everything and an empty payload erases a live campaign
+  rather than doing nothing. `planLeads` excludes contacts already in the *other*
+  loop's campaign — `loops` is not exclusive (`resumeToLoop1` keeps Loop 2 while
+  adding Loop 1), so without that guard a resumed contact gets two concurrent
+  sequences. Variant key names are in the single `SEQ_VARIANT_KEYS` const.
+- **`smartlead-page.tsx`** — the `/smartlead` UI, same one-client-component idiom. One
+  card per loop: campaign binding, sequence preview, contact eligibility, schedule,
+  stats.
 - **`templates-page.tsx`** — the `/templates` UI, same one-client-component + `useState` God
   object + single `useFetcher` idiom as `sales-loop-crm.tsx`.
 - **`lifecycle.ts`** — pure, isomorphic stage model for the board (`LIFECYCLE_STAGES`,
@@ -209,6 +230,48 @@ variants as well, since the copy is the only irreplaceable thing on that page. S
 **not** audited — they're non-destructive and re-pushable, and logging every poll would flood
 the table.
 
+## Smartlead
+
+The actual sending tool. `/smartlead` binds **one Smartlead campaign per loop** and drives
+four things: pushing contacts in as leads, uploading template copy as the campaign
+sequence, setting the sending schedule, and a manual stats sync back onto the template
+variant counters. There is deliberately **no cron and no inbound webhook** — every
+operation is a button.
+
+- **`app/lib/smartlead.server.ts`** — the HTTP client, shaped like `hyperagent.server.ts`
+  (never throws, returns a result, empty key = disabled). Two things to keep: **the API
+  key is a query parameter**, not a bearer header, so it is inside every request URL —
+  everything returned or logged goes through `redact()`, and `console.error(res.url)`
+  would leak a live secret. And it **does not retry**: a 429 is reported with its
+  Retry-After, because every operation is resumable by pressing the button again (the
+  unique index on `smartlead_leads` is what makes a re-press safe), and retrying is what
+  you do when re-running isn't. `toStatusInput()` exists because Smartlead *reports*
+  `ACTIVE` but only *accepts* `START` — posting a read value straight back is a 400.
+- **`migrations/0009_smartlead.sql`** — `smartlead_campaigns` (keyed on `loop`, so
+  one-campaign-per-loop is a schema fact) and `smartlead_leads` (the contact↔campaign
+  link, with a unique `(contact_id, campaign_id)` index as the real double-push guard).
+  There is deliberately no template→`seq_number` table: step order is *derived* from
+  `send_day` by `buildSequencePlan`, and the stats sync replays the same function to map
+  a `sequence_number` back to a template. `deleteContacts` drops the lead links too.
+- **Sync timestamps are written as ISO strings from JS**, not via `datetime('now')`. The
+  loader `Date.parse`es them to build a label, and SQLite's default has no timezone
+  designator, so the column default would read a UTC instant as local time. `created_at`
+  keeps the default because it is only ordered on, never parsed.
+- **`pushSequence` pauses the campaign and leaves it paused.** Smartlead refuses sequence
+  edits on an ACTIVE campaign with an opaque 400, so the pause is required; not
+  auto-resuming is a choice — silently restarting sends right after the copy changed
+  isn't a button's decision, and it removes the failure mode where a failed auto-restore
+  leaves a live campaign paused with no signal.
+- **Stats can't be split per variant.** The `/statistics` rows carry a `sequence_number`
+  but no variant id, so numbers land on the template's **default** variant and a template
+  with a live A/B is skipped by name. `meetings` is always passed as `null` — Smartlead
+  has no meeting concept, and `validateStats`' null-means-leave-alone is what preserves a
+  hand-entered figure. If the campaign has more rows than the page budget the sync writes
+  **nothing**: these are absolute totals, so a partial aggregate reads as a collapse in
+  performance rather than as missing data.
+- **Nothing was added to `/api/hyperagent`.** The same rule that keeps template copy off
+  that bearer token applies harder to a token that could re-point or start a campaign.
+
 Security headers (CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS on https, etc.) are set in
 `workers/app.ts`, wrapping every dynamic response. They do **not** apply under
 `npm run dev` (the Vite dev server doesn't route through the Worker entry) — use
@@ -290,8 +353,10 @@ but access is restricted to four hardcoded addresses.
 - **`/api/hyperagent` is deliberately not session-gated** — it authenticates with the
   `CRM_API_KEY` bearer token for machine callers.
 - **Secrets**: `BETTER_AUTH_SECRET` (required — better-auth *throws* on every request in a
-  production build if unset) and `RESEND_API_KEY`. `AUTH_EMAIL_FROM` is a `[vars]` entry; its
-  domain must be verified in Resend or nothing sends.
+  production build if unset), `RESEND_API_KEY` and `SMARTLEAD_API_KEY` (optional — empty
+  disables `/smartlead`; never a `[vars]` entry, since it travels in request URLs).
+  `AUTH_EMAIL_FROM` is a `[vars]` entry; its domain must be verified in Resend or nothing
+  sends.
 - **`migrations/0004_auth_tables.sql` is generated, not hand-written** — produced by
   better-auth's own `getMigrations()` for the installed version. Regenerate it if better-auth
   is upgraded or a plugin with its own schema is added; don't hand-edit the columns.

@@ -225,6 +225,23 @@ export function IconBoard({ style }: { style?: CSSProperties }) {
   );
 }
 
+// Paper plane for the Smartlead nav item. An envelope would collide with
+// IconMail (Templates) — both pages are about email, so the glyphs have to carry
+// the distinction: Templates is the message, Smartlead is the sending of it.
+export function IconSend({ style }: { style?: CSSProperties }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={style}>
+      <path
+        d="M21 3 10.5 13.5M21 3l-6.75 18-3.75-7.5L3 9.75 21 3Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function IconCalendar({ style }: { style?: CSSProperties }) {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={style}>

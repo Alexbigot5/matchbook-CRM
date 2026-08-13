@@ -5,6 +5,7 @@ export default [
   route("lifecycle", "routes/lifecycle.tsx"),
   route("analytics", "routes/analytics.tsx"),
   route("templates", "routes/templates.tsx"),
+  route("smartlead", "routes/smartlead.tsx"),
   route("login", "routes/login.tsx"),
   route("logout", "routes/logout.tsx"),
   // better-auth's own HTTP handler (magic-link verify, get-session, sign-out).
