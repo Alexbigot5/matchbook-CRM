@@ -39,13 +39,18 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    `context.get(appContext)`**, not a plain `context.DB`. `appContext` is the exported
    `createContext` handle. It takes the `Request` as well as `env` so the auth base URL can be
    derived per request; `getAuth()` is lazy so non-auth requests don't construct better-auth.
-3. `app/routes.ts` — route table: index → `routes/home.tsx`, `/analytics`, `/templates`, plus
-   `/login`, `/logout`, `/api/auth/*` (better-auth's handler) and `/api/hyperagent`.
+3. `app/routes.ts` — route table: index → `routes/home.tsx`, `/lifecycle`, `/analytics`,
+   `/templates`, plus `/login`, `/logout`, `/api/auth/*` (better-auth's handler) and
+   `/api/hyperagent`.
 4. `app/root.tsx` — HTML document shell (`Layout`), root `Outlet`, and `ErrorBoundary`.
 5. `app/routes/home.tsx` — the index route's `loader` requires a session then reads contacts
-   from D1 (`listContacts`), the `action` re-checks the session and handles intent-dispatched
-   writes, and the default export renders
+   from D1 (`listContacts`), the `action` re-checks the session and delegates to
+   `handleContactIntent` (see below), and the default export renders
    `<SalesLoopCRM contacts={loaderData.contacts} viewer={loaderData.viewer} />`.
+5a. `app/routes/lifecycle.tsx` — the `/lifecycle` loader mirrors home's, and its `action` is
+   the *same* thin wrapper over `handleContactIntent`. Both routes need one because React
+   Router resolves a fetcher's POST against whichever route rendered it, and the contact
+   detail slide-over is shared between them.
 6. `app/routes/analytics.tsx` — the `/analytics` loader mirrors home's (`requireUser` +
    `listContacts` against one `now`) and additionally returns `buildAnalyticsLabels(now)`, the
    precomputed date axis. **No `action`** — the page is read-only; all writes live on `/`.
@@ -58,7 +63,7 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
 
 ## The CRM (`app/crm/`)
 
-Three pages (contacts, analytics, email templates) over a shared shell:
+Four pages (contacts, lifecycle board, analytics, email templates) over a shared shell:
 
 - **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`, `Viewer`), constants
   (`CH` channels, `STATUSES`, `OWNERS`), and pure helpers:
@@ -75,8 +80,8 @@ Three pages (contacts, analytics, email templates) over a shared shell:
   and the shell constants both pages share: `GLOBAL_CSS`, `MONO`, and `crmFontLinks` (the
   Geist webfonts — **every route rendering the CRM shell must re-export it as `links`**, or
   the page silently falls back to the root route's Inter).
-- **`sidebar.tsx`** — the shared left rail: the Contacts/Analytics/Templates nav (a **vertical**
-  stack — three items don't fit a segmented control; every item carries
+- **`sidebar.tsx`** — the shared left rail: the Contacts/Analytics/Lifecycle/Templates nav (a
+  **vertical** stack — four items don't fit a segmented control; every item carries
   `border:1px solid transparent` so the active one's real border doesn't shift the others) plus
   the VIEWS and OWNER filter rows, built from `buildViewTabs`/`buildOwnerTabs` (counts are
   always over the **unfiltered** list). `buildViewTabs` takes optional `counts`/`allLabel`
@@ -108,6 +113,32 @@ Three pages (contacts, analytics, email templates) over a shared shell:
   the leader is better, and it's a fixed-horizon test read continuously.
 - **`templates-page.tsx`** — the `/templates` UI, same one-client-component + `useState` God
   object + single `useFetcher` idiom as `sales-loop-crm.tsx`.
+- **`lifecycle.ts`** — pure, isomorphic stage model for the board (`LIFECYCLE_STAGES`,
+  `stageOf`, `isInStage`, `computeLifecycleBoard`). No React, no server imports, **no
+  `Date`**. A lifecycle stage is **derived from `contacts.status`**, not stored: five columns
+  over the six statuses (Opportunity holds both `Replied` and `Meeting booked`). There is no
+  `lifecycle` column in D1 and deliberately so — `status` stays the single source of truth,
+  so a status changed anywhere else moves the card here with nothing to keep in sync. Two
+  guards matter: a status claimed by two stages **throws at import**, and a status in
+  `STATUSES` that no stage lists is folded into the first stage rather than vanishing from
+  the board (the columns must always partition the list, or the header count lies).
+- **`lifecycle-page.tsx`** — the `/lifecycle` UI, same one-client-component idiom. Native
+  HTML5 drag-and-drop (no library), plus a per-card ⋮ "Move to" menu that is the
+  **accessibility fallback** — DnD is pointer-only, so the menu is the only keyboard path to
+  a move; don't drop it as redundant. Dropping a card on the column it already occupies is a
+  deliberate no-op, which is what stops a `Meeting booked` contact being demoted to `Replied`
+  by a nudge inside Opportunity. The board is **one** scroll container with no per-column
+  `overflow-y`: a column-level scroll clips every card's ⋮ popover.
+- **`contact-detail.tsx`** — the contact detail slide-over, shared by `/` and `/lifecycle`,
+  plus the delete-confirm and dead-reason modal **bodies** (the overlay shell stays per-page,
+  as it already is between `sales-loop-crm.tsx` and `templates-page.tsx`) and the small bits
+  both contact views render (`SourceTag`, `LinkedinButton`, `ownerMeta`, `NO_TOUCH`).
+  The panel never deletes or writes `Dead` itself — it raises `onDelete`/`onSetStatus` and
+  the page owns those modals. Route `needsDeadReason` through here rather than testing
+  `=== "Dead"` inline, or a board drop onto Churned silently skips the reason prompt and
+  lands in analytics as "Unspecified" forever. **Dependency direction**: this imports
+  `data.ts`/`ui.tsx`/`validate.ts` only — `sales-loop-crm.tsx` imports *it*, never the
+  reverse, for the same bundle reason `sidebar.tsx` documents.
 - **`sales-loop-crm.tsx`** — the entire UI as **one big client component** taking a
   `contacts` prop from the route loader. A `useState` "God object" (`State`) holds only
   **UI** state (filters, selection, menus, form/CSV drafts) — patched through `patch()`; the
@@ -144,6 +175,18 @@ created via the UI / CSV import. **Schema changes:** run `npm run db:migrations:
 scaffold a new numbered file in `migrations/`, add your `CREATE`/`ALTER` SQL, then apply it with
 `npm run db:migrate:local` / `npm run db:migrate:remote`. Wrangler only runs migrations not yet
 recorded in `d1_migrations`, so files are applied once, in numeric order.
+
+**Every contact write lives in `app/lib/contact-intents.server.ts`** — one
+`handleContactIntent(form, {DB, user, ...})` switch over the twelve intents (`setStatus`,
+`logTouch`, `addNote`, `logMeeting`, `snooze`, `clearFollow`, `addContact`, `resumeLoop1`,
+`markAdsSent`, `deleteContacts`, `importContacts`, `triggerAgent`), shared by `/` and
+`/lifecycle`. It returns `null` for an unknown intent so each route keeps its own default.
+The try/catch is the reason it's one module and not two copies: D1 exception text carries
+table and column names and an action's return value is rendered straight into the UI, so it
+logs the real cause with a reference id and returns only `Something went wrong. Reference:
+<ref>`. `user` is a parameter rather than a `request` — the helper cannot authenticate, so
+it can't be reached without the caller running `requireUser` first. **Add new contact write
+paths here, not inline in a route.**
 
 **Input validation lives in `app/lib/validate.ts`** — shared by the session action
 (`home.tsx`) and the machine API (`api.hyperagent.ts`), which previously disagreed about what
@@ -183,8 +226,8 @@ Gotchas:
   Dead clears it. Contacts marked Dead before migration `0007`, and anyone who skips the
   prompt, are reported as "Unspecified".
 - Index-route **actions require `?index`** in the POST URL (the client's `useFetcher` adds it
-  automatically; a raw `curl` to `/` hits the layout route and 405s). `/templates` is a named
-  route, so its POSTs don't need it.
+  automatically; a raw `curl` to `/` hits the layout route and 405s). `/templates` and
+  `/lifecycle` are named routes, so their POSTs don't need it.
 - **Template metrics are pushed, never derived.** Nothing in this app sends email or tracks
   opens, so `template_variants.sends/opens/replies/meetings` are counters written by an external
   sending tool via `POST /api/hyperagent {op:"recordTemplateStats"}` (or typed into the page's
