@@ -12,7 +12,7 @@
 import { Form, Link } from "react-router";
 import type { Contact, Viewer } from "./data";
 import { OWNERS } from "./data";
-import { Box, IconChart, IconContacts, IconMail, MONO, css } from "./ui";
+import { Box, IconBoard, IconChart, IconContacts, IconMail, MONO, css } from "./ui";
 
 export type SidebarTab = {
   key: string;
@@ -128,8 +128,9 @@ function SidebarRow({ tab }: { tab: SidebarTab }) {
   );
 }
 
-// Stacked vertically rather than as a segmented control: with three destinations
-// a `flex:1` row compresses each to a third of 212px, which truncates "Analytics".
+// Stacked vertically rather than as a segmented control: with four destinations
+// a `flex:1` row compresses each to a quarter of 212px, which truncates
+// "Analytics" and "Lifecycle".
 //
 // The `border:1px solid transparent` is load-bearing — the active state adds a
 // real 1px border, and without a transparent one on the inactive state every item
@@ -183,7 +184,7 @@ export function Sidebar({
   viewer,
   ownerNote,
 }: {
-  nav: "contacts" | "analytics" | "templates";
+  nav: "contacts" | "lifecycle" | "analytics" | "templates";
   viewTabs: SidebarTab[];
   ownerTabs: SidebarTab[];
   viewer: Viewer;
@@ -219,6 +220,9 @@ export function Sidebar({
         </NavLink>
         <NavLink to="/analytics" label="Analytics" active={nav === "analytics"}>
           <IconChart style={css("width:13px; height:13px;")} />
+        </NavLink>
+        <NavLink to="/lifecycle" label="Lifecycle" active={nav === "lifecycle"}>
+          <IconBoard style={css("width:13px; height:13px;")} />
         </NavLink>
         <NavLink to="/templates" label="Templates" active={nav === "templates"}>
           <IconMail style={css("width:13px; height:13px;")} />

@@ -1,33 +1,31 @@
-import type { Route } from "./+types/home";
-import { SalesLoopCRM } from "../crm/sales-loop-crm";
+import type { Route } from "./+types/lifecycle";
+import { LifecyclePage } from "../crm/lifecycle-page";
 import { appContext } from "../../load-context";
 import { ownerAvatar } from "../crm/data";
 import { crmFontLinks } from "../crm/ui";
 import { requireUser } from "../lib/session.server";
 import { listContacts } from "../lib/crm.server";
-import {
-  handleContactIntent,
-  type ContactActionResult,
-} from "../lib/contact-intents.server";
+import { handleContactIntent, type ContactActionResult } from "../lib/contact-intents.server";
 
 export function meta({}: Route.MetaArgs) {
   return [
-    { title: "Sales Loop CRM" },
+    { title: "Lifecycle · Sales Loop CRM" },
     {
       name: "description",
-      content: "Two-loop outbound CRM — queue, contacts, and touchpoint history.",
+      content: "Every contact as a kanban board across five lifecycle stages.",
     },
   ];
 }
 
+// Same webfonts as the other CRM pages. The root route loads Inter, so without
+// this the board renders in the wrong typeface.
 export const links = crmFontLinks;
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const ctx = context.get(appContext);
   const { DB } = ctx;
-  // Throws a redirect to /login when there's no valid, allowlisted session.
+  // Gating is per-route, so this page needs its own check.
   const user = await requireUser(request, ctx);
-  // Resolve the avatar server-side so the UI renders purely from loader data.
   const avatar = ownerAvatar(user.name);
   try {
     return {
@@ -36,19 +34,19 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     };
   } catch (err) {
     // Surface the real cause in `wrangler tail` — the production ErrorBoundary
-    // hides it. A throw here usually means the D1 schema is missing/outdated
-    // (run `npm run db:migrate:remote` to apply pending migrations).
-    console.error("[loader] failed to load contacts:", err);
+    // hides it, and a throw here usually means pending D1 migrations.
+    console.error("[loader] failed to load lifecycle:", err);
     throw err;
   }
 }
 
-// Every intent lives in ../lib/contact-intents.server.ts, shared with /lifecycle
-// so the detail slide-over behaves identically wherever it is rendered.
+// The board writes through the same shared intents as the contacts page, so the
+// detail slide-over behaves identically on both. Being a named route, its POSTs
+// need no `?index` (unlike the index route's).
 export async function action({ request, context }: Route.ActionArgs): Promise<ContactActionResult> {
   const ctx = context.get(appContext);
-  // Checked independently of the loader — otherwise every mutation below would
-  // still be reachable without a session.
+  // Checked independently of the loader — otherwise every mutation would still
+  // be reachable without a session.
   const user = await requireUser(request, ctx);
   const form = await request.formData();
   const result = await handleContactIntent(form, {
@@ -60,6 +58,6 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Co
   return result ?? { ok: false, error: "Unknown action." };
 }
 
-export default function Home({ loaderData }: Route.ComponentProps) {
-  return <SalesLoopCRM contacts={loaderData.contacts} viewer={loaderData.viewer} />;
+export default function Lifecycle({ loaderData }: Route.ComponentProps) {
+  return <LifecyclePage contacts={loaderData.contacts} viewer={loaderData.viewer} />;
 }

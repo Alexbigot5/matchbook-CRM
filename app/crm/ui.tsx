@@ -212,6 +212,19 @@ export function IconMail({ style }: { style?: CSSProperties }) {
     </svg>
   );
 }
+// Kanban board glyph for the Lifecycle nav item. Three columns of differing
+// height — deliberately distinct from IconChart, which is also vertical bars but
+// grounded on a common baseline.
+export function IconBoard({ style }: { style?: CSSProperties }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={style}>
+      <rect x="3" y="4" width="5" height="12" rx="1.5" stroke="currentColor" strokeWidth="2" />
+      <rect x="10" y="4" width="5" height="16" rx="1.5" stroke="currentColor" strokeWidth="2" />
+      <rect x="17" y="4" width="4" height="8" rx="1.5" stroke="currentColor" strokeWidth="2" />
+    </svg>
+  );
+}
+
 export function IconCalendar({ style }: { style?: CSSProperties }) {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={style}>
