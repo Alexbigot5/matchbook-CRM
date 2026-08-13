@@ -9,10 +9,21 @@
 // matters — the contacts page's setView also resets its Loop 2 source filter, a
 // concern the sidebar must not own.
 
+import { useState } from "react";
 import { Form, Link } from "react-router";
 import type { Contact, Viewer } from "./data";
 import { OWNERS } from "./data";
-import { Box, IconBoard, IconChart, IconContacts, IconMail, IconSend, MONO, css } from "./ui";
+import {
+  Box,
+  IconBoard,
+  IconChart,
+  IconContacts,
+  IconMail,
+  IconSend,
+  IconTrash,
+  MONO,
+  css,
+} from "./ui";
 
 export type SidebarTab = {
   key: string;
@@ -25,10 +36,19 @@ export type SidebarTab = {
   /** OWNER rows: the 18px initial square. Both set, or neither. */
   avatarColor?: string;
   avatarInitial?: string;
+  /**
+   * Saved-view rows: a remove affordance, revealed on hover. Only the contacts
+   * page passes one — /analytics has no action at all, so a delete button in the
+   * shared rail there would post into a 405.
+   */
+  onDelete?: () => void;
 };
 
+// margin-bottom lives on the wrapper in SidebarRow, not here — a deletable row
+// puts its ✕ outside this button (nesting one button inside another is invalid
+// HTML), so the spacing has to belong to the element that contains both.
 const tabBtn = (active: boolean) =>
-  `display:flex;align-items:center;justify-content:space-between;width:100%;padding:7px 8px;border:none;background:${active ? "#eeeee9" : "none"};border-radius:8px;font-size:13px;font-weight:${active ? "500" : "450"};color:${active ? "#1a1a1a" : "#575753"};cursor:pointer;font-family:inherit;margin-bottom:1px;`;
+  `display:flex;align-items:center;justify-content:space-between;width:100%;padding:7px 8px;border:none;background:${active ? "#eeeee9" : "none"};border-radius:8px;font-size:13px;font-weight:${active ? "500" : "450"};color:${active ? "#1a1a1a" : "#575753"};cursor:pointer;font-family:inherit;`;
 
 /**
  * VIEWS rows. Counts are over the FULL contact list, not the filtered one — the
@@ -101,30 +121,80 @@ export function buildOwnerTabs(
 }
 
 function SidebarRow({ tab }: { tab: SidebarTab }) {
-  return (
+  // Local hover state rather than Box's, because the ✕ must be a *sibling* of the
+  // row button — a <button> inside a <button> is invalid HTML and React warns on
+  // hydration — so the wrapper is what has to know it's hovered. SSR renders
+  // false, and the server never hovers, so hydration matches.
+  const [hovered, setHovered] = useState(false);
+  const row = (
     <Box
       as="button"
       onClick={tab.onClick}
       style={css(tabBtn(tab.active))}
       hover={css("background:#f0f0ec;")}
     >
-      <span style={css("display:flex; align-items:center; gap:9px;")}>
+      <span style={css("display:flex; align-items:center; gap:9px; min-width:0;")}>
         {tab.dot && (
-          <span style={css(`width:8px; height:8px; border-radius:3px; background:${tab.dot};`)} />
+          <span
+            style={css(
+              `width:8px; height:8px; border-radius:3px; background:${tab.dot}; flex:0 0 auto;`,
+            )}
+          />
         )}
         {tab.avatarColor && tab.avatarInitial && (
           <span
             style={css(
-              `width:18px; height:18px; border-radius:5px; background:${tab.avatarColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600;`,
+              `width:18px; height:18px; border-radius:5px; background:${tab.avatarColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; flex:0 0 auto;`,
             )}
           >
             {tab.avatarInitial}
           </span>
         )}
-        <span>{tab.label}</span>
+        <span
+          style={css("overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}
+          title={tab.label}
+        >
+          {tab.label}
+        </span>
       </span>
-      <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{tab.count}</span>
+      {/* The count is hidden while the ✕ occupies its place, rather than shifted:
+          a row whose number jumps sideways on hover reads as a layout bug. */}
+      <span
+        style={css(
+          MONO +
+            `font-size:11px; color:#a3a39d; flex:0 0 auto; visibility:${
+              tab.onDelete && hovered ? "hidden" : "visible"
+            };`,
+        )}
+      >
+        {tab.count}
+      </span>
     </Box>
+  );
+
+  if (!tab.onDelete) return <div style={css("margin-bottom:1px;")}>{row}</div>;
+
+  return (
+    <div
+      style={css("position:relative; margin-bottom:1px;")}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {row}
+      {hovered && (
+        <Box
+          as="button"
+          onClick={tab.onDelete}
+          title="Delete view"
+          style={css(
+            "position:absolute; top:50%; right:5px; transform:translateY(-50%); border:none; background:none; padding:3px; border-radius:6px; display:flex; align-items:center; justify-content:center; color:#a3a39d; cursor:pointer; font-family:inherit;",
+          )}
+          hover={css("background:#e6e6e2; color:#9a5b5b;")}
+        >
+          <IconTrash size={13} />
+        </Box>
+      )}
+    </div>
   );
 }
 

@@ -17,6 +17,12 @@ import {
   type TemplateStatus,
   type VariantSlot,
 } from "../crm/templates";
+import {
+  VIEW_FIELDS,
+  VIEW_OPS,
+  type ViewCondition,
+  type ViewOp,
+} from "../crm/views";
 
 /**
  * Per-field maximum lengths, in characters, applied after trimming. Generous
@@ -41,6 +47,8 @@ export const LIMITS = {
   // Smartlead campaign name. Same order as templateName — it is a label in
   // someone else's UI, not content.
   campaignName: 120,
+  // Saved-view name. Same family again: it is a sidebar row label, not content.
+  viewName: 120,
   // IANA zone identifier ("America/New_York"). Bounded well above the longest
   // real zone name.
   timezone: 60,
@@ -66,6 +74,19 @@ export const MAX_STAT_COUNT = 10_000_000;
 /** Furthest day of a sequence a template may be scheduled on. */
 export const MAX_SEND_DAY = 365;
 
+/** Clauses one saved view may AND together. */
+export const MAX_VIEW_CONDITIONS = 10;
+
+/**
+ * Saved views the team may keep, in total.
+ *
+ * Bounded because every view a viewer can see is serialized into the SSR payload
+ * of every contacts-page render, and each one is also counted against the whole
+ * contact list to fill its sidebar row. Same bounding discipline as MAX_IDS and
+ * MAX_IMPORT_ROWS: nothing unbounded reaches a render path.
+ */
+export const MAX_SAVED_VIEWS = 50;
+
 /**
  * Why a deal died, offered when a contact's status is set to Dead. A closed set
  * rather than free text: the analytics panel groups on this value exactly, and a
@@ -85,6 +106,17 @@ const TOUCH_TYPES: ReadonlySet<string> = new Set(Object.keys(CH));
 const DEAD_REASON_SET: ReadonlySet<string> = new Set(DEAD_REASONS);
 const TEMPLATE_STATUS_SET: ReadonlySet<string> = new Set(TEMPLATE_STATUSES);
 const VARIANT_SLOT_SET: ReadonlySet<string> = new Set(VARIANT_SLOTS);
+const VIEW_FIELD_SET: ReadonlySet<string> = new Set(VIEW_FIELDS.map((f) => f.key));
+const VIEW_OP_SET: ReadonlySet<string> = new Set(VIEW_OPS);
+
+/**
+ * Each filterable field's closed value set, so a condition's value can be checked
+ * against the field it names rather than against a flat union of every field's
+ * values — otherwise `owner is New` would validate.
+ */
+const VIEW_VALUE_SETS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+  VIEW_FIELDS.map((f) => [f.key, new Set(f.options.map((o) => o.value))]),
+);
 
 export function isValidStatus(value: unknown): value is string {
   return typeof value === "string" && STATUS_IDS.has(value);
@@ -104,6 +136,14 @@ export function isValidTemplateStatus(value: unknown): value is TemplateStatus {
 
 export function isValidVariantSlot(value: unknown): value is VariantSlot {
   return typeof value === "string" && VARIANT_SLOT_SET.has(value);
+}
+
+export function isValidViewField(value: unknown): value is string {
+  return typeof value === "string" && VIEW_FIELD_SET.has(value);
+}
+
+export function isValidViewOp(value: unknown): value is ViewOp {
+  return typeof value === "string" && VIEW_OP_SET.has(value);
 }
 
 /** Loop numbers are a closed set of two; anything else is a bug or an attack. */
@@ -497,6 +537,91 @@ export function validateVariantTarget(raw: unknown):
     return { ok: true, value: { templateId, slot } };
   }
   return { ok: false, error: "Missing variant id or slot." };
+}
+
+// ---------------------------------------------------------------------------
+// Saved views
+// ---------------------------------------------------------------------------
+
+/**
+ * A saved view's settings. Note what is absent: any creator identity. This module
+ * knows nothing about sessions, so createSavedView() takes the creator as a
+ * separate parameter — the same split as removeVariant(db, ..., actor).
+ */
+export type SavedViewFields = {
+  name: string;
+  shared: boolean;
+  conditions: ViewCondition[];
+};
+
+/**
+ * Coerce a checkbox-ish value to a boolean. FormData gives "on" for a checked
+ * box, the client sends "1"/"0", and a JSON caller would send a real boolean —
+ * all three have to mean the same thing.
+ */
+function asBool(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value !== "string") return fallback;
+  const v = value.trim().toLowerCase();
+  if (v === "") return fallback;
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+/**
+ * Validate a saved view. Mirrors validateTemplate: accepts `unknown` for every
+ * field, and returns a user-facing sentence rather than a code.
+ *
+ * The empty-conditions check is load-bearing. matchesConditions([]) is a vacuous
+ * AND and so matches every contact — saving one would produce a view that
+ * silently means "all contacts" under a name promising something narrower, which
+ * reads as the filter being broken rather than as the view being empty.
+ *
+ * Each value is checked against *its own field's* option set. A value outside it
+ * is not an injection risk (nothing here reaches SQL — see app/crm/views.ts), but
+ * it renders as a view that matches nothing, forever, with no way to tell why.
+ */
+export function validateSavedView(raw: unknown):
+  | { ok: true; value: SavedViewFields }
+  | { ok: false; error: string } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+
+  const name = asString(r.name);
+  if (!name) return { ok: false, error: "View name is required." };
+  if (name.length > LIMITS.viewName) {
+    return { ok: false, error: `View name must be ${LIMITS.viewName} characters or fewer.` };
+  }
+
+  const rawConditions = r.conditions;
+  if (!Array.isArray(rawConditions) || rawConditions.length === 0) {
+    return { ok: false, error: "Add at least one condition." };
+  }
+  if (rawConditions.length > MAX_VIEW_CONDITIONS) {
+    return {
+      ok: false,
+      error: `A view can have at most ${MAX_VIEW_CONDITIONS} conditions.`,
+    };
+  }
+
+  const conditions: ViewCondition[] = [];
+  for (const entry of rawConditions) {
+    const e = (entry ?? {}) as Record<string, unknown>;
+    const field = asString(e.field);
+    if (!isValidViewField(field)) {
+      return { ok: false, error: `Unknown filter field "${truncateForMessage(field)}".` };
+    }
+    const op = asString(e.op);
+    if (!isValidViewOp(op)) {
+      return { ok: false, error: `Unknown filter operator "${truncateForMessage(op)}".` };
+    }
+    const value = asString(e.value);
+    if (!VIEW_VALUE_SETS.get(field)?.has(value)) {
+      return { ok: false, error: `Unknown value "${truncateForMessage(value)}".` };
+    }
+    conditions.push({ field, op, value });
+  }
+
+  return { ok: true, value: { name, shared: asBool(r.shared, true), conditions } };
 }
 
 // ---------------------------------------------------------------------------
