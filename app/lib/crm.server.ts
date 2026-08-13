@@ -285,10 +285,15 @@ export async function createManyContacts(
 }
 
 /**
- * Permanently delete contacts along with everything hanging off them (notes and
- * touchpoints). Children go first so the FK references stay satisfied, and each
- * chunk is one batched (atomic) write. Returns how many contact rows actually
- * went away — 0 means none of the ids existed.
+ * Permanently delete contacts along with everything hanging off them (notes,
+ * touchpoints, and Smartlead lead links). Children go first so the FK references
+ * stay satisfied, and each chunk is one batched (atomic) write. Returns how many
+ * contact rows actually went away — 0 means none of the ids existed.
+ *
+ * `smartlead_leads` is in that child set for a second reason beyond the dangling
+ * FK: those rows are what "this contact is already in the campaign" is read from.
+ * Leaving them behind means a contact re-added under a fresh id is fine, but the
+ * stale row still counts against the campaign's pushed set forever.
  */
 export async function deleteContacts(
   db: D1Database,
@@ -327,6 +332,7 @@ export async function deleteContacts(
       ...auditRows,
       db.prepare(`DELETE FROM notes WHERE contact_id IN (${placeholders})`).bind(...chunk),
       db.prepare(`DELETE FROM touchpoints WHERE contact_id IN (${placeholders})`).bind(...chunk),
+      db.prepare(`DELETE FROM smartlead_leads WHERE contact_id IN (${placeholders})`).bind(...chunk),
       db.prepare(`DELETE FROM contacts WHERE id IN (${placeholders})`).bind(...chunk),
     ]);
     deleted += res[res.length - 1]?.meta?.changes ?? 0;
@@ -896,4 +902,212 @@ export async function recordVariantStats(
     .bind(stats.sends, stats.opens, stats.replies, stats.meetings, variantId, target.templateId)
     .run();
   return (res.meta?.changes ?? 0) > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Smartlead bindings
+//
+// See migrations/0009_smartlead.sql for why only two tables exist and what is
+// deliberately derived instead of stored. Same conventions as everything above:
+// `db` first, ids minted here, bound parameters only.
+//
+// One rule specific to this section: every "last synced" timestamp is written as
+// an ISO string from JS, NOT via the column's datetime('now') default. SQLite
+// renders that default as 'YYYY-MM-DD HH:MM:SS' with no timezone designator, and
+// the loader calls Date.parse on these values to build a label — which would read
+// a UTC instant as local time and drift the label by the offset. `created_at` can
+// keep the default because it is only ever ordered on, never parsed.
+// ---------------------------------------------------------------------------
+
+export type CampaignBinding = {
+  loop: number;
+  campaignId: string;
+  campaignName: string;
+  /** "Jul 20"-style labels, precomputed here so no Date runs during render. */
+  sequencePushedLabel: string | null;
+  leadsPushedLabel: string | null;
+  statsSyncedLabel: string | null;
+  /** One sentence about the most recent operation, so a reload still says what happened. */
+  lastResult: string | null;
+};
+
+type CampaignRow = {
+  loop: number;
+  campaign_id: string;
+  campaign_name: string;
+  sequence_pushed_at: string | null;
+  leads_pushed_at: string | null;
+  stats_synced_at: string | null;
+  last_result: string | null;
+};
+
+/** Which sync timestamp a write should stamp. A literal union, never caller text. */
+export type SyncField = "sequence" | "leads" | "stats";
+
+// The column name is resolved through this map rather than built from input —
+// the same discipline as recordVariantStats' COALESCE list, where no part of the
+// SQL text ever comes from a caller.
+const SYNC_COLUMNS: Record<SyncField, string> = {
+  sequence: "sequence_pushed_at",
+  leads: "leads_pushed_at",
+  stats: "stats_synced_at",
+};
+
+/** Every loop's campaign binding, keyed by loop. `now` is the loader's instant. */
+export async function getCampaignBindings(
+  db: D1Database,
+  now: number,
+): Promise<Record<number, CampaignBinding>> {
+  const res = await db
+    .prepare(
+      "SELECT loop, campaign_id, campaign_name, sequence_pushed_at, leads_pushed_at, stats_synced_at, last_result FROM smartlead_campaigns",
+    )
+    .all<CampaignRow>();
+
+  const label = (raw: string | null) => {
+    if (!raw) return null;
+    const ms = Date.parse(raw);
+    return Number.isNaN(ms) ? null : dateLabel(ms);
+  };
+
+  const out: Record<number, CampaignBinding> = {};
+  for (const row of res.results ?? []) {
+    out[Number(row.loop)] = {
+      loop: Number(row.loop),
+      campaignId: row.campaign_id,
+      campaignName: row.campaign_name ?? "",
+      sequencePushedLabel: label(row.sequence_pushed_at),
+      leadsPushedLabel: label(row.leads_pushed_at),
+      statsSyncedLabel: label(row.stats_synced_at),
+      lastResult: row.last_result,
+    };
+  }
+  // `now` is accepted for symmetry with the other readers and to make the
+  // dependency explicit; the labels above are absolute, so it isn't consulted.
+  void now;
+  return out;
+}
+
+/**
+ * Bind a loop to a campaign, or re-point an existing binding.
+ *
+ * A plain upsert with no read-modify-write, which is what the `loop` primary key
+ * buys: two people linking Loop 1 at once resolve to one row rather than racing.
+ * Re-binding clears the sync timestamps — they described the previous campaign,
+ * and leaving them would claim a brand-new campaign had already been set up.
+ */
+export async function bindCampaign(
+  db: D1Database,
+  loop: number,
+  campaignId: string,
+  campaignName: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO smartlead_campaigns (loop, campaign_id, campaign_name)
+       VALUES (?1, ?2, ?3)
+       ON CONFLICT(loop) DO UPDATE SET
+         campaign_id = ?2,
+         campaign_name = ?3,
+         sequence_pushed_at = CASE WHEN smartlead_campaigns.campaign_id = ?2
+           THEN smartlead_campaigns.sequence_pushed_at ELSE NULL END,
+         leads_pushed_at = CASE WHEN smartlead_campaigns.campaign_id = ?2
+           THEN smartlead_campaigns.leads_pushed_at ELSE NULL END,
+         stats_synced_at = CASE WHEN smartlead_campaigns.campaign_id = ?2
+           THEN smartlead_campaigns.stats_synced_at ELSE NULL END,
+         last_result = CASE WHEN smartlead_campaigns.campaign_id = ?2
+           THEN smartlead_campaigns.last_result ELSE NULL END`,
+    )
+    .bind(loop, campaignId, str(campaignName))
+    .run();
+}
+
+/**
+ * Forget a loop's campaign.
+ *
+ * The smartlead_leads rows are deliberately kept: they record that those contacts
+ * were really emailed by that campaign, which stays true after unlinking. Binding
+ * the same campaign again therefore still knows who is already in it.
+ */
+export async function unbindCampaign(db: D1Database, loop: number): Promise<void> {
+  await db.prepare("DELETE FROM smartlead_campaigns WHERE loop = ?").bind(loop).run();
+}
+
+/** Stamp one sync timestamp and the result sentence shown on the page. */
+export async function stampCampaignSync(
+  db: D1Database,
+  loop: number,
+  field: SyncField,
+  result: string,
+): Promise<void> {
+  const column = SYNC_COLUMNS[field];
+  if (!column) return;
+  await db
+    .prepare(
+      `UPDATE smartlead_campaigns SET ${column} = ?, last_result = ? WHERE loop = ?`,
+    )
+    .bind(new Date().toISOString(), result.slice(0, 300), loop)
+    .run();
+}
+
+/** Contact ids already handed to this campaign. Drives "push only what's new". */
+export async function listPushedContactIds(
+  db: D1Database,
+  campaignId: string,
+): Promise<Set<string>> {
+  const res = await db
+    .prepare("SELECT contact_id FROM smartlead_leads WHERE campaign_id = ?")
+    .bind(campaignId)
+    .all<{ contact_id: string }>();
+  return new Set((res.results ?? []).map((r) => r.contact_id));
+}
+
+/**
+ * Every address already known to this campaign, lowercased.
+ *
+ * Used to dedupe an inbound import. Lowercased here rather than at the call site
+ * so the one place that decides how addresses compare is the one that reads them.
+ */
+export async function listPushedEmails(
+  db: D1Database,
+  campaignId: string,
+): Promise<Set<string>> {
+  const res = await db
+    .prepare("SELECT email FROM smartlead_leads WHERE campaign_id = ?")
+    .bind(campaignId)
+    .all<{ email: string }>();
+  return new Set((res.results ?? []).map((r) => r.email.toLowerCase()));
+}
+
+/**
+ * Record that these contacts are now in the campaign.
+ *
+ * INSERT OR IGNORE against the unique (contact_id, campaign_id) index, which is
+ * the real guard rather than the caller's pre-flight filter — two operators
+ * clicking Push at the same moment both read the same "already pushed" set, and
+ * only the index can settle it. Same reasoning as addVariant() above.
+ *
+ * Called after EACH chunk of a multi-chunk push, never once at the end: if chunk
+ * three fails, chunks one and two have already been sent, and losing that record
+ * means the retry emails those people a second time.
+ */
+export async function recordPushedLeads(
+  db: D1Database,
+  campaignId: string,
+  rows: { contactId: string; email: string }[],
+): Promise<void> {
+  const CHUNK = 50;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const slice = rows.slice(i, i + CHUNK);
+    if (!slice.length) continue;
+    await db.batch(
+      slice.map((row) =>
+        db
+          .prepare(
+            "INSERT OR IGNORE INTO smartlead_leads (id, contact_id, campaign_id, email) VALUES (?, ?, ?, ?)",
+          )
+          .bind(crypto.randomUUID(), row.contactId, campaignId, row.email.toLowerCase()),
+      ),
+    );
+  }
 }

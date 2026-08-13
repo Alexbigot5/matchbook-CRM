@@ -14,6 +14,7 @@ type IntegrationEnv = {
   BETTER_AUTH_URL?: string;
   RESEND_API_KEY?: string;
   AUTH_EMAIL_FROM?: string;
+  SMARTLEAD_API_KEY?: string;
 };
 
 export function getLoadContext(env: Env, request: Request) {
@@ -40,6 +41,9 @@ export function getLoadContext(env: Env, request: Request) {
     CRM_API_KEY: e.CRM_API_KEY ?? "",
     HYPERAGENT_API_KEY: e.HYPERAGENT_API_KEY ?? "",
     HYPERAGENT_TRIGGER_URL: e.HYPERAGENT_TRIGGER_URL ?? "",
+    // Smartlead (app/lib/smartlead.server.ts). Same "" = disabled convention:
+    // /smartlead renders and explains itself rather than erroring.
+    SMARTLEAD_API_KEY: e.SMARTLEAD_API_KEY ?? "",
   };
 }
 

@@ -38,6 +38,12 @@ export const LIMITS = {
   templateName: 120,
   subject: 300,
   body: 10_000,
+  // Smartlead campaign name. Same order as templateName — it is a label in
+  // someone else's UI, not content.
+  campaignName: 120,
+  // IANA zone identifier ("America/New_York"). Bounded well above the longest
+  // real zone name.
+  timezone: 60,
 } as const;
 
 /** Maximum rows accepted in one CSV / API import. */
@@ -491,6 +497,175 @@ export function validateVariantTarget(raw: unknown):
     return { ok: true, value: { templateId, slot } };
   }
   return { ok: false, error: "Missing variant id or slot." };
+}
+
+// ---------------------------------------------------------------------------
+// Smartlead
+//
+// The sending tool the /smartlead page drives. Everything below guards a value
+// that is about to leave this app for a third-party API, which is a different
+// threat model from the rest of this module: a bad `status` here doesn't corrupt
+// a local filter, it makes a paid campaign start sending.
+// ---------------------------------------------------------------------------
+
+/**
+ * Campaign lifecycle values Smartlead accepts as *input*.
+ *
+ * Note `START`, not `ACTIVE`. Smartlead's API takes START to activate or resume a
+ * campaign but reports the resulting state as ACTIVE, so a response value copied
+ * straight back into a request is rejected. Keeping the input set closed here is
+ * what stops that round-trip being attempted.
+ */
+export const SMARTLEAD_STATUSES = ["START", "PAUSED", "STOPPED"] as const;
+export type SmartleadStatus = (typeof SMARTLEAD_STATUSES)[number];
+
+const SMARTLEAD_STATUS_SET: ReadonlySet<string> = new Set(SMARTLEAD_STATUSES);
+
+export function isValidSmartleadStatus(value: unknown): value is SmartleadStatus {
+  return typeof value === "string" && SMARTLEAD_STATUS_SET.has(value);
+}
+
+/** Largest contact push accepted in one action. See the chunk size below. */
+export const MAX_LEAD_PUSH = 1_000;
+
+/**
+ * Leads per Smartlead request. Their endpoint caps a `lead_list` at around 100,
+ * and each chunk is one Worker subrequest — so MAX_LEAD_PUSH / this is the
+ * subrequest cost of a full push (10), comfortably inside the platform ceiling.
+ */
+export const SMARTLEAD_LEAD_CHUNK = 100;
+
+/** Rows read per page when totalling campaign statistics. */
+export const SMARTLEAD_STATS_PAGE = 100;
+
+/**
+ * Pages of statistics one sync will read. Deliberately a hard stop rather than a
+ * "read what we can": these counters are ABSOLUTE lifetime totals, so writing a
+ * partial aggregate doesn't under-report by a little, it looks like performance
+ * collapsed. The sync writes nothing and says so instead.
+ */
+export const SMARTLEAD_STATS_MAX_PAGES = 20;
+
+/**
+ * Validate a Smartlead campaign id.
+ *
+ * Load-bearing beyond the usual bounds check: this value is interpolated into a
+ * URL *path* (`/campaigns/{id}/sequences`). Digits only means it cannot carry a
+ * `../`, a query string, or anything else that would re-point the request at a
+ * different endpoint — the same reasoning as isValidEmail excluding `? & = # % /`
+ * for safeMailto's benefit.
+ */
+export function validateCampaignId(raw: unknown):
+  | { ok: true; id: string }
+  | { ok: false; error: string } {
+  const id = asString(raw);
+  if (!id) return { ok: false, error: "Missing campaign id." };
+  if (!/^\d{1,20}$/.test(id)) {
+    return { ok: false, error: `"${truncateForMessage(id)}" is not a valid campaign id.` };
+  }
+  return { ok: true, id };
+}
+
+/** Validate a campaign name for the create path. */
+export function validateCampaignName(raw: unknown):
+  | { ok: true; name: string }
+  | { ok: false; error: string } {
+  const name = asString(raw);
+  if (!name) return { ok: false, error: "Campaign name is required." };
+  if (name.length > LIMITS.campaignName) {
+    return {
+      ok: false,
+      error: `Campaign name must be ${LIMITS.campaignName} characters or fewer.`,
+    };
+  }
+  return { ok: true, name };
+}
+
+export type ScheduleFields = {
+  timezone: string;
+  /** Days of the week Smartlead may send on, 0 = Sunday. Sorted, deduped, non-empty. */
+  days: number[];
+  startHour: string;
+  endHour: string;
+  minGapMinutes: number;
+  maxLeadsPerDay: number;
+  /** ISO instant the campaign should begin, or null for "as soon as it's started". */
+  startAt: string | null;
+};
+
+// "HH:MM" on a 24-hour clock, which is the format Smartlead's schedule endpoint
+// documents for start_hour / end_hour.
+const HOUR_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// "UTC", or an IANA "Area/Location" identifier. Not checked against the real zone
+// list — Workers has no tzdata to consult and Smartlead rejects an unknown zone
+// itself; this only keeps something structurally absurd out of the request body.
+const TIMEZONE_RE = /^(UTC|[A-Za-z_]+\/[A-Za-z0-9_+-]+)$/;
+
+/**
+ * Validate a sending-schedule form.
+ *
+ * Every bound here is a real-world sanity limit rather than a Smartlead one:
+ * a campaign is a paid resource with a deliverability cost, and a mistyped
+ * `max_new_leads_per_day` of 100000 burns a domain's reputation before anyone
+ * notices. An empty `days` is rejected outright — Smartlead accepts it, and it
+ * silently means the campaign never sends.
+ */
+export function validateSchedule(raw: unknown):
+  | { ok: true; value: ScheduleFields }
+  | { ok: false; error: string } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+
+  const timezone = asString(r.timezone);
+  if (!timezone) return { ok: false, error: "Timezone is required." };
+  if (timezone.length > LIMITS.timezone || !TIMEZONE_RE.test(timezone)) {
+    return { ok: false, error: `"${truncateForMessage(timezone)}" is not a valid timezone.` };
+  }
+
+  if (!Array.isArray(r.days)) return { ok: false, error: "Sending days must be an array." };
+  const days = [
+    ...new Set(r.days.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)),
+  ].sort((a, b) => a - b);
+  if (!days.length) return { ok: false, error: "Pick at least one sending day." };
+
+  const startHour = asString(r.startHour);
+  const endHour = asString(r.endHour);
+  if (!HOUR_RE.test(startHour) || !HOUR_RE.test(endHour)) {
+    return { ok: false, error: "Sending hours must look like 09:00." };
+  }
+  if (startHour >= endHour) {
+    // Lexicographic compare is exact for zero-padded HH:MM. Smartlead treats an
+    // inverted window as an empty one, so the campaign silently never sends.
+    return { ok: false, error: "The start hour must be before the end hour." };
+  }
+
+  const minGapMinutes = Number(asString(r.minGapMinutes));
+  if (!Number.isInteger(minGapMinutes) || minGapMinutes < 1 || minGapMinutes > 1_440) {
+    return { ok: false, error: "Minutes between emails must be between 1 and 1440." };
+  }
+
+  const maxLeadsPerDay = Number(asString(r.maxLeadsPerDay));
+  if (!Number.isInteger(maxLeadsPerDay) || maxLeadsPerDay < 1 || maxLeadsPerDay > 10_000) {
+    return { ok: false, error: "New leads per day must be between 1 and 10000." };
+  }
+
+  // Optional. Parsed rather than passed through so a malformed value fails here
+  // instead of being rejected opaquely by Smartlead, and re-serialised to ISO so
+  // the request body never carries a locale-dependent string.
+  const rawStartAt = asString(r.startAt);
+  let startAt: string | null = null;
+  if (rawStartAt) {
+    const ms = Date.parse(rawStartAt);
+    if (Number.isNaN(ms)) {
+      return { ok: false, error: "Start date isn’t a valid date and time." };
+    }
+    startAt = new Date(ms).toISOString();
+  }
+
+  return {
+    ok: true,
+    value: { timezone, days, startHour, endHour, minGapMinutes, maxLeadsPerDay, startAt },
+  };
 }
 
 // ---------------------------------------------------------------------------
