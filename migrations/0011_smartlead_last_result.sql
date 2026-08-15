@@ -1,0 +1,25 @@
+-- Add the `last_result` column migration 0009 forgot.
+--
+-- app/lib/crm.server.ts has always read and written it: getCampaignBindings()
+-- SELECTs it, stampCampaignSync() SETs it after every successful push/sync, and
+-- bindCampaign()'s upsert clears it when a loop is re-pointed at a different
+-- campaign. The table in 0009_smartlead.sql never declared it, so every one of
+-- those statements failed with "no such column: last_result" — and because the
+-- SELECT is in the /smartlead loader, the whole page 500'd on load rather than
+-- degrading. Nothing about it was reachable.
+--
+-- Nullable with no default: null means "nothing has been pushed or synced yet",
+-- which is exactly the state a binding starts in and what the page already
+-- renders for. Existing rows therefore need no backfill — the sentence describes
+-- the most recent operation, and for a row written before this migration there
+-- is no honest one to invent.
+--
+-- Applied via Wrangler's D1 migrations (tracked in the `d1_migrations` table):
+--   npm run db:migrate:local
+--   npm run db:migrate:remote
+
+-- One sentence about the most recent operation on this loop's campaign, e.g.
+-- "Pushed 40 contacts, 12 still to go." Shown on /smartlead so a reload still
+-- says what happened, since the result banner is fetcher state and does not
+-- survive one. Written by stampCampaignSync(), which truncates to 300 chars.
+ALTER TABLE smartlead_campaigns ADD COLUMN last_result TEXT;
