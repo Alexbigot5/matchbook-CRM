@@ -341,13 +341,13 @@ export function computeAnalytics(contacts: Contact[], labels: AnalyticsLabels): 
     {
       key: "touched",
       label: "Touched",
-      value: total ? `${pct(touched, total)}%` : "—",
+      value: total ? `${pct(touched, total)}%` : "-",
       sub: `${touched} of ${total} contacted`,
     },
     {
       key: "reply",
       label: "Reply rate",
-      value: touched ? `${pct(replied, touched)}%` : "—",
+      value: touched ? `${pct(replied, touched)}%` : "-",
       sub: `${replied} replied of ${touched} touched`,
     },
     {

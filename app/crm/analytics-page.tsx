@@ -51,7 +51,7 @@ function Panel({
 /** A rate cell. Null means "nothing reached on this channel", not zero percent. */
 function RatePill({ value }: { value: number | null }) {
   if (value === null) {
-    return <span style={css(MONO + "font-size:11.5px; color:#c4c4be;")}>—</span>;
+    return <span style={css(MONO + "font-size:11.5px; color:#c4c4be;")}>-</span>;
   }
   const tone = value > 0 ? "background:#e4f3ea; color:#1f7a4d;" : "background:#f2f2f0; color:#a3a39d;";
   return (
@@ -240,7 +240,7 @@ export function AnalyticsPage({
                         : "border:1px solid #ededea; background:#fbfbfa;";
                     const rows: [string, string][] = [
                       ["Contacts", String(l.contacts)],
-                      ["Touched", l.touchedRate === null ? "—" : `${l.touchedRate}%`],
+                      ["Touched", l.touchedRate === null ? "-" : `${l.touchedRate}%`],
                       ["Meetings", String(l.meetings)],
                       ["Won", String(l.won)],
                     ];

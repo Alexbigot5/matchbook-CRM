@@ -202,7 +202,7 @@ export function SmartleadPage({
         viewTabs={buildViewTabs(contacts, S.view, (key) => patch({ view: key }))}
         ownerTabs={buildOwnerTabs(contacts, S.owner, (key) => patch({ owner: key }))}
         viewer={viewer}
-        ownerNote="Campaigns aren’t owned — these are contact counts."
+        ownerNote="Campaigns aren’t owned; these are contact counts."
       />
 
       <div style={css("flex:1; display:flex; flex-direction:column; min-width:0;")}>
@@ -216,7 +216,7 @@ export function SmartleadPage({
               Smartlead
             </div>
             <div style={css(MUTED + "margin-top:2px;")}>
-              One campaign per loop — contacts in, copy up, schedule set.
+              One campaign per loop: contacts in, copy up, schedule set.
             </div>
           </div>
         </div>
@@ -229,7 +229,7 @@ export function SmartleadPage({
           >
             <IconWarn size={14} style={css("flex:0 0 auto; margin-top:1px;")} />
             <span>
-              Smartlead isn’t connected. Set the key and reload — everything below stays
+              Smartlead isn’t connected. Set the key and reload; everything below stays
               read-only until then.
               <br />
               <code style={css(MONO + "font-size:11.5px;")}>
@@ -576,7 +576,7 @@ function LoopCard({
         </div>
         {leads.eligible > maxLeadPush && (
           <div style={css(MUTED + "margin-top:7px;")}>
-            Pushes {maxLeadPush} at a time — press again to continue.
+            Pushes {maxLeadPush} at a time. Press again to continue.
           </div>
         )}
         {leads.inOtherCampaign > 0 && (
@@ -864,7 +864,7 @@ function StepCopy({
         )}
       >
         <span style={css(MUTED)}>
-          Saves to the template — Templates and any other step using it show the same copy.
+          Saves to the template, so Templates and any other step using it show the same copy.
         </span>
         <span style={css("display:flex; gap:8px; flex:0 0 auto;")}>
           <Box
@@ -1203,7 +1203,7 @@ function SequenceBuilder({
           <option value="">
             {sequence.addable.length
               ? "Choose a template…"
-              : `No templates on Loop ${loop} yet — write one on Templates`}
+              : `No templates on Loop ${loop} yet. Write one on Templates`}
           </option>
           {sequence.addable.map((template) => (
             // One entry per usable variant plus, for an A/B template, a combined
@@ -1224,7 +1224,7 @@ function SequenceBuilder({
               ))}
               {!template.usableSlots.length && (
                 <option value="" disabled>
-                  {template.name} — no copy written yet
+                  {template.name} (no copy written yet)
                 </option>
               )}
             </optgroup>
@@ -1255,7 +1255,7 @@ function SequenceBuilder({
         {steps.length > 0 && !sequence.custom && (
           <>
             {" "}
-            Following the templates’ send days — reorder or edit a step and this loop keeps
+            Following the templates’ send days. Reorder or edit a step and this loop keeps
             its own arrangement from then on.
           </>
         )}
@@ -1263,7 +1263,7 @@ function SequenceBuilder({
 
       {sequence.skipped.map((s) => (
         <div key={`${s.templateId}:${s.reason}`} style={css(MUTED + "margin-top:6px;")}>
-          Skipped “{s.name}” — {s.reason}.
+          Skipped “{s.name}”: {s.reason}.
         </div>
       ))}
       {sequence.warnings.map((w) => (
@@ -1317,7 +1317,7 @@ function UploadConfirm({
             Upload {count} step{count === 1 ? "" : "s"} to Loop {view.loop}?
           </div>
           <div style={css(MUTED + "margin-top:6px; line-height:1.5;")}>
-            This <strong>replaces every step</strong> in the Smartlead campaign — including
+            This <strong>replaces every step</strong> in the Smartlead campaign, including
             anything written there by hand. If the campaign is running it will be paused
             for the edit and left paused, so you can check it before sending resumes.
           </div>

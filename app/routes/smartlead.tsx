@@ -369,7 +369,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           campaigns,
           message: campaigns.length
             ? undefined
-            : "No campaigns in this Smartlead account yet — create one below.",
+            : "No campaigns in this Smartlead account yet. Create one below.",
         };
       }
 
@@ -586,7 +586,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           ok: true,
           closed: "editor",
           message: binding?.sequencePushedLabel
-            ? "Saved to the template. Upload the sequence to send the new copy — the campaign still has the old text."
+            ? "Saved to the template. Upload the sequence to send the new copy; the campaign still has the old text."
             : "Saved to the template.",
         };
       }
@@ -595,7 +595,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         await clearSequenceSteps(DB, loop);
         return {
           ok: true,
-          message: `Loop ${loop}'s sequence follows the templates' send days again. Nothing in Smartlead changed — upload to apply it.`,
+          message: `Loop ${loop}'s sequence follows the templates' send days again. Nothing in Smartlead changed; upload to apply it.`,
         };
       }
 
@@ -659,7 +659,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           return {
             ok: false,
             error: wasLive
-              ? `${saved.error} The campaign is now PAUSED — restart it from Smartlead when you're ready.`
+              ? `${saved.error} The campaign is now PAUSED. Restart it from Smartlead when you're ready.`
               : saved.error,
           };
         }
@@ -674,7 +674,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           message:
             summary +
             (wasLive
-              ? " The campaign was paused for the edit — press Start when you’ve checked it."
+              ? " The campaign was paused for the edit. Press Start when you’ve checked it."
               : ""),
         };
       }
@@ -783,7 +783,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           return {
             ok: false,
             error: plan.total
-              ? `Nothing new — all ${plan.total} leads are already in the CRM.`
+              ? `Nothing new: all ${plan.total} leads are already in the CRM.`
               : "That campaign has no leads yet.",
           };
         }
@@ -871,7 +871,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         if (exhausted && total !== null && total > rows.length) {
           return {
             ok: false,
-            error: `This campaign has ${total} sends — more than one sync can total. Nothing was recorded, because a partial total would read as a drop in performance.`,
+            error: `This campaign has ${total} sends, more than one sync can total. Nothing was recorded, because a partial total would read as a drop in performance.`,
           };
         }
 

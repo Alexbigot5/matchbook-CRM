@@ -224,7 +224,7 @@ export function TemplatesPage({
         viewTabs={viewTabs}
         ownerTabs={ownerTabs}
         viewer={viewer}
-        ownerNote="Templates aren’t owned — these counts are contacts."
+        ownerNote="Templates aren’t owned; these counts are contacts."
       />
 
       <main
@@ -517,7 +517,7 @@ export function TemplatesPage({
                     style={css("font-size:12.5px; color:#75756f; margin-top:6px; line-height:1.5;")}
                   >
                     This removes the template and all {detail.variants.length} of its variants,
-                    including the copy. It can’t be undone — a record is kept in the audit log.
+                    including the copy. It can’t be undone, though a record is kept in the audit log.
                   </div>
                 </div>
                 <ModalFooter
@@ -838,8 +838,8 @@ function VariantCard({
           </label>
           <label>
             <span style={css(FIELD_LABEL)}>
-              Body — {"{{first_name}}"}, {"{{company}}"} and {"{{sender}}"} are filled in by your
-              sending tool
+              Body ({"{{first_name}}"}, {"{{company}}"} and {"{{sender}}"} are filled in by your
+              sending tool)
             </span>
             <textarea
               value={bodyDraft}

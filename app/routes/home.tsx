@@ -18,7 +18,7 @@ export function meta({}: Route.MetaArgs) {
     { title: "Sales Loop CRM" },
     {
       name: "description",
-      content: "Two-loop outbound CRM — queue, contacts, and touchpoint history.",
+      content: "Two-loop outbound CRM: queue, contacts, and touchpoint history.",
     },
   ];
 }

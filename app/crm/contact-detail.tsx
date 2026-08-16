@@ -649,7 +649,7 @@ export function DeadReasonModal({
           {/* Skipping still marks the contact dead — it just records no
               reason, which analytics reports as "Unspecified". */}
           <Box as="button" onClick={() => onPick("")} style={css("border:none; background:none; padding:9px 4px; font-size:12.5px; font-family:inherit; cursor:pointer; color:#9a9a95;")} hover={css("color:#575753;")}>
-            Skip — mark dead without a reason
+            Skip: mark dead without a reason
           </Box>
           <Box as="button" onClick={onCancel} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
         </div>

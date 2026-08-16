@@ -68,7 +68,7 @@ const MIN_SENDS_PER_VARIANT = 100;
 const CONFIDENCE_CAVEAT =
   "Two-sided two-proportion z-test on reply rate. This is the probability that a " +
   "difference this large would not arise by chance if the two variants were " +
-  "equally good — not the probability that the leader is better. It assumes A/B " +
+  "equally good, not the probability that the leader is better. It assumes A/B " +
   "assignment was unrelated to who was contacted, and it is read continuously " +
   "rather than at a fixed sample size, so treat it as a rough guide.";
 
@@ -76,12 +76,12 @@ const CONFIDENCE_CAVEAT =
 const pct = (n: number, d: number): number => (d > 0 ? Math.round((n / d) * 100) : 0);
 
 /**
- * A rate that distinguishes "0%" from "no data". Null denominators render as an
- * em dash — reporting 0% for a variant nobody has sent yet would be a lie.
+ * A rate that distinguishes "0%" from "no data". Null denominators render as a
+ * hyphen; reporting 0% for a variant nobody has sent yet would be a lie.
  */
 const rate = (n: number, d: number): number | null => (d > 0 ? Math.round((n / d) * 100) : null);
 
-const rateText = (r: number | null): string => (r === null ? "—" : `${r}%`);
+const rateText = (r: number | null): string => (r === null ? "-" : `${r}%`);
 
 export type MetricCell = { key: string; label: string; value: string };
 
@@ -251,7 +251,7 @@ function buildVerdict(variants: TemplateVariant[]): VerdictView {
       ...base,
       tone: "thin",
       headline: `Nothing sent on variant ${missing} yet.`,
-      detail: `${totalSends} sends so far, all on one variant — no comparison to make.`,
+      detail: `${totalSends} sends so far, all on one variant, so there is no comparison to make.`,
     };
   }
 
@@ -290,7 +290,7 @@ function buildVerdict(variants: TemplateVariant[]): VerdictView {
       tone: "thin",
       headline,
       detail:
-        `Confidence ${confidencePct}% · Only ${smallest} sends on one variant — ` +
+        `Confidence ${confidencePct}% · Only ${smallest} sends on one variant, ` +
         `too early to call.`,
       caveat: CONFIDENCE_CAVEAT,
       confidencePct,
@@ -301,7 +301,7 @@ function buildVerdict(variants: TemplateVariant[]): VerdictView {
     return {
       tone: "thin",
       headline,
-      detail: `Confidence ${confidencePct}% · Not conclusive — keep both running.`,
+      detail: `Confidence ${confidencePct}% · Not conclusive. Keep both running.`,
       caveat: CONFIDENCE_CAVEAT,
       confidencePct,
       leaderSlot: leader.slot,
