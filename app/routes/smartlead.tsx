@@ -33,6 +33,7 @@ import {
   recordVariantStats,
   removeSequenceStep,
   reorderSequenceSteps,
+  saveVariant,
   setSequenceStepDelay,
   setSequenceStepVariant,
   stampCampaignSync,
@@ -60,6 +61,7 @@ import {
   validateStepDelay,
   validateStepOrder,
   validateStepVariant,
+  validateVariantContent,
 } from "../lib/validate";
 
 export function meta({}: Route.MetaArgs) {
@@ -220,7 +222,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 export type CampaignChoice = { id: string; name: string; status: string };
 
 /**
- * Intents that only edit the stored sequence.
+ * Intents that reach nothing but D1 — the sequence builder and its copy editor.
  *
  * Named as a set rather than tested case by case because the rate limiter has to
  * classify the request before the switch runs. Adding a builder intent without
@@ -234,6 +236,7 @@ const BUILDER_INTENTS: ReadonlySet<string> = new Set([
   "setStepDelay",
   "setStepVariant",
   "resetSteps",
+  "saveVariant",
 ]);
 
 /**
@@ -260,7 +263,17 @@ function resolveStepToken(steps: StoredSequenceStep[], token: string): string | 
 }
 
 type ActionResult =
-  | { ok: true; message?: string; campaigns?: CampaignChoice[] }
+  | {
+      ok: true;
+      message?: string;
+      campaigns?: CampaignChoice[];
+      /**
+       * Set only by the copy editor, so the page knows to close it. Without the
+       * discriminator every successful write would close it — including a
+       * reorder pressed on another row — and take the half-typed body with it.
+       */
+      closed?: "editor";
+    }
   | { ok: false; error: string };
 
 /** Pull an array out of the several envelope shapes Smartlead answers with. */
@@ -540,6 +553,42 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         const stepId = resolveStepToken(steps, form.get("stepId")?.toString() ?? "");
         if (stepId) await setSequenceStepVariant(DB, loop, stepId, variant.slot);
         return { ok: true };
+      }
+
+      /**
+       * Edit a step's copy in place.
+       *
+       * The same templateId + variantId + validateVariantContent + saveVariant
+       * path the /templates action takes, deliberately — the copy has one home
+       * (`template_variants`), and this is a second door onto it rather than a
+       * second store. Which is also why the message says what it says: nothing
+       * here touches Smartlead, so the campaign keeps sending the old text until
+       * the sequence is uploaded again.
+       */
+      case "saveVariant": {
+        const templateId = form.get("templateId")?.toString();
+        const variantId = form.get("variantId")?.toString();
+        if (!templateId || !variantId) return { ok: false, error: "Missing variant id." };
+        const content = validateVariantContent({
+          subject: form.get("subject")?.toString(),
+          body: form.get("body")?.toString(),
+        });
+        if (!content.ok) return { ok: false, error: content.error };
+        const saved = await saveVariant(
+          DB,
+          templateId,
+          variantId,
+          content.value.subject,
+          content.value.body,
+        );
+        if (!saved) return { ok: false, error: "That variant no longer exists." };
+        return {
+          ok: true,
+          closed: "editor",
+          message: binding?.sequencePushedLabel
+            ? "Saved to the template. Upload the sequence to send the new copy — the campaign still has the old text."
+            : "Saved to the template.",
+        };
       }
 
       case "resetSteps": {

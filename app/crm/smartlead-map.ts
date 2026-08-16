@@ -63,8 +63,19 @@ export type SequenceStep = {
   seq_variants?: SequenceVariantPayload[];
 };
 
-/** One variant's copy, as the page previews it under an expanded step. */
-export type SequencePreview = { slot: string; subject: string; body: string };
+/**
+ * One variant's copy, as the page previews it under an expanded step.
+ *
+ * `variantId` travels so the preview's Edit button can write back through the
+ * same saveVariant() the Templates page uses — the copy has exactly one home,
+ * and editing it here is editing the template, not a copy of it.
+ */
+export type SequencePreview = {
+  variantId: string;
+  slot: string;
+  subject: string;
+  body: string;
+};
 
 export type SequencePlanRow = {
   /**
@@ -374,7 +385,12 @@ function assemble(drafts: StepDraft[], deriveDelay: boolean): SequencePlan {
       slots: chosen.map((v) => v.slot),
       variantSlot: draft.variantSlot,
       usableSlots: usable.map((v) => v.slot),
-      preview: chosen.map((v) => ({ slot: v.slot, subject: v.subject, body: v.body })),
+      preview: chosen.map((v) => ({
+        variantId: v.id,
+        slot: v.slot,
+        subject: v.subject,
+        body: v.body,
+      })),
     });
     previousSendDay = template.sendDay;
   }
