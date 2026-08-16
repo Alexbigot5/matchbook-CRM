@@ -164,3 +164,22 @@ export const SMARTLEAD_RULE: RateLimitRule = {
   limit: 20,
   windowMs: 60 * 1000,
 };
+
+/**
+ * Sequence-builder edits per signed-in user.
+ *
+ * A separate, much looser bucket because these intents reach nothing but D1:
+ * adding, reordering, retiming and removing steps is local editing, and the
+ * reasoning above — a metered API, real email going out — applies to none of it.
+ * Arranging a ten-step sequence is easily twenty writes in a minute, so metering
+ * it against the push budget would lock someone out of a text editor to protect
+ * a quota it cannot spend.
+ *
+ * Still bounded rather than exempt: it is a write path on a shared dataset, and
+ * "nothing unbounded" is the rule this file exists to keep.
+ */
+export const SMARTLEAD_BUILDER_RULE: RateLimitRule = {
+  bucket: "smartlead:builder",
+  limit: 240,
+  windowMs: 60 * 1000,
+};

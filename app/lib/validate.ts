@@ -11,6 +11,7 @@
 // server agree on what will be rejected.
 
 import { CH, OWNERS, STATUSES } from "../crm/data";
+import { MAX_SEQUENCE_STEPS } from "../crm/smartlead-map";
 import {
   TEMPLATE_STATUSES,
   VARIANT_SLOTS,
@@ -704,6 +705,73 @@ export function validateCampaignName(raw: unknown):
     };
   }
   return { ok: true, name };
+}
+
+// ---------------------------------------------------------------------------
+// Sequence builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Longest wait one step may sit on, in days.
+ *
+ * A real-world bound, not a Smartlead one — the same reasoning as the schedule
+ * limits below. Every step's wait compounds into the campaign's total length, so
+ * a mistyped 3000 doesn't produce an error, it produces a follow-up scheduled
+ * after the company has changed name.
+ */
+export const MAX_STEP_DELAY_DAYS = 90;
+
+/** Validate a step's wait, in days relative to the previous step. */
+export function validateStepDelay(raw: unknown):
+  | { ok: true; days: number }
+  | { ok: false; error: string } {
+  const days = Number(asString(raw));
+  if (!Number.isInteger(days) || days < 0 || days > MAX_STEP_DELAY_DAYS) {
+    return {
+      ok: false,
+      error: `The wait must be a whole number of days between 0 and ${MAX_STEP_DELAY_DAYS}.`,
+    };
+  }
+  return { ok: true, days };
+}
+
+/**
+ * Validate a step's variant choice.
+ *
+ * "all" is the wire spelling of null — every variant with copy, uploaded as
+ * Smartlead's own A/B split. It is a distinct value rather than an empty string
+ * so a dropped form field reads as missing, not as a deliberate un-pinning.
+ */
+export function validateStepVariant(raw: unknown):
+  | { ok: true; slot: string | null }
+  | { ok: false; error: string } {
+  const value = asString(raw);
+  if (value === "all") return { ok: true, slot: null };
+  if (isValidVariantSlot(value)) return { ok: true, slot: value };
+  return { ok: false, error: `Unknown variant "${truncateForMessage(value)}".` };
+}
+
+/**
+ * Validate a posted step order.
+ *
+ * Capped at MAX_SEQUENCE_STEPS rather than left unbounded: the list is echoed
+ * into one D1 batch, and this is the same ceiling the sequence itself is held to.
+ * Ids that don't belong to the loop are dropped by reorderSequenceSteps, so this
+ * only has to keep the shape sane.
+ */
+export function validateStepOrder(raw: unknown):
+  | { ok: true; ids: string[] }
+  | { ok: false; error: string } {
+  if (!Array.isArray(raw)) return { ok: false, error: "Expected a list of steps." };
+  if (raw.length > MAX_SEQUENCE_STEPS) {
+    return {
+      ok: false,
+      error: `Too many steps: ${raw.length}. The maximum is ${MAX_SEQUENCE_STEPS}.`,
+    };
+  }
+  const ids = [...new Set(raw.filter((id): id is string => typeof id === "string" && !!id))];
+  if (!ids.length) return { ok: false, error: "No steps to reorder." };
+  return { ok: true, ids };
 }
 
 export type ScheduleFields = {
