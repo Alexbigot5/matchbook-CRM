@@ -57,11 +57,15 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
 7. `app/routes/templates.tsx` — the `/templates` loader reads `listTemplates` **and**
    `listContacts` (the latter only feeds the shared sidebar's OWNER counts) against one `now`.
    It has its own `action` with nine intents. Being a named route, its POSTs need no `?index`.
-8. `app/routes/smartlead.tsx` — the `/smartlead` loader reads contacts, templates and the
-   campaign bindings against one `now`, and **makes no Smartlead calls**: a loader that
-   reaches a third party makes the page 500 whenever that party is down, and every
-   operation here is a manual button anyway. Its `action` has nine intents (see
-   "Smartlead" below) and is the only session-gated action carrying a rate limiter.
+8. `app/routes/smartlead.tsx` — the `/smartlead` loader reads contacts, templates, the
+   campaign bindings and the sequence-builder steps against one `now`, and **makes no
+   Smartlead calls**: a loader that reaches a third party makes the page 500 whenever that
+   party is down, and every operation here is a manual button anyway. Its `action` has
+   fifteen intents (see "Smartlead" below) and is the only session-gated action carrying a
+   rate limiter — two of them, in fact: the six sequence-builder intents touch nothing but
+   D1 and are metered on their own far looser bucket (`SMARTLEAD_BUILDER_RULE`), listed in
+   the `BUILDER_INTENTS` set. Add a builder intent without adding it there and ordinary
+   editing burns the push budget.
 
 `app/entry.server.tsx` is the standard streaming SSR entry (`renderToReadableStream`,
 5s `streamTimeout`, bot-detection via `isbot`).
@@ -125,13 +129,28 @@ shared shell:
   be **flattened** (`subject`/`email_body` on the step) because Smartlead rejects a
   one-entry `seq_variants`; and an **empty plan is blocking**, because
   `POST /sequences` replaces everything and an empty payload erases a live campaign
-  rather than doing nothing. `planLeads` excludes contacts already in the *other*
+  rather than doing nothing. `buildSequencePlan` has **two modes over one output**:
+  given the loop's stored builder steps it plans exactly those, in that order, with the
+  authored waits; given none it *derives* the plan from `send_day` exactly as it always
+  did. Both go through the same `assemble()`, which is what stops the two disagreeing
+  about what a valid sequence is. `statKey`/`duplicateStatKeys` name the one thing the
+  builder can create that the stats sync can't handle — the same (template, variant) in
+  two steps — and the sync skips those rather than writing an absolute total twice. `planLeads` excludes contacts already in the *other*
   loop's campaign — `loops` is not exclusive (`resumeToLoop1` keeps Loop 2 while
   adding Loop 1), so without that guard a resumed contact gets two concurrent
   sequences. Variant key names are in the single `SEQ_VARIANT_KEYS` const.
 - **`smartlead-page.tsx`** — the `/smartlead` UI, same one-client-component idiom. One
-  card per loop: campaign binding, sequence preview, contact eligibility, schedule,
-  stats.
+  card per loop: campaign binding, the sequence builder, contact eligibility, schedule,
+  stats. The builder (`SequenceBuilder`) is a reorderable step list — native HTML5 drag
+  plus ↑/↓ buttons as the **keyboard path**, the same pairing `lifecycle-page.tsx`
+  documents — with a per-step variant chip, an editable wait, an expandable copy preview
+  and a template picker. Every edit **posts and waits**; there is no local draft of the
+  list, because the stored order is what a later stats sync attributes numbers by and a
+  list showing an unaccepted arrangement would be lying about where they land. The one
+  exception is the wait box's text (a number input can't be typed in if it round-trips
+  per keystroke), which posts on blur and is dropped whenever a write settles. Steps are
+  addressed by a **token** — the step's id, or `#<position>` for a step the server merely
+  derived and which therefore has no row yet.
 - **`templates-page.tsx`** — the `/templates` UI, same one-client-component + `useState` God
   object + single `useFetcher` idiom as `sales-loop-crm.tsx`.
 - **`lifecycle.ts`** — pure, isomorphic stage model for the board (`LIFECYCLE_STAGES`,
@@ -233,10 +252,11 @@ the table.
 ## Smartlead
 
 The actual sending tool. `/smartlead` binds **one Smartlead campaign per loop** and drives
-four things: pushing contacts in as leads, uploading template copy as the campaign
-sequence, setting the sending schedule, and a manual stats sync back onto the template
-variant counters. There is deliberately **no cron and no inbound webhook** — every
-operation is a button.
+five things: building the sequence out of templates from the Templates page, pushing
+contacts in as leads, uploading that sequence as the campaign's steps, setting the sending
+schedule, and a manual stats sync back onto the template variant counters. There is
+deliberately **no cron and no inbound webhook** — every operation is a button. The builder
+is the only one of the five that never leaves D1.
 
 - **`app/lib/smartlead.server.ts`** — the HTTP client, shaped like `hyperagent.server.ts`
   (never throws, returns a result, empty key = disabled). Two things to keep: **the API
@@ -250,9 +270,21 @@ operation is a button.
 - **`migrations/0009_smartlead.sql`** — `smartlead_campaigns` (keyed on `loop`, so
   one-campaign-per-loop is a schema fact) and `smartlead_leads` (the contact↔campaign
   link, with a unique `(contact_id, campaign_id)` index as the real double-push guard).
-  There is deliberately no template→`seq_number` table: step order is *derived* from
-  `send_day` by `buildSequencePlan`, and the stats sync replays the same function to map
-  a `sequence_number` back to a template. `deleteContacts` drops the lead links too.
+  There is still no template→`seq_number` table: the Smartlead numbering is *derived* by
+  `buildSequencePlan`, and the stats sync replays the same function to map a
+  `sequence_number` back to a template. `deleteContacts` drops the lead links too.
+- **`migrations/0012_smartlead_sequence_steps.sql`** — the sequence builder's authored
+  steps (`loop`, `position`, `template_id`, `variant_slot`, `delay_days`). This is the one
+  override of 0009's "derive, don't store" rule, and it is narrow: **no rows for a loop
+  means derive**, so a loop nobody has edited still tracks its templates and gains a step
+  when one is added. The rows are written on the *first edit*
+  (`materializeSequenceSteps`), and "Reset to template order" deletes them. What is
+  stored is only the authored order — never the seq_number derived from it — and never
+  the copy, which stays in `template_variants` so the campaign can't drift from the
+  Templates page. Two consequences worth knowing: **removing the last step is refused**
+  (an empty table means "derive", so it would restore every template rather than nothing),
+  and `deleteTemplate` must drop a template's steps *before* the template, since D1 does
+  enforce that foreign key.
 - **Sync timestamps are written as ISO strings from JS**, not via `datetime('now')`. The
   loader `Date.parse`es them to build a label, and SQLite's default has no timezone
   designator, so the column default would read a UTC instant as local time. `created_at`
@@ -262,9 +294,13 @@ operation is a button.
   auto-resuming is a choice — silently restarting sends right after the copy changed
   isn't a button's decision, and it removes the failure mode where a failed auto-restore
   leaves a live campaign paused with no signal.
-- **Stats can't be split per variant.** The `/statistics` rows carry a `sequence_number`
-  but no variant id, so numbers land on the template's **default** variant and a template
-  with a live A/B is skipped by name. `meetings` is always passed as `null` — Smartlead
+- **A single Smartlead step can't be split per variant.** The `/statistics` rows carry a
+  `sequence_number` but no variant id, so a step uploaded as an A/B split is skipped by
+  name. A step the builder has **pinned** to a slot is one variant by construction, so its
+  numbers land on that slot — which is how a pinned B gets real figures rather than
+  hand-typed ones. The other side of that: the same (template, slot) in two steps is
+  skipped too, since these are absolute totals and the second write would replace the
+  first. `meetings` is always passed as `null` — Smartlead
   has no meeting concept, and `validateStats`' null-means-leave-alone is what preserves a
   hand-entered figure. If the campaign has more rows than the page budget the sync writes
   **nothing**: these are absolute totals, so a partial aggregate reads as a collapse in

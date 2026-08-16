@@ -63,16 +63,33 @@ export type SequenceStep = {
   seq_variants?: SequenceVariantPayload[];
 };
 
+/** One variant's copy, as the page previews it under an expanded step. */
+export type SequencePreview = { slot: string; subject: string; body: string };
+
 export type SequencePlanRow = {
+  /**
+   * The builder row this step came from, or null when the plan was derived from
+   * send_day. Null is what the page reads to know the builder is untouched, and
+   * it is the id every edit intent addresses.
+   */
+  stepId: string | null;
   templateId: string;
   name: string;
   sendDay: number;
   /** Wait before this step, in days, relative to the previous one. */
   delayDays: number;
+  /** Running total of the delays up to and including this step, for "Day N". */
+  dayOffset: number;
   seqNumber: number;
   variantCount: number;
   /** Slot letters actually uploaded, e.g. ["A", "B"]. */
   slots: string[];
+  /** The step's pinned slot, or null for "every variant with copy" (an A/B split). */
+  variantSlot: string | null;
+  /** Every slot on the template that has copy — the options a pin can choose from. */
+  usableSlots: string[];
+  /** Subject and body of each uploaded variant, for the expandable preview. */
+  preview: SequencePreview[];
 };
 
 export type SequencePlan = {
@@ -85,6 +102,29 @@ export type SequencePlan = {
    * preview can never disagree with what the action will do.
    */
   problems: string[];
+  /**
+   * Non-blocking notes. Kept apart from `problems` because these describe what
+   * the numbers will do afterwards, not whether the upload is safe — a sequence
+   * that sends the same copy twice is a legitimate thing to build, it just can't
+   * have its statistics attributed. Blocking it would forbid the arrangement to
+   * protect a counter.
+   */
+  warnings: string[];
+  /** Total days the sequence spans, i.e. the last step's dayOffset. */
+  totalDays: number;
+};
+
+/**
+ * One row of the builder, as stored in `smartlead_sequence_steps` and passed
+ * back in here. See migration 0012 for why this is stored at all.
+ */
+export type StoredSequenceStep = {
+  id: string;
+  templateId: string;
+  /** null = every variant with copy (an A/B split); "A" | "B" = pinned to one. */
+  variantSlot: string | null;
+  /** Wait before this step, relative to the previous one. */
+  delayDays: number;
 };
 
 /**
@@ -130,32 +170,114 @@ function isUsable(v: { subject: string; body: string }): boolean {
 }
 
 /**
- * Turn one loop's templates into the payload for
- * POST /campaigns/{id}/sequences, plus a human-readable account of what went in
- * and what didn't.
+ * Turn one loop's sequence into the payload for POST /campaigns/{id}/sequences,
+ * plus a human-readable account of what went in and what didn't.
  *
- * Inclusion rule: the template is on this loop and its status is not
+ * TWO MODES, one output. Pass `stored` (the loop's rows from the sequence
+ * builder) and the plan is exactly those steps in exactly that order. Omit it,
+ * or pass an empty list, and the plan is DERIVED as it always was — which is what
+ * a loop nobody has opened the builder on still does, so the feature is an
+ * override rather than a replacement. See migration 0012.
+ *
+ * Derived inclusion rule: the template is on this loop and its status is not
  * 'concluded'. Draft *and* running both go — a first upload is necessarily all
  * drafts, and refusing them would make the button do nothing on day one, while
  * 'concluded' means the test is over and the copy has been retired. The page
  * lists `included` and `skipped` before the button is armed, so nothing about
- * this is a surprise at the moment it fires.
+ * this is a surprise at the moment it fires. Builder mode applies no such filter:
+ * a step someone put in the sequence on purpose is in the sequence, concluded or
+ * not, because that is what they said.
  *
- * Ordering: ascending sendDay, ties broken by name then id. The tiebreak matters
- * — `created_at` has second resolution, so two templates made in the same second
- * would otherwise swap places between one render and the next, and seq_number is
- * how stats are attributed back. The same ordering is replayed by the stats sync
- * to map a `sequence_number` back to a template, which is why no template->step
- * table is stored.
+ * Derived ordering: ascending sendDay, ties broken by name then id. The tiebreak
+ * matters — `created_at` has second resolution, so two templates made in the same
+ * second would otherwise swap places between one render and the next, and
+ * seq_number is how stats are attributed back. Builder mode orders by `position`,
+ * which the caller has already applied.
+ *
+ * Either way the stats sync replays THIS function over the same inputs to map a
+ * `sequence_number` back to a template, so there is still no template->step table
+ * — only the authored order is stored, never the numbering derived from it.
  */
-export function buildSequencePlan(templates: EmailTemplate[], loop: number): SequencePlan {
-  const eligible = templates
+export function buildSequencePlan(
+  templates: EmailTemplate[],
+  loop: number,
+  stored?: StoredSequenceStep[],
+): SequencePlan {
+  return stored && stored.length
+    ? assemble(draftsFromSteps(templates, stored), false)
+    : assemble(draftsFromSendDay(templates, loop), true);
+}
+
+/**
+ * One step before inclusion is decided: which template, which variant, how long
+ * to wait. Both modes produce these, and `assemble` turns them into the payload.
+ */
+type StepDraft = {
+  stepId: string | null;
+  template: EmailTemplate | null;
+  /** Only set when `template` is null — a builder row pointing at a deleted one. */
+  missingTemplateId?: string;
+  variantSlot: string | null;
+  /** Ignored in derived mode, where the wait comes from the send_day gap. */
+  delayDays: number;
+};
+
+/** Derived mode: every non-concluded template on the loop, ordered by send_day. */
+function draftsFromSendDay(templates: EmailTemplate[], loop: number): StepDraft[] {
+  return templates
     .filter((t) => t.loop === loop && t.status !== "concluded")
     .sort(
       (a, b) =>
         a.sendDay - b.sendDay || a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
-    );
+    )
+    .map((template) => ({
+      stepId: null,
+      template,
+      variantSlot: null,
+      delayDays: 0,
+    }));
+}
 
+/**
+ * Builder mode: exactly the stored rows, in their stored order.
+ *
+ * A row whose template has been deleted is kept as a draft with no template
+ * rather than filtered out, so `assemble` can report it as a skipped step. A
+ * builder that quietly loses a row is how someone uploads a three-step sequence
+ * believing it has four.
+ *
+ * Nothing in the app can currently produce that row — D1 enforces the reference
+ * and deleteTemplate() drops the steps in the same batch — so this branch is
+ * defensive: it costs three lines and it is the difference between a bad row
+ * being visible and a sequence being quietly one step short.
+ */
+function draftsFromSteps(
+  templates: EmailTemplate[],
+  stored: StoredSequenceStep[],
+): StepDraft[] {
+  const byId = new Map(templates.map((t) => [t.id, t] as const));
+  return stored.map((step) => {
+    const template = byId.get(step.templateId) ?? null;
+    return {
+      stepId: step.id,
+      template,
+      ...(template ? {} : { missingTemplateId: step.templateId }),
+      variantSlot: step.variantSlot,
+      delayDays: step.delayDays,
+    };
+  });
+}
+
+/**
+ * Turn drafts into the Smartlead payload plus the account of what went in.
+ *
+ * `deriveDelay` is the one behavioural difference between the two modes: derived
+ * plans compute each wait from the send_day gap, builder plans use the wait that
+ * was authored. Everything else — the skip rules, the flatten-vs-split shape, the
+ * blocking checks — is shared, which is what stops the two modes drifting into
+ * disagreeing about what a valid sequence is.
+ */
+function assemble(drafts: StepDraft[], deriveDelay: boolean): SequencePlan {
   const steps: SequenceStep[] = [];
   const included: SequencePlanRow[] = [];
   const skipped: SequencePlan["skipped"] = [];
@@ -164,8 +286,19 @@ export function buildSequencePlan(templates: EmailTemplate[], loop: number): Seq
   // middle doesn't swallow its own gap. If day 0 and day 7 survive but day 3 is
   // skipped for having no copy, the delay to day 7 must be 7, not 4.
   let previousSendDay = 0;
+  let dayOffset = 0;
 
-  for (const template of eligible) {
+  for (const draft of drafts) {
+    const template = draft.template;
+    if (!template) {
+      skipped.push({
+        templateId: draft.missingTemplateId ?? "",
+        name: "Deleted template",
+        reason: "the template it pointed at no longer exists",
+      });
+      continue;
+    }
+
     const usable = template.variants.filter(isUsable);
     if (!usable.length) {
       skipped.push({
@@ -176,10 +309,31 @@ export function buildSequencePlan(templates: EmailTemplate[], loop: number): Seq
       continue;
     }
 
+    // A pinned slot narrows the upload to that one variant. Pinning to a slot
+    // that has since been emptied is reported rather than silently widened back
+    // to the whole template: the step was authored to send B, and sending A
+    // instead is a different email going to real people.
+    const chosen = draft.variantSlot
+      ? usable.filter((v) => v.slot === draft.variantSlot)
+      : usable;
+    if (!chosen.length) {
+      skipped.push({
+        templateId: template.id,
+        name: template.name,
+        reason: `variant ${draft.variantSlot} has no subject or body written yet`,
+      });
+      continue;
+    }
+
     const seqNumber = steps.length + 1;
     // First step always waits zero: Smartlead starts the sequence when the lead
     // enters it, so a delay on step 1 would postpone the whole campaign.
-    const delayDays = seqNumber === 1 ? 0 : Math.max(0, template.sendDay - previousSendDay);
+    const delayDays =
+      seqNumber === 1
+        ? 0
+        : deriveDelay
+          ? Math.max(0, template.sendDay - previousSendDay)
+          : Math.max(0, draft.delayDays);
 
     const step: SequenceStep = {
       id: null,
@@ -187,34 +341,40 @@ export function buildSequencePlan(templates: EmailTemplate[], loop: number): Seq
       seq_delay_details: { delay_in_days: delayDays },
     };
 
-    if (usable.length === 1) {
+    if (chosen.length === 1) {
       // Flattened — see note 3 in the header.
-      step.subject = usable[0].subject;
-      step.email_body = toHtmlBody(usable[0].body);
+      step.subject = chosen[0].subject;
+      step.email_body = toHtmlBody(chosen[0].body);
     } else {
       // Distributions must sum to exactly 100. Computing the last slot as the
       // remainder rather than giving every slot `100 / n` is what keeps that true
       // for counts that don't divide evenly; today VARIANT_SLOTS caps this at two,
       // but the arithmetic shouldn't be the thing that breaks when a third is added.
-      const even = Math.floor(100 / usable.length);
-      step.seq_variants = usable.map((v, i) => ({
+      const even = Math.floor(100 / chosen.length);
+      step.seq_variants = chosen.map((v, i) => ({
         [SEQ_VARIANT_KEYS.id]: v.slot,
         [SEQ_VARIANT_KEYS.subject]: v.subject,
         [SEQ_VARIANT_KEYS.body]: toHtmlBody(v.body),
         [SEQ_VARIANT_KEYS.distribution]:
-          i === usable.length - 1 ? 100 - even * (usable.length - 1) : even,
+          i === chosen.length - 1 ? 100 - even * (chosen.length - 1) : even,
       }));
     }
 
+    dayOffset += delayDays;
     steps.push(step);
     included.push({
+      stepId: draft.stepId,
       templateId: template.id,
       name: template.name,
       sendDay: template.sendDay,
       delayDays,
+      dayOffset,
       seqNumber,
-      variantCount: usable.length,
-      slots: usable.map((v) => v.slot),
+      variantCount: chosen.length,
+      slots: chosen.map((v) => v.slot),
+      variantSlot: draft.variantSlot,
+      usableSlots: usable.map((v) => v.slot),
+      preview: chosen.map((v) => ({ slot: v.slot, subject: v.subject, body: v.body })),
     });
     previousSendDay = template.sendDay;
   }
@@ -229,8 +389,8 @@ export function buildSequencePlan(templates: EmailTemplate[], loop: number): Seq
     // campaign keeps running with nothing to send.
     problems.push(
       skipped.length
-        ? "Nothing to upload — every template on this loop is missing its copy. Uploading now would erase the campaign's existing steps."
-        : "Nothing to upload — this loop has no templates. Uploading now would erase the campaign's existing steps.",
+        ? "Nothing to upload — every step on this loop is missing its copy. Uploading now would erase the campaign's existing steps."
+        : "Nothing to upload — this loop has no steps. Uploading now would erase the campaign's existing steps.",
     );
   }
   if (steps.length > MAX_SEQUENCE_STEPS) {
@@ -239,7 +399,59 @@ export function buildSequencePlan(templates: EmailTemplate[], loop: number): Seq
     );
   }
 
-  return { steps, included, skipped, problems };
+  return {
+    steps,
+    included,
+    skipped,
+    problems,
+    warnings: duplicateWarnings(included),
+    totalDays: dayOffset,
+  };
+}
+
+/**
+ * The key a stats sync attributes a step's numbers to.
+ *
+ * Null for a step that can't be attributed at all (an A/B split, whose rows carry
+ * no variant id), which is the pre-existing "skipped by name" case.
+ */
+export function statKey(row: SequencePlanRow): string | null {
+  return row.variantCount === 1 ? `${row.templateId}/${row.slots[0]}` : null;
+}
+
+/**
+ * (template, variant) pairs appearing in more than one step.
+ *
+ * Worth naming because the counters are ABSOLUTE totals, not increments: two
+ * steps writing the same variant means the second write replaces the first and
+ * the template's numbers report one step's performance as if it were the whole
+ * thing. The sync skips these pairs; the page says so up front, since the point
+ * of the warning is to be read before the sequence is built that way.
+ */
+export function duplicateStatKeys(rows: SequencePlanRow[]): Set<string> {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const row of rows) {
+    const key = statKey(row);
+    if (!key) continue;
+    if (seen.has(key)) duplicates.add(key);
+    seen.add(key);
+  }
+  return duplicates;
+}
+
+function duplicateWarnings(rows: SequencePlanRow[]): string[] {
+  const duplicates = duplicateStatKeys(rows);
+  if (!duplicates.size) return [];
+  const names = rows
+    .filter((row) => {
+      const key = statKey(row);
+      return key !== null && duplicates.has(key);
+    })
+    .map((row) => `${row.name} · ${row.slots[0]}`);
+  return [
+    `${[...new Set(names)].join(", ")} appears more than once. The sequence uploads fine, but a stats sync can't tell those steps apart, so it will leave that template's numbers alone.`,
+  ];
 }
 
 // ---------------------------------------------------------------------------

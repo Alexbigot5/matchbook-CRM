@@ -4,30 +4,42 @@ import { appContext } from "../../load-context";
 import { ownerAvatar } from "../crm/data";
 import {
   buildSequencePlan,
+  duplicateStatKeys,
   planImport,
   planLeads,
+  statKey,
   totalStatsBySequence,
   type SequencePlan,
   type SmartleadLead,
   type SmartleadStatRow,
+  type StoredSequenceStep,
 } from "../crm/smartlead-map";
 import { crmFontLinks } from "../crm/ui";
 import { requireUser } from "../lib/session.server";
 import {
+  appendSequenceStep,
   bindCampaign,
+  clearSequenceSteps,
   createManyContacts,
   getCampaignBindings,
   listContacts,
   listPushedContactIds,
   listPushedEmails,
+  listSequenceSteps,
+  listSequenceStepsByLoop,
   listTemplates,
+  materializeSequenceSteps,
   recordPushedLeads,
   recordVariantStats,
+  removeSequenceStep,
+  reorderSequenceSteps,
+  setSequenceStepDelay,
+  setSequenceStepVariant,
   stampCampaignSync,
   unbindCampaign,
   type CampaignBinding,
 } from "../lib/crm.server";
-import { rateLimit, SMARTLEAD_RULE } from "../lib/ratelimit.server";
+import { rateLimit, SMARTLEAD_BUILDER_RULE, SMARTLEAD_RULE } from "../lib/ratelimit.server";
 import {
   createSmartleadClient,
   isCampaignLive,
@@ -37,6 +49,7 @@ import {
   isValidSmartleadStatus,
   MAX_IMPORT_ROWS,
   MAX_LEAD_PUSH,
+  MAX_STEP_DELAY_DAYS,
   SMARTLEAD_LEAD_CHUNK,
   SMARTLEAD_STATS_MAX_PAGES,
   SMARTLEAD_STATS_PAGE,
@@ -44,6 +57,9 @@ import {
   validateCampaignName,
   validateImportRows,
   validateSchedule,
+  validateStepDelay,
+  validateStepOrder,
+  validateStepVariant,
 } from "../lib/validate";
 
 export function meta({}: Route.MetaArgs) {
@@ -66,6 +82,16 @@ const LOOPS = [1, 2] as const;
 // Loader
 // ---------------------------------------------------------------------------
 
+/** A template the builder can add as a step, with the slots that have copy. */
+export type AddableTemplate = {
+  id: string;
+  name: string;
+  status: string;
+  sendDay: number;
+  /** Slots with a subject or body — the only ones a step can be pinned to. */
+  usableSlots: string[];
+};
+
 export type LoopView = {
   loop: number;
   binding: CampaignBinding | null;
@@ -73,7 +99,18 @@ export type LoopView = {
     included: SequencePlan["included"];
     skipped: SequencePlan["skipped"];
     problems: string[];
+    warnings: string[];
     stepCount: number;
+    totalDays: number;
+    /**
+     * True once the loop has authored steps. False means the sequence is still
+     * derived from send_day and the page says so — the distinction is the whole
+     * contract of the builder, and "Reset to template order" is what returns to
+     * it.
+     */
+    custom: boolean;
+    /** Every template on this loop, for the "add a step" picker. */
+    addable: AddableTemplate[];
   };
   leads: {
     eligible: number;
@@ -99,10 +136,11 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     // operation on it is a manual button anyway, so the live campaign list is
     // fetched by an explicit intent instead. `contacts` also feeds the shared
     // sidebar's OWNER counts, exactly as on /templates.
-    const [contacts, templates, bindings] = await Promise.all([
+    const [contacts, templates, bindings, stepsByLoop] = await Promise.all([
       listContacts(DB, now),
       listTemplates(DB, now),
       getCampaignBindings(DB, now),
+      listSequenceStepsByLoop(DB),
     ]);
 
     // Which contacts are already sequencing in each campaign. Read per bound
@@ -117,7 +155,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     }
 
     const loops: LoopView[] = LOOPS.map((loop) => {
-      const plan = buildSequencePlan(templates, loop);
+      const steps = stepsByLoop[loop] ?? [];
+      const plan = buildSequencePlan(templates, loop, steps);
       const other = loop === 1 ? 2 : 1;
       const leadPlan = planLeads(contacts, loop, pushedByLoop[loop], pushedByLoop[other]);
       return {
@@ -127,7 +166,24 @@ export async function loader({ request, context }: Route.LoaderArgs) {
           included: plan.included,
           skipped: plan.skipped,
           problems: plan.problems,
+          warnings: plan.warnings,
           stepCount: plan.steps.length,
+          totalDays: plan.totalDays,
+          custom: steps.length > 0,
+          // Concluded templates are offered too, unlike in the derived plan:
+          // deliberately putting retired copy back into a sequence is a choice
+          // the builder exists to allow, and the picker labels the status.
+          addable: templates
+            .filter((t) => t.loop === loop)
+            .map((t) => ({
+              id: t.id,
+              name: t.name,
+              status: t.status,
+              sendDay: t.sendDay,
+              usableSlots: t.variants
+                .filter((v) => v.subject.trim() || v.body.trim())
+                .map((v) => v.slot),
+            })),
         },
         leads: {
           // Only the count crosses the wire — the lead payloads are rebuilt
@@ -162,6 +218,46 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 // ---------------------------------------------------------------------------
 
 export type CampaignChoice = { id: string; name: string; status: string };
+
+/**
+ * Intents that only edit the stored sequence.
+ *
+ * Named as a set rather than tested case by case because the rate limiter has to
+ * classify the request before the switch runs. Adding a builder intent without
+ * adding it here meters it against the push budget, which is the failure this
+ * list exists to make visible.
+ */
+const BUILDER_INTENTS: ReadonlySet<string> = new Set([
+  "addStep",
+  "removeStep",
+  "reorderSteps",
+  "setStepDelay",
+  "setStepVariant",
+  "resetSteps",
+]);
+
+/**
+ * Resolve the token the page uses to address a step.
+ *
+ * A step the page DERIVED from send_day has no row and therefore no id, but it
+ * is still on screen with an ✕ next to it. Rather than give the client two ways
+ * to name a step, every control posts one token: the step's id when it has one,
+ * or "#<position>" when it doesn't. The caller materialises first, which turns
+ * the derived plan into rows in exactly the order it was rendered, so position
+ * resolution is exact.
+ *
+ * Two people editing at once can race — a "#2" resolved against a list someone
+ * else just reordered addresses the step now in position two. That is the same
+ * answer the click meant ("the second step"), and every alternative requires the
+ * page to have written the sequence down before it could be touched.
+ */
+function resolveStepToken(steps: StoredSequenceStep[], token: string): string | null {
+  if (!token) return null;
+  if (!token.startsWith("#")) return token;
+  const position = Number(token.slice(1));
+  if (!Number.isInteger(position) || position < 1 || position > steps.length) return null;
+  return steps[position - 1].id;
+}
 
 type ActionResult =
   | { ok: true; message?: string; campaigns?: CampaignChoice[] }
@@ -216,10 +312,16 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
   const form = await request.formData();
   const intent = form.get("intent")?.toString();
 
-  // Metered per user: one press here fans out to a dozen calls against a paid API
-  // and can start real email going out. The limiter fails open, which is correct
-  // — it is an availability control, not the authorization gate.
-  const limit = await rateLimit(DB, SMARTLEAD_RULE, user.email);
+  // Sequence-builder edits touch nothing but D1 — no Smartlead call, no email —
+  // so they are metered on their own far looser bucket. Arranging a ten-step
+  // sequence is easily twenty writes, which would exhaust the push budget below
+  // and leave the operator locked out of the buttons that actually cost money.
+  const isBuilderEdit = BUILDER_INTENTS.has(intent ?? "");
+  const limit = await rateLimit(
+    DB,
+    isBuilderEdit ? SMARTLEAD_BUILDER_RULE : SMARTLEAD_RULE,
+    user.email,
+  );
   if (!limit.allowed) {
     return {
       ok: false,
@@ -340,8 +442,116 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         return { ok: true, message: "Sending schedule saved." };
       }
 
+      /* --- Sequence builder ------------------------------------------- *
+       *
+       * Six intents over `smartlead_sequence_steps`, none of which calls
+       * Smartlead: the builder arranges what a later "Upload sequence" will
+       * send. Each one leans on materializeSequenceSteps to seed the loop from
+       * the derived plan on the first edit, so the first click on a step the
+       * page derived has something real to address.
+       *
+       * They answer quietly — `ok` with no message — except where something was
+       * refused or genuinely destroyed. The step list revalidating IS the
+       * feedback, and a green banner after every arrow press would bury the
+       * results of the buttons that actually reach Smartlead.
+       */
+
+      case "addStep": {
+        const templateId = form.get("templateId")?.toString() ?? "";
+        const variant = validateStepVariant(form.get("slot") ?? "all");
+        if (!variant.ok) return { ok: false, error: variant.error };
+
+        const templates = await listTemplates(DB, Date.now());
+        // Checked against THIS loop, not just existence: the picker only offers
+        // the loop's own templates, but a posted id must not be able to put Loop
+        // 2's copy into Loop 1's campaign.
+        const template = templates.find((t) => t.id === templateId && t.loop === loop);
+        if (!template) {
+          return { ok: false, error: "That template isn’t on this loop any more." };
+        }
+        if (variant.slot && !template.variants.some((v) => v.slot === variant.slot)) {
+          return { ok: false, error: `“${template.name}” has no variant ${variant.slot}.` };
+        }
+
+        const added = await appendSequenceStep(DB, loop, templates, templateId, variant.slot);
+        if (!added) {
+          return {
+            ok: false,
+            error: `That's the most steps one sequence can hold. Remove one first.`,
+          };
+        }
+        return { ok: true };
+      }
+
+      case "removeStep": {
+        const steps = await materializeSequenceSteps(DB, loop, await listTemplates(DB, Date.now()));
+        // No rows means "derive from send_day", so emptying the table doesn't
+        // leave an empty sequence — it silently restores every template as a
+        // step. Removing the last one is refused rather than allowed to do the
+        // opposite of what it says; "Reset to template order" is the button that
+        // means that on purpose.
+        if (steps.length <= 1) {
+          return {
+            ok: false,
+            error:
+              "A sequence needs at least one step. Add the step you want first, or press “Reset to template order”.",
+          };
+        }
+        const stepId = resolveStepToken(steps, form.get("stepId")?.toString() ?? "");
+        if (stepId) await removeSequenceStep(DB, loop, stepId);
+        // A miss is not an error worth a banner: the usual cause is a second
+        // click, or someone else removing the same step, and both end in the
+        // state that was asked for. Revalidation shows it gone either way.
+        return { ok: true };
+      }
+
+      case "reorderSteps": {
+        let tokens: unknown = [];
+        try {
+          tokens = JSON.parse(form.get("ids")?.toString() || "[]");
+        } catch {
+          return { ok: false, error: "Couldn’t read the new step order." };
+        }
+        const order = validateStepOrder(tokens);
+        if (!order.ok) return { ok: false, error: order.error };
+        // Materialised first: reordering a derived plan has to write the plan
+        // down before an order means anything.
+        const steps = await materializeSequenceSteps(DB, loop, await listTemplates(DB, Date.now()));
+        const ids = order.ids
+          .map((token) => resolveStepToken(steps, token))
+          .filter((id): id is string => Boolean(id));
+        await reorderSequenceSteps(DB, loop, ids);
+        return { ok: true };
+      }
+
+      case "setStepDelay": {
+        const delay = validateStepDelay(form.get("delayDays"));
+        if (!delay.ok) return { ok: false, error: delay.error };
+        const steps = await materializeSequenceSteps(DB, loop, await listTemplates(DB, Date.now()));
+        const stepId = resolveStepToken(steps, form.get("stepId")?.toString() ?? "");
+        if (stepId) await setSequenceStepDelay(DB, loop, stepId, delay.days);
+        return { ok: true };
+      }
+
+      case "setStepVariant": {
+        const variant = validateStepVariant(form.get("slot"));
+        if (!variant.ok) return { ok: false, error: variant.error };
+        const steps = await materializeSequenceSteps(DB, loop, await listTemplates(DB, Date.now()));
+        const stepId = resolveStepToken(steps, form.get("stepId")?.toString() ?? "");
+        if (stepId) await setSequenceStepVariant(DB, loop, stepId, variant.slot);
+        return { ok: true };
+      }
+
+      case "resetSteps": {
+        await clearSequenceSteps(DB, loop);
+        return {
+          ok: true,
+          message: `Loop ${loop}'s sequence follows the templates' send days again. Nothing in Smartlead changed — upload to apply it.`,
+        };
+      }
+
       /**
-       * Upload this loop's templates as the campaign's sequence.
+       * Upload this loop's sequence as the campaign's steps.
        *
        * The order matters and each step guards a distinct failure:
        *
@@ -363,8 +573,15 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
        */
       case "pushSequence": {
         if (!binding) return { ok: false, error: "Link a campaign first." };
-        const templates = await listTemplates(DB, Date.now());
-        const plan = buildSequencePlan(templates, loop);
+        const [templates, steps] = await Promise.all([
+          listTemplates(DB, Date.now()),
+          listSequenceSteps(DB, loop),
+        ]);
+        // Re-read rather than trusting the posted plan, and re-planned through
+        // the same function the page rendered from — so the arrangement uploaded
+        // is the arrangement stored, which is also the one the stats sync will
+        // later attribute numbers by.
+        const plan = buildSequencePlan(templates, loop, steps);
         if (plan.problems.length) return { ok: false, error: plan.problems[0] };
 
         const list = await client.listCampaigns();
@@ -575,8 +792,11 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
        */
       case "syncStats": {
         if (!binding) return { ok: false, error: "Link a campaign first." };
-        const templates = await listTemplates(DB, Date.now());
-        const plan = buildSequencePlan(templates, loop);
+        const [templates, steps] = await Promise.all([
+          listTemplates(DB, Date.now()),
+          listSequenceSteps(DB, loop),
+        ]);
+        const plan = buildSequencePlan(templates, loop, steps);
         if (!plan.included.length) {
           return { ok: false, error: "No uploaded steps on this loop to attribute numbers to." };
         }
@@ -609,10 +829,21 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         const bySeq = totalStatsBySequence(rows);
         const written: string[] = [];
         const skippedAb: string[] = [];
+        const skippedRepeat: string[] = [];
+        // The builder can put the same (template, variant) in two steps. These
+        // counters are ABSOLUTE totals, so writing both would leave the template
+        // reporting whichever step happened to be written last as if it were the
+        // whole picture. Skipped, and said out loud.
+        const repeated = duplicateStatKeys(plan.included);
 
         for (const step of plan.included) {
           if (step.variantCount > 1) {
             skippedAb.push(step.name);
+            continue;
+          }
+          const key = statKey(step);
+          if (key && repeated.has(key)) {
+            skippedRepeat.push(`${step.name} · ${step.slots[0]}`);
             continue;
           }
           const totals = bySeq.get(step.seqNumber);
@@ -628,6 +859,9 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         const summary =
           `Updated ${written.length} template${written.length === 1 ? "" : "s"} from ${rows.length} sends` +
           (skippedAb.length ? `. A/B not split: ${skippedAb.join(", ")}` : "") +
+          (skippedRepeat.length
+            ? `. In the sequence more than once, so left alone: ${[...new Set(skippedRepeat)].join(", ")}`
+            : "") +
           ".";
         await stampCampaignSync(DB, loop, "stats", summary);
         return { ok: true, message: summary };

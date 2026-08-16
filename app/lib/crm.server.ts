@@ -11,6 +11,11 @@ import {
   type TemplateStatus,
   type TemplateVariant,
 } from "../crm/templates";
+import {
+  buildSequencePlan,
+  MAX_SEQUENCE_STEPS,
+  type StoredSequenceStep,
+} from "../crm/smartlead-map";
 import { parseConditions, type SavedView } from "../crm/views";
 import { MAX_SAVED_VIEWS, type SavedViewFields, type StatCounts, type TemplateFields } from "./validate";
 
@@ -854,6 +859,12 @@ export async function deleteTemplate(
       )
       .bind(crypto.randomUUID(), actor, id, snapshot),
     db.prepare("DELETE FROM template_variants WHERE template_id = ?").bind(id),
+    // Any sequence-builder step pointing at this template goes with it, and
+    // BEFORE it: D1 enforces smartlead_sequence_steps.template_id, so deleting a
+    // template that a step still references fails the whole batch on the
+    // constraint. Ordering these two statements is what makes a template used in
+    // a sequence deletable at all.
+    db.prepare("DELETE FROM smartlead_sequence_steps WHERE template_id = ?").bind(id),
     db.prepare("DELETE FROM email_templates WHERE id = ?").bind(id),
   ]);
   return (res[res.length - 1]?.meta?.changes ?? 0) > 0;
@@ -1249,4 +1260,233 @@ export async function recordPushedLeads(
       ),
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Smartlead sequence builder
+// ---------------------------------------------------------------------------
+//
+// The authored step list behind /smartlead's sequence builder. A loop with no
+// rows here has never been edited and still DERIVES its sequence from send_day,
+// which is why every mutator below runs through materializeSequenceSteps first:
+// "remove step 2" has to have something to remove, and what the page was showing
+// at the moment it was clicked is the derived plan. Materialising on first edit
+// (rather than on first page load) is what keeps an untouched loop tracking its
+// templates — add a template, and it appears in the sequence by itself.
+//
+// Every statement is constrained by `AND loop = ?` as well as the step's own id,
+// the same discipline the template_variants writers follow: an id belonging to
+// the other loop must not be reorderable, retimeable or deletable through this
+// loop's card.
+
+type SequenceStepRow = {
+  id: string;
+  position: number;
+  template_id: string;
+  variant_slot: string | null;
+  delay_days: number;
+};
+
+const STEP_COLS = "id, position, template_id, variant_slot, delay_days";
+
+// `position` is not unique (see migration 0012), so the id tiebreak is what keeps
+// the order fully determined rather than left to the query plan — the same
+// reasoning as listTemplates' `created_at DESC, id DESC`.
+const STEP_ORDER = "ORDER BY position ASC, id ASC";
+
+function toStoredStep(row: SequenceStepRow): StoredSequenceStep {
+  return {
+    id: row.id,
+    templateId: row.template_id,
+    variantSlot: row.variant_slot,
+    delayDays: Number(row.delay_days) || 0,
+  };
+}
+
+/** One loop's authored steps, in order. Empty means "derive from send_day". */
+export async function listSequenceSteps(
+  db: D1Database,
+  loop: number,
+): Promise<StoredSequenceStep[]> {
+  const res = await db
+    .prepare(`SELECT ${STEP_COLS} FROM smartlead_sequence_steps WHERE loop = ? ${STEP_ORDER}`)
+    .bind(loop)
+    .all<SequenceStepRow>();
+  return (res.results ?? []).map(toStoredStep);
+}
+
+/**
+ * Both loops' steps in one query, keyed by loop.
+ *
+ * The loader needs both cards and the table holds tens of rows, so reading it
+ * whole costs one D1 round trip instead of two.
+ */
+export async function listSequenceStepsByLoop(
+  db: D1Database,
+): Promise<Record<number, StoredSequenceStep[]>> {
+  const res = await db
+    .prepare(`SELECT loop, ${STEP_COLS} FROM smartlead_sequence_steps ${STEP_ORDER}`)
+    .all<SequenceStepRow & { loop: number }>();
+  const out: Record<number, StoredSequenceStep[]> = {};
+  for (const row of res.results ?? []) {
+    const loop = Number(row.loop);
+    (out[loop] ??= []).push(toStoredStep(row));
+  }
+  return out;
+}
+
+/**
+ * Ensure the loop has authored steps, seeding them from the derived plan.
+ *
+ * Returns the resulting rows, so a caller that is about to mutate one can find
+ * the freshly-minted ids. Seeding writes `variant_slot = NULL` for every step —
+ * the derived plan uploads an A/B template as Smartlead's own split, and that is
+ * the state the builder must open in, or opening it would silently change what
+ * the next upload sends.
+ *
+ * A loop whose derived plan is empty (no templates, or none with copy) stays
+ * empty rather than gaining a placeholder row: the builder's "add a step"
+ * dropdown is the way in from there, and an empty sequence is already a blocking
+ * problem the page explains.
+ */
+export async function materializeSequenceSteps(
+  db: D1Database,
+  loop: number,
+  templates: EmailTemplate[],
+): Promise<StoredSequenceStep[]> {
+  const existing = await listSequenceSteps(db, loop);
+  if (existing.length) return existing;
+
+  const derived = buildSequencePlan(templates, loop).included;
+  if (!derived.length) return [];
+
+  await db.batch(
+    derived.map((row, index) =>
+      db
+        .prepare(
+          `INSERT INTO smartlead_sequence_steps (id, loop, position, template_id, variant_slot, delay_days)
+           VALUES (?, ?, ?, ?, NULL, ?)`,
+        )
+        .bind(crypto.randomUUID(), loop, index + 1, row.templateId, row.delayDays),
+    ),
+  );
+  return listSequenceSteps(db, loop);
+}
+
+/**
+ * Append a step to the end of the loop's sequence.
+ *
+ * Returns false when the loop is already at MAX_SEQUENCE_STEPS — the same cap
+ * buildSequencePlan refuses to upload past, enforced here too so the list can't
+ * grow into a state whose only exit is deleting steps.
+ */
+export async function appendSequenceStep(
+  db: D1Database,
+  loop: number,
+  templates: EmailTemplate[],
+  templateId: string,
+  variantSlot: string | null,
+): Promise<boolean> {
+  const steps = await materializeSequenceSteps(db, loop, templates);
+  if (steps.length >= MAX_SEQUENCE_STEPS) return false;
+
+  // A default wait of 3 days rather than 0: consecutive steps with no gap all
+  // send the moment the lead enters the campaign, which is the one arrangement
+  // nobody wants and the easiest to create by accident. The number is editable
+  // in place, and the first step's wait is forced to 0 at build time anyway.
+  const delayDays = steps.length === 0 ? 0 : 3;
+  await db
+    .prepare(
+      `INSERT INTO smartlead_sequence_steps (id, loop, position, template_id, variant_slot, delay_days)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(crypto.randomUUID(), loop, steps.length + 1, templateId, variantSlot, delayDays)
+    .run();
+  return true;
+}
+
+/** Drop one step. Positions are left with a gap — only their order is read. */
+export async function removeSequenceStep(
+  db: D1Database,
+  loop: number,
+  stepId: string,
+): Promise<boolean> {
+  const res = await db
+    .prepare("DELETE FROM smartlead_sequence_steps WHERE id = ? AND loop = ?")
+    .bind(stepId, loop)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Renumber the loop's steps into the given order.
+ *
+ * `orderedIds` is the full list as the page now shows it, not a move instruction:
+ * both the ↑/↓ buttons and the drag handle compute the resulting order client
+ * side and post that, so one intent serves both and neither has to describe an
+ * edit relative to a state the server may have moved on from.
+ *
+ * Ids not currently on this loop are ignored, and any step the caller omitted
+ * keeps its place after the ones it did send. That is deliberate: two people
+ * reordering at once should not have one of them silently delete the other's
+ * newly added step.
+ */
+export async function reorderSequenceSteps(
+  db: D1Database,
+  loop: number,
+  orderedIds: string[],
+): Promise<void> {
+  const current = await listSequenceSteps(db, loop);
+  const known = new Set(current.map((s) => s.id));
+  const ordered = orderedIds.filter((id) => known.has(id));
+  const seen = new Set(ordered);
+  const final = [...ordered, ...current.filter((s) => !seen.has(s.id)).map((s) => s.id)];
+  if (!final.length) return;
+
+  await db.batch(
+    final.map((id, index) =>
+      db
+        .prepare("UPDATE smartlead_sequence_steps SET position = ? WHERE id = ? AND loop = ?")
+        .bind(index + 1, id, loop),
+    ),
+  );
+}
+
+/** Set one step's wait, in days relative to the previous step. */
+export async function setSequenceStepDelay(
+  db: D1Database,
+  loop: number,
+  stepId: string,
+  delayDays: number,
+): Promise<boolean> {
+  const res = await db
+    .prepare("UPDATE smartlead_sequence_steps SET delay_days = ? WHERE id = ? AND loop = ?")
+    .bind(delayDays, stepId, loop)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/** Pin a step to one variant, or (null) send every variant with copy as a split. */
+export async function setSequenceStepVariant(
+  db: D1Database,
+  loop: number,
+  stepId: string,
+  variantSlot: string | null,
+): Promise<boolean> {
+  const res = await db
+    .prepare("UPDATE smartlead_sequence_steps SET variant_slot = ? WHERE id = ? AND loop = ?")
+    .bind(variantSlot, stepId, loop)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Forget the authored sequence, returning the loop to deriving from send_day.
+ *
+ * Not audited, unlike a contact or template delete: nothing irreplaceable is
+ * lost. The copy lives in email_templates, and what disappears is an arrangement
+ * the page can show the replacement for immediately.
+ */
+export async function clearSequenceSteps(db: D1Database, loop: number): Promise<void> {
+  await db.prepare("DELETE FROM smartlead_sequence_steps WHERE loop = ?").bind(loop).run();
 }

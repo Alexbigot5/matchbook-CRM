@@ -14,7 +14,11 @@ import { useFetcher } from "react-router";
 import type { CampaignChoice, LoopView } from "../routes/smartlead";
 import type { Contact, Viewer } from "./data";
 import { Sidebar, buildOwnerTabs, buildViewTabs } from "./sidebar";
-import { Box, GLOBAL_CSS, IconWarn, MONO, css } from "./ui";
+import { Box, GLOBAL_CSS, IconClose, IconPlus, IconWarn, MONO, css } from "./ui";
+// The client imports the same bound the action enforces, so the wait box's
+// spinner stops where the server would refuse — the arrangement validate.ts
+// documents for the CSV caps.
+import { MAX_STEP_DELAY_DAYS } from "../lib/validate";
 
 // Mirrors the action's return type. Not imported as a value, the same hand-kept
 // arrangement templates-page.tsx uses.
@@ -65,7 +69,36 @@ type State = {
   schedule: Record<number, ScheduleDraft>;
   /** Which loop's sequence-upload confirm is open. */
   confirmLoop: number | null;
+  /**
+   * Sequence-builder UI state, all keyed "<loop>:<step token>" so both cards
+   * share one flat map — see stepKey() below.
+   */
+  expanded: Record<string, boolean>;
+  /**
+   * In-flight text of a step's wait box. The stored value is the truth and comes
+   * from the loader; this only holds what is being typed, until blur posts it.
+   * Cleared whenever the fetcher settles, so a revalidated list wins.
+   */
+  delayDrafts: Record<string, string>;
+  /** Per-loop "add a step" selection, as "<templateId>|<slot or all>". */
+  addPick: Record<number, string>;
+  /** The step being dragged, or null. */
+  dragToken: string | null;
 };
+
+/**
+ * How a step is addressed in UI state and in every builder POST.
+ *
+ * A step the server derived from send_day has no row and so no id, but it is on
+ * screen with the same controls as any other. "#<position>" is its stand-in; the
+ * action resolves both forms after materialising the plan (see resolveStepToken
+ * in routes/smartlead.tsx).
+ */
+function stepToken(step: { stepId: string | null; seqNumber: number }): string {
+  return step.stepId ?? `#${step.seqNumber}`;
+}
+
+const stepKey = (loop: number, token: string) => `${loop}:${token}`;
 
 export function SmartleadPage({
   contacts,
@@ -90,6 +123,10 @@ export function SmartleadPage({
     newName: {},
     schedule: { 1: { ...DEFAULT_SCHEDULE }, 2: { ...DEFAULT_SCHEDULE } },
     confirmLoop: null,
+    expanded: {},
+    delayDrafts: {},
+    addPick: {},
+    dragToken: null,
   });
   const patch = (u: Partial<State>) => setState((s) => ({ ...s, ...u }));
 
@@ -105,12 +142,18 @@ export function SmartleadPage({
         actionError: "",
         notice: result.message ?? "",
         confirmLoop: null,
+        // Drafts are discarded on every settled write, not just a successful
+        // wait edit: the loader has just revalidated, so the stored value is
+        // newer than anything held here — including for a step someone else
+        // moved out from under this list.
+        delayDrafts: {},
+        dragToken: null,
         // A fetch that returned campaigns replaces the list; every other
         // successful action leaves it alone.
         ...(result.campaigns ? { campaigns: result.campaigns } : {}),
       });
     } else {
-      patch({ actionError: result.error, notice: "" });
+      patch({ actionError: result.error, notice: "", delayDrafts: {}, dragToken: null });
     }
   }, [fetcher.state, fetcher.data]);
 
@@ -205,9 +248,21 @@ export function SmartleadPage({
                 pick={S.pick[loopView.loop] ?? ""}
                 newName={S.newName[loopView.loop] ?? ""}
                 schedule={S.schedule[loopView.loop]}
+                expanded={S.expanded}
+                delayDrafts={S.delayDrafts}
+                addPick={S.addPick[loopView.loop] ?? ""}
+                dragToken={S.dragToken}
                 onPick={(id) => patch({ pick: { ...S.pick, [loopView.loop]: id } })}
                 onNewName={(name) => patch({ newName: { ...S.newName, [loopView.loop]: name } })}
                 onSchedule={(draft) => setSchedule(loopView.loop, draft)}
+                onExpand={(key) =>
+                  patch({ expanded: { ...S.expanded, [key]: !S.expanded[key] } })
+                }
+                onDelayDraft={(key, value) =>
+                  patch({ delayDrafts: { ...S.delayDrafts, [key]: value } })
+                }
+                onAddPick={(value) => patch({ addPick: { ...S.addPick, [loopView.loop]: value } })}
+                onDrag={(key) => patch({ dragToken: key })}
                 onSubmit={submit}
                 onConfirmUpload={() => patch({ confirmLoop: loopView.loop, actionError: "", notice: "" })}
               />
@@ -241,9 +296,17 @@ function LoopCard({
   pick,
   newName,
   schedule,
+  expanded,
+  delayDrafts,
+  addPick,
+  dragToken,
   onPick,
   onNewName,
   onSchedule,
+  onExpand,
+  onDelayDraft,
+  onAddPick,
+  onDrag,
   onSubmit,
   onConfirmUpload,
 }: {
@@ -255,9 +318,17 @@ function LoopCard({
   pick: string;
   newName: string;
   schedule: ScheduleDraft;
+  expanded: Record<string, boolean>;
+  delayDrafts: Record<string, string>;
+  addPick: string;
+  dragToken: string | null;
   onPick: (id: string) => void;
   onNewName: (name: string) => void;
   onSchedule: (draft: Partial<ScheduleDraft>) => void;
+  onExpand: (key: string) => void;
+  onDelayDraft: (key: string, value: string) => void;
+  onAddPick: (value: string) => void;
+  onDrag: (key: string | null) => void;
   onSubmit: (fields: Record<string, string>) => void;
   onConfirmUpload: () => void;
 }) {
@@ -399,63 +470,22 @@ function LoopCard({
       </div>
 
       {/* --- Sequence ---------------------------------------------------- */}
-      <div style={css(SECTION)}>
-        <div style={css("display:flex; align-items:center; justify-content:space-between;")}>
-          <div style={css(COL_LABEL)}>Sequence</div>
-          <Box
-            as="button"
-            disabled={disabled || !binding || sequence.problems.length > 0}
-            onClick={onConfirmUpload}
-            style={css(GHOST)}
-            hover={css("background:#f4f4f1;")}
-          >
-            Upload sequence
-          </Box>
-        </div>
-
-        {sequence.included.length > 0 && (
-          <div style={css("margin-top:9px; display:flex; flex-direction:column; gap:5px;")}>
-            {sequence.included.map((step) => (
-              <div
-                key={step.templateId}
-                style={css(
-                  "display:flex; align-items:center; gap:9px; font-size:12.5px; padding:5px 8px; background:#fafaf8; border-radius:7px;",
-                )}
-              >
-                <span style={css(MONO + "color:#9a9a95; flex:0 0 54px;")}>
-                  Day {step.sendDay}
-                </span>
-                <span style={css("flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}>
-                  {step.name}
-                </span>
-                {step.variantCount > 1 && (
-                  <span
-                    style={css(
-                      "flex:0 0 auto; font-size:10.5px; padding:2px 6px; border-radius:5px; background:#efe7d6; color:#8a6d3b;",
-                    )}
-                  >
-                    A/B
-                  </span>
-                )}
-                <span style={css(MONO + "color:#b0b0aa; font-size:11px; flex:0 0 auto;")}>
-                  +{step.delayDays}d
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {sequence.skipped.map((s) => (
-          <div key={s.templateId} style={css(MUTED + "margin-top:6px;")}>
-            Skipped “{s.name}” — {s.reason}.
-          </div>
-        ))}
-        {sequence.problems.map((p) => (
-          <div key={p} style={css("margin-top:7px; font-size:12px; color:#9a5b5b;")}>
-            {p}
-          </div>
-        ))}
-      </div>
+      <SequenceBuilder
+        loop={loop}
+        sequence={sequence}
+        disabled={disabled}
+        canUpload={Boolean(binding)}
+        expanded={expanded}
+        delayDrafts={delayDrafts}
+        addPick={addPick}
+        dragToken={dragToken}
+        onExpand={onExpand}
+        onDelayDraft={onDelayDraft}
+        onAddPick={onAddPick}
+        onDrag={onDrag}
+        onPost={post}
+        onConfirmUpload={onConfirmUpload}
+      />
 
       {/* --- Contacts ---------------------------------------------------- */}
       <div style={css(SECTION)}>
@@ -665,6 +695,402 @@ function Stat({ label, value }: { label: string; value: number }) {
     <span style={css("font-size:12px; color:#575753;")}>
       <span style={css(MONO + "font-weight:500; color:#1a1a1a;")}>{value}</span> {label}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sequence builder
+// ---------------------------------------------------------------------------
+
+const STEP_ROW =
+  "display:flex; align-items:center; gap:9px; font-size:12.5px; padding:7px 9px; background:#fafaf8; border-radius:8px; border:1px solid transparent;";
+const ICON_BTN =
+  "border:none; background:none; padding:2px 4px; border-radius:5px; color:#b0b0aa; cursor:pointer; font-family:inherit; font-size:12px; line-height:1; display:flex; align-items:center; justify-content:center;";
+const SLOT_CHIP =
+  "flex:0 0 auto; font-size:10.5px; padding:2px 6px; border-radius:5px; border:1px solid transparent; font-family:inherit;";
+
+/** The chip colours: a pinned variant is neutral, an A/B split is the amber one. */
+function slotChipStyle(split: boolean): string {
+  return (
+    SLOT_CHIP +
+    (split
+      ? "background:#efe7d6; color:#8a6d3b;"
+      : "background:#eeeee9; color:#575753;")
+  );
+}
+
+/**
+ * The step list, and everything that edits it.
+ *
+ * Every control posts and waits — no optimistic reordering — which is the same
+ * bargain the rest of the CRM makes (see the module header). It matters more
+ * here than elsewhere: the stored order is what a later stats sync attributes
+ * Smartlead's numbers by, so a list showing an arrangement the server hasn't
+ * accepted would be showing a lie about where the next numbers will land.
+ *
+ * The one piece of local state is the wait box's text, because a number input
+ * that round-trips per keystroke can't be typed in. It posts on blur, and the
+ * draft is dropped as soon as any write settles.
+ */
+function SequenceBuilder({
+  loop,
+  sequence,
+  disabled,
+  canUpload,
+  expanded,
+  delayDrafts,
+  addPick,
+  dragToken,
+  onExpand,
+  onDelayDraft,
+  onAddPick,
+  onDrag,
+  onPost,
+  onConfirmUpload,
+}: {
+  loop: number;
+  sequence: LoopView["sequence"];
+  disabled: boolean;
+  canUpload: boolean;
+  expanded: Record<string, boolean>;
+  delayDrafts: Record<string, string>;
+  addPick: string;
+  dragToken: string | null;
+  onExpand: (key: string) => void;
+  onDelayDraft: (key: string, value: string) => void;
+  onAddPick: (value: string) => void;
+  onDrag: (key: string | null) => void;
+  onPost: (fields: Record<string, string>) => void;
+  onConfirmUpload: () => void;
+}) {
+  const steps = sequence.included;
+  const tokens = steps.map(stepToken);
+
+  /** Post the whole list in its new order — see reorderSequenceSteps. */
+  const reorder = (from: number, to: number) => {
+    if (to < 0 || to >= tokens.length || from === to) return;
+    const next = [...tokens];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    onPost({ intent: "reorderSteps", ids: JSON.stringify(next) });
+  };
+
+  return (
+    <div style={css(SECTION)}>
+      <div style={css("display:flex; align-items:center; justify-content:space-between; gap:8px;")}>
+        <div style={css(COL_LABEL)}>Sequence</div>
+        <div style={css("display:flex; gap:6px;")}>
+          {sequence.custom && (
+            <Box
+              as="button"
+              disabled={disabled}
+              title="Discard this arrangement and follow the templates' send days again"
+              onClick={() => onPost({ intent: "resetSteps" })}
+              style={css(GHOST)}
+              hover={css("background:#f4f4f1;")}
+            >
+              Reset to template order
+            </Box>
+          )}
+          <Box
+            as="button"
+            disabled={disabled || !canUpload || sequence.problems.length > 0}
+            onClick={onConfirmUpload}
+            style={css(GHOST)}
+            hover={css("background:#f4f4f1;")}
+          >
+            Upload sequence
+          </Box>
+        </div>
+      </div>
+
+      {steps.length > 0 && (
+        <div style={css("margin-top:9px; display:flex; flex-direction:column; gap:5px;")}>
+          {steps.map((step, index) => {
+            const token = tokens[index];
+            const key = stepKey(loop, token);
+            const open = Boolean(expanded[key]);
+            const split = step.variantCount > 1;
+            const dragging = dragToken === key;
+            const post = (fields: Record<string, string>) =>
+              onPost({ ...fields, stepId: token });
+
+            return (
+              <div
+                key={key}
+                // Native HTML5 drag, no library — the same choice lifecycle-page.tsx
+                // documents. It is pointer-only, which is why the ↑/↓ buttons stay:
+                // they are the keyboard path to a move, not a redundant convenience.
+                draggable={!disabled}
+                onDragStart={() => onDrag(key)}
+                onDragEnd={() => onDrag(null)}
+                onDragOver={(e: React.DragEvent) => e.preventDefault()}
+                onDrop={(e: React.DragEvent) => {
+                  e.preventDefault();
+                  const from = tokens.findIndex((t) => stepKey(loop, t) === dragToken);
+                  if (from >= 0) reorder(from, index);
+                  onDrag(null);
+                }}
+                style={css(
+                  "background:#fafaf8; border-radius:8px; border:1px solid " +
+                    (dragging ? "#d8d8d2;" : "transparent;") +
+                    (dragging ? "opacity:0.55;" : ""),
+                )}
+              >
+                <div style={css(STEP_ROW + "border:none; background:none; padding:7px 9px;")}>
+                  <span
+                    title="Drag to reorder"
+                    style={css(
+                      MONO + "flex:0 0 auto; color:#c4c4be; cursor:grab; font-size:12px;",
+                    )}
+                  >
+                    ⠿
+                  </span>
+                  <span style={css(MONO + "flex:0 0 14px; color:#9a9a95; font-size:11px;")}>
+                    {step.seqNumber}
+                  </span>
+
+                  {/* The variant chip is a control, not a label, whenever the
+                      template has copy in more than one slot: pinning to A or B
+                      is how the same template appears twice sending different
+                      copy. With one usable slot there is nothing to choose. */}
+                  {step.usableSlots.length > 1 ? (
+                    <select
+                      value={step.variantSlot ?? "all"}
+                      disabled={disabled}
+                      title="Which variant this step sends"
+                      onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                        post({ intent: "setStepVariant", slot: e.target.value })
+                      }
+                      style={css(slotChipStyle(split) + "cursor:pointer;")}
+                    >
+                      <option value="all">A/B</option>
+                      {step.usableSlots.map((slot) => (
+                        <option key={slot} value={slot}>
+                          {slot}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span style={css(slotChipStyle(false))}>{step.slots[0]}</span>
+                  )}
+
+                  <Box
+                    as="button"
+                    onClick={() => onExpand(key)}
+                    title={open ? "Hide the copy" : "Show the copy"}
+                    style={css(
+                      "flex:1; min-width:0; text-align:left; border:none; background:none; padding:0; cursor:pointer; font-family:inherit; color:inherit;",
+                    )}
+                    hover={css("color:#000;")}
+                  >
+                    <span
+                      style={css(
+                        "display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12.5px;",
+                      )}
+                    >
+                      {step.name}
+                    </span>
+                    <span
+                      style={css(
+                        MUTED +
+                          "display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
+                      )}
+                    >
+                      {step.preview[0]?.subject || "No subject"}
+                    </span>
+                  </Box>
+
+                  {/* Step one has no wait to set: Smartlead starts the sequence
+                      when the lead enters it, so a delay there postpones the whole
+                      campaign. buildSequencePlan forces it to 0 regardless. */}
+                  {index === 0 ? (
+                    <span style={css(MUTED + "flex:0 0 auto;")}>sends first</span>
+                  ) : (
+                    <span
+                      style={css("flex:0 0 auto; display:flex; align-items:center; gap:5px;")}
+                    >
+                      <input
+                        type="number"
+                        min={0}
+                        max={MAX_STEP_DELAY_DAYS}
+                        value={delayDrafts[key] ?? String(step.delayDays)}
+                        disabled={disabled}
+                        title="Days to wait after the previous step"
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                          onDelayDraft(key, e.target.value)
+                        }
+                        onBlur={(e: React.FocusEvent<HTMLInputElement>) => {
+                          const value = e.target.value.trim();
+                          if (!value || Number(value) === step.delayDays) return;
+                          post({ intent: "setStepDelay", delayDays: value });
+                        }}
+                        style={css(
+                          INPUT + "width:56px; padding:4px 6px; font-size:12px; text-align:right;",
+                        )}
+                      />
+                      <span style={css(MUTED)}>d wait</span>
+                    </span>
+                  )}
+
+                  <span style={css(MONO + "flex:0 0 46px; text-align:right; color:#9a9a95; font-size:11px;")}>
+                    Day {step.dayOffset}
+                  </span>
+
+                  <span style={css("flex:0 0 auto; display:flex; gap:1px;")}>
+                    <Box
+                      as="button"
+                      disabled={disabled || index === 0}
+                      title="Move up"
+                      onClick={() => reorder(index, index - 1)}
+                      style={css(ICON_BTN)}
+                      hover={css("background:#eeeee9; color:#575753;")}
+                    >
+                      ↑
+                    </Box>
+                    <Box
+                      as="button"
+                      disabled={disabled || index === steps.length - 1}
+                      title="Move down"
+                      onClick={() => reorder(index, index + 1)}
+                      style={css(ICON_BTN)}
+                      hover={css("background:#eeeee9; color:#575753;")}
+                    >
+                      ↓
+                    </Box>
+                    {/* The last step can't be removed: an empty table means
+                        "derive from send_day", so emptying it would restore every
+                        template rather than nothing. The action refuses it too. */}
+                    <Box
+                      as="button"
+                      disabled={disabled || steps.length === 1}
+                      title={
+                        steps.length === 1
+                          ? "A sequence needs at least one step"
+                          : "Remove this step"
+                      }
+                      onClick={() => post({ intent: "removeStep" })}
+                      style={css(ICON_BTN)}
+                      hover={css("background:#eeeee9; color:#9a5b5b;")}
+                    >
+                      <IconClose size={12} />
+                    </Box>
+                  </span>
+                </div>
+
+                {open && (
+                  <div style={css("padding:0 9px 10px 44px; display:flex; flex-direction:column; gap:10px;")}>
+                    {step.preview.map((variant) => (
+                      <div key={variant.slot}>
+                        <div style={css(COL_LABEL)}>
+                          Subject{split ? ` · ${variant.slot}` : ""}
+                        </div>
+                        <div style={css("font-size:12.5px; font-weight:500; margin-top:3px;")}>
+                          {variant.subject || <span style={css(MUTED)}>No subject</span>}
+                        </div>
+                        <div style={css(COL_LABEL + "margin-top:8px;")}>Body</div>
+                        <div
+                          style={css(
+                            "margin-top:3px; padding:9px 11px; background:#fff; border:1px solid #ededea; border-radius:8px; font-size:12.5px; line-height:1.55; white-space:pre-wrap; max-height:220px; overflow-y:auto;",
+                          )}
+                        >
+                          {variant.body || <span style={css(MUTED)}>No body written yet.</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* --- Add a step ------------------------------------------------- */}
+      <div style={css("margin-top:9px; display:flex; gap:8px; align-items:center;")}>
+        <select
+          value={addPick}
+          disabled={disabled || !sequence.addable.length}
+          onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onAddPick(e.target.value)}
+          style={css(INPUT + "flex:1;")}
+        >
+          <option value="">
+            {sequence.addable.length
+              ? "Choose a template…"
+              : `No templates on Loop ${loop} yet — write one on Templates`}
+          </option>
+          {sequence.addable.map((template) => (
+            // One entry per usable variant plus, for an A/B template, a combined
+            // one. Offering the split as its own choice is what keeps a two-variant
+            // template uploadable as Smartlead's own A/B test — which is the
+            // pre-existing behaviour, and the only shape the /templates verdict is
+            // computed from.
+            <optgroup key={template.id} label={`${template.name} · day ${template.sendDay}`}>
+              {template.usableSlots.length > 1 && (
+                <option value={`${template.id}|all`}>
+                  {template.name} · A/B split
+                </option>
+              )}
+              {template.usableSlots.map((slot) => (
+                <option key={slot} value={`${template.id}|${slot}`}>
+                  {template.name} · variant {slot}
+                </option>
+              ))}
+              {!template.usableSlots.length && (
+                <option value="" disabled>
+                  {template.name} — no copy written yet
+                </option>
+              )}
+            </optgroup>
+          ))}
+        </select>
+        <Box
+          as="button"
+          disabled={disabled || !addPick}
+          onClick={() => {
+            const [templateId, slot] = addPick.split("|");
+            if (!templateId || !slot) return;
+            onPost({ intent: "addStep", templateId, slot });
+            onAddPick("");
+          }}
+          style={css(GHOST + "flex:0 0 auto; display:flex; align-items:center; gap:5px;")}
+          hover={css("background:#f4f4f1;")}
+        >
+          <IconPlus size={13} /> Add step
+        </Box>
+      </div>
+
+      <div style={css(MUTED + "margin-top:8px;")}>
+        {steps.length
+          ? `${steps.length} step${steps.length === 1 ? "" : "s"} over ${sequence.totalDays} day${
+              sequence.totalDays === 1 ? "" : "s"
+            }. Uploading replaces the campaign's existing steps.`
+          : "No steps yet. Add one below, or write a template on Templates."}
+        {steps.length > 0 && !sequence.custom && (
+          <>
+            {" "}
+            Following the templates’ send days — reorder or edit a step and this loop keeps
+            its own arrangement from then on.
+          </>
+        )}
+      </div>
+
+      {sequence.skipped.map((s) => (
+        <div key={`${s.templateId}:${s.reason}`} style={css(MUTED + "margin-top:6px;")}>
+          Skipped “{s.name}” — {s.reason}.
+        </div>
+      ))}
+      {sequence.warnings.map((w) => (
+        <div key={w} style={css("margin-top:7px; font-size:12px; color:#8a6d3b;")}>
+          {w}
+        </div>
+      ))}
+      {sequence.problems.map((p) => (
+        <div key={p} style={css("margin-top:7px; font-size:12px; color:#9a5b5b;")}>
+          {p}
+        </div>
+      ))}
+    </div>
   );
 }
 
