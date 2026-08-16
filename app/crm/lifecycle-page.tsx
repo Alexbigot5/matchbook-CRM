@@ -322,7 +322,7 @@ export function LifecyclePage({ contacts, viewer }: { contacts: Contact[]; viewe
           {board.total === 0 ? (
             <div style={css("padding:56px 24px; text-align:center; font-size:13px; color:#a3a39d;")}>
               {contacts.length === 0
-                ? "No contacts yet — add them on the Contacts page."
+                ? "No contacts yet. Add them on the Contacts page."
                 : "No contacts match these filters."}
             </div>
           ) : (

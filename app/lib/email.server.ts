@@ -57,7 +57,7 @@ export async function sendSignInEmail(
   expiresInSeconds: number,
 ): Promise<void> {
   if (!env.RESEND_API_KEY) {
-    throw new Error("RESEND_API_KEY is not set — cannot send the sign-in email.");
+    throw new Error("RESEND_API_KEY is not set, so the sign-in email cannot be sent.");
   }
 
   const minutes = Math.max(1, Math.round(expiresInSeconds / 60));

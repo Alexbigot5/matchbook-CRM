@@ -95,7 +95,7 @@ function withSecurityHeaders(response: Response, url: URL): Response {
 const REQUIRED_BINDINGS = ["DB", "BETTER_AUTH_SECRET"] as const;
 
 const SETUP_HINT: Record<string, string> = {
-  DB: "wrangler.toml [[d1_databases]] — check the binding name and database_id",
+  DB: "wrangler.toml [[d1_databases]]: check the binding name and database_id",
   BETTER_AUTH_SECRET: "openssl rand -base64 32 | wrangler secret put BETTER_AUTH_SECRET",
 };
 
@@ -106,18 +106,18 @@ function missingBindings(env: Env): string[] {
 
 function misconfiguredResponse(missing: string[]): Response {
   const rows = missing
-    .map((name) => `<li><code>${name}</code> — <span>${SETUP_HINT[name] ?? ""}</span></li>`)
+    .map((name) => `<li><code>${name}</code>: <span>${SETUP_HINT[name] ?? ""}</span></li>`)
     .join("");
   return new Response(
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
       `<meta name="viewport" content="width=device-width,initial-scale=1">` +
-      `<title>Matchbook CRM — not configured</title></head>` +
+      `<title>Matchbook CRM: not configured</title></head>` +
       `<body style="margin:0;padding:40px;font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;color:#1c1c1a;background:#f7f7f5;">` +
       `<div style="max-width:640px;margin:0 auto;background:#fff;border:1px solid #e6e6e1;border-radius:14px;padding:28px;">` +
       `<h1 style="font-size:19px;font-weight:600;margin:0 0 8px;">Matchbook CRM isn’t configured</h1>` +
       `<p style="font-size:14px;line-height:1.55;color:#57575a;margin:0 0 18px;">` +
       `The Worker is deployed but can’t start: the binding${missing.length === 1 ? " below is" : "s below are"} missing. ` +
-      `This is a deployment setting, not a data problem — the database is untouched.</p>` +
+      `This is a deployment setting, not a data problem; the database is untouched.</p>` +
       `<ul style="font-size:13px;line-height:1.9;color:#1c1c1a;margin:0;padding-left:20px;">${rows}</ul>` +
       `<p style="font-size:12px;line-height:1.55;color:#8a8a84;margin:18px 0 0;">` +
       `Redeploy (or restart <code>wrangler dev</code>) after setting these.</p>` +

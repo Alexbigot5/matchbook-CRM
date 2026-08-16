@@ -37,8 +37,8 @@ export function createAuth(env: AuthEnv, baseURL: string) {
   // should not rest on an assumption this repo never checks.
   if (!env.BETTER_AUTH_SECRET) {
     throw new Error(
-      "BETTER_AUTH_SECRET is not set. Refusing to start auth with a default secret — " +
-        "run `openssl rand -base64 32 | wrangler secret put BETTER_AUTH_SECRET`.",
+      "BETTER_AUTH_SECRET is not set. Refusing to start auth with a default secret. " +
+        "Run `openssl rand -base64 32 | wrangler secret put BETTER_AUTH_SECRET`.",
     );
   }
 

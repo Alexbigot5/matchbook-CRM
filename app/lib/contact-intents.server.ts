@@ -218,7 +218,7 @@ export async function handleContactIntent(
           message: result.skipped
             ? `Imported ${result.rows.length}. Skipped ${result.skipped} invalid row${
                 result.skipped === 1 ? "" : "s"
-              }${result.firstError ? ` — first problem: ${result.firstError}` : "."}`
+              }${result.firstError ? `. First problem: ${result.firstError}` : "."}`
             : undefined,
         };
       }

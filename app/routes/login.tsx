@@ -16,7 +16,7 @@ import { MAGIC_LINK_TTL_SECONDS } from "../lib/auth.server";
 
 export function meta({}: Route.MetaArgs) {
   return [
-    { title: "Sign in — Matchbook CRM" },
+    { title: "Sign in · Matchbook CRM" },
     { name: "robots", content: "noindex" },
   ];
 }

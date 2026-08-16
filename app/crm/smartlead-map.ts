@@ -405,8 +405,8 @@ function assemble(drafts: StepDraft[], deriveDelay: boolean): SequencePlan {
     // campaign keeps running with nothing to send.
     problems.push(
       skipped.length
-        ? "Nothing to upload — every step on this loop is missing its copy. Uploading now would erase the campaign's existing steps."
-        : "Nothing to upload — this loop has no steps. Uploading now would erase the campaign's existing steps.",
+        ? "Nothing to upload: every step on this loop is missing its copy. Uploading now would erase the campaign's existing steps."
+        : "Nothing to upload: this loop has no steps. Uploading now would erase the campaign's existing steps.",
     );
   }
   if (steps.length > MAX_SEQUENCE_STEPS) {
