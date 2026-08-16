@@ -61,9 +61,9 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    campaign bindings and the sequence-builder steps against one `now`, and **makes no
    Smartlead calls**: a loader that reaches a third party makes the page 500 whenever that
    party is down, and every operation here is a manual button anyway. Its `action` has
-   fifteen intents (see "Smartlead" below) and is the only session-gated action carrying a
-   rate limiter — two of them, in fact: the six sequence-builder intents touch nothing but
-   D1 and are metered on their own far looser bucket (`SMARTLEAD_BUILDER_RULE`), listed in
+   sixteen intents (see "Smartlead" below) and is the only session-gated action carrying a
+   rate limiter — two of them, in fact: the seven builder/copy-editor intents touch nothing
+   but D1 and are metered on their own far looser bucket (`SMARTLEAD_BUILDER_RULE`), listed in
    the `BUILDER_INTENTS` set. Add a builder intent without adding it there and ordinary
    editing burns the push budget.
 
@@ -144,7 +144,15 @@ shared shell:
   stats. The builder (`SequenceBuilder`) is a reorderable step list — native HTML5 drag
   plus ↑/↓ buttons as the **keyboard path**, the same pairing `lifecycle-page.tsx`
   documents — with a per-step variant chip, an editable wait, an expandable copy preview
-  and a template picker. Every edit **posts and waits**; there is no local draft of the
+  and a template picker. The expanded preview also carries an **Edit** button per variant,
+  which writes back through the *same* `saveVariant` the Templates page uses — the copy has
+  one home (`template_variants`) and this is a second door onto it, not a second store, so
+  the caption says so and the editor is held open by variant id (two steps showing variant
+  A are showing the same text). Saving reaches D1 only: the campaign keeps sending the old
+  copy until the sequence is uploaded again, which the result message states. The action
+  returns `closed: "editor"` so *only* that save closes the editor — closing on every
+  successful write would discard a half-typed body the moment someone pressed an arrow on
+  another row. Every edit **posts and waits**; there is no local draft of the
   list, because the stored order is what a later stats sync attributes numbers by and a
   list showing an unaccepted arrangement would be lying about where they land. The one
   exception is the wait box's text (a number input can't be typed in if it round-trips

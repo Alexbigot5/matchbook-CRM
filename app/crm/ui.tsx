@@ -149,6 +149,14 @@ export function IconSave({ size = 15, style }: { size?: number; style?: CSSPrope
     </svg>
   );
 }
+export function IconPencil({ size = 15, style }: { size?: number; style?: CSSProperties } = {}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={style}>
+      <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+      <path d="M14.5 7.5 16.5 9.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
 export function IconWarn({ size = 15, style }: { size?: number; style?: CSSProperties }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={style}>

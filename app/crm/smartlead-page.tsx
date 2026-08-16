@@ -13,17 +13,23 @@ import { useEffect, useState } from "react";
 import { useFetcher } from "react-router";
 import type { CampaignChoice, LoopView } from "../routes/smartlead";
 import type { Contact, Viewer } from "./data";
+import type { SequencePreview } from "./smartlead-map";
 import { Sidebar, buildOwnerTabs, buildViewTabs } from "./sidebar";
-import { Box, GLOBAL_CSS, IconClose, IconPlus, IconWarn, MONO, css } from "./ui";
-// The client imports the same bound the action enforces, so the wait box's
-// spinner stops where the server would refuse — the arrangement validate.ts
-// documents for the CSV caps.
-import { MAX_STEP_DELAY_DAYS } from "../lib/validate";
+import { Box, GLOBAL_CSS, IconClose, IconPencil, IconPlus, IconWarn, MONO, css } from "./ui";
+// The client imports the same bounds the action enforces, so the wait box's
+// spinner and the copy editor's maxLength stop where the server would refuse —
+// the arrangement validate.ts documents for the CSV caps.
+import { LIMITS, MAX_STEP_DELAY_DAYS } from "../lib/validate";
 
 // Mirrors the action's return type. Not imported as a value, the same hand-kept
 // arrangement templates-page.tsx uses.
 type ActionResult =
-  | { ok: true; message?: string; campaigns?: CampaignChoice[] }
+  | {
+      ok: true;
+      message?: string;
+      campaigns?: CampaignChoice[];
+      closed?: "editor";
+    }
   | { ok: false; error: string };
 
 const CARD =
@@ -84,6 +90,16 @@ type State = {
   addPick: Record<number, string>;
   /** The step being dragged, or null. */
   dragToken: string | null;
+  /**
+   * The variant whose copy is open in the inline editor, or null.
+   *
+   * One at a time, and held by variant id rather than by step: the copy lives on
+   * the template, so two steps showing the same variant are showing the same
+   * text and must not offer two editors over it.
+   */
+  editing: string | null;
+  editSubject: string;
+  editBody: string;
 };
 
 /**
@@ -127,6 +143,9 @@ export function SmartleadPage({
     delayDrafts: {},
     addPick: {},
     dragToken: null,
+    editing: null,
+    editSubject: "",
+    editBody: "",
   });
   const patch = (u: Partial<State>) => setState((s) => ({ ...s, ...u }));
 
@@ -148,6 +167,10 @@ export function SmartleadPage({
         // moved out from under this list.
         delayDrafts: {},
         dragToken: null,
+        // Only the save that came FROM the editor closes it. Closing on every
+        // successful write would throw away a half-typed body the moment someone
+        // pressed an arrow on another row.
+        ...(result.closed === "editor" ? { editing: null } : {}),
         // A fetch that returned campaigns replaces the list; every other
         // successful action leaves it alone.
         ...(result.campaigns ? { campaigns: result.campaigns } : {}),
@@ -252,6 +275,9 @@ export function SmartleadPage({
                 delayDrafts={S.delayDrafts}
                 addPick={S.addPick[loopView.loop] ?? ""}
                 dragToken={S.dragToken}
+                editing={S.editing}
+                editSubject={S.editSubject}
+                editBody={S.editBody}
                 onPick={(id) => patch({ pick: { ...S.pick, [loopView.loop]: id } })}
                 onNewName={(name) => patch({ newName: { ...S.newName, [loopView.loop]: name } })}
                 onSchedule={(draft) => setSchedule(loopView.loop, draft)}
@@ -263,6 +289,15 @@ export function SmartleadPage({
                 }
                 onAddPick={(value) => patch({ addPick: { ...S.addPick, [loopView.loop]: value } })}
                 onDrag={(key) => patch({ dragToken: key })}
+                onEdit={(variant) =>
+                  patch({
+                    editing: variant ? variant.variantId : null,
+                    editSubject: variant?.subject ?? "",
+                    editBody: variant?.body ?? "",
+                    actionError: "",
+                  })
+                }
+                onEditField={(field) => patch(field)}
                 onSubmit={submit}
                 onConfirmUpload={() => patch({ confirmLoop: loopView.loop, actionError: "", notice: "" })}
               />
@@ -300,6 +335,9 @@ function LoopCard({
   delayDrafts,
   addPick,
   dragToken,
+  editing,
+  editSubject,
+  editBody,
   onPick,
   onNewName,
   onSchedule,
@@ -307,6 +345,8 @@ function LoopCard({
   onDelayDraft,
   onAddPick,
   onDrag,
+  onEdit,
+  onEditField,
   onSubmit,
   onConfirmUpload,
 }: {
@@ -322,6 +362,9 @@ function LoopCard({
   delayDrafts: Record<string, string>;
   addPick: string;
   dragToken: string | null;
+  editing: string | null;
+  editSubject: string;
+  editBody: string;
   onPick: (id: string) => void;
   onNewName: (name: string) => void;
   onSchedule: (draft: Partial<ScheduleDraft>) => void;
@@ -329,6 +372,8 @@ function LoopCard({
   onDelayDraft: (key: string, value: string) => void;
   onAddPick: (value: string) => void;
   onDrag: (key: string | null) => void;
+  onEdit: (variant: SequencePreview | null) => void;
+  onEditField: (field: { editSubject?: string; editBody?: string }) => void;
   onSubmit: (fields: Record<string, string>) => void;
   onConfirmUpload: () => void;
 }) {
@@ -479,10 +524,15 @@ function LoopCard({
         delayDrafts={delayDrafts}
         addPick={addPick}
         dragToken={dragToken}
+        editing={editing}
+        editSubject={editSubject}
+        editBody={editBody}
         onExpand={onExpand}
         onDelayDraft={onDelayDraft}
         onAddPick={onAddPick}
         onDrag={onDrag}
+        onEdit={onEdit}
+        onEditField={onEditField}
         onPost={post}
         onConfirmUpload={onConfirmUpload}
       />
@@ -720,6 +770,128 @@ function slotChipStyle(split: boolean): string {
 }
 
 /**
+ * One variant's copy under an expanded step: read it, or edit it in place.
+ *
+ * The editor writes to `template_variants` through the same saveVariant() the
+ * Templates page uses — there is one copy of this text and this is a second door
+ * onto it, not a second store. That is worth saying on screen, which the caption
+ * does: an operator fixing a typo mid-campaign is entitled to know they are
+ * editing the template every other step and page shows.
+ *
+ * Saving does NOT reach Smartlead. The campaign keeps sending the old text until
+ * the sequence is uploaded again, and the action's message says so.
+ */
+function StepCopy({
+  variant,
+  showSlot,
+  disabled,
+  editing,
+  subject,
+  body,
+  onEdit,
+  onField,
+  onSave,
+}: {
+  variant: SequencePreview;
+  showSlot: boolean;
+  disabled: boolean;
+  editing: boolean;
+  subject: string;
+  body: string;
+  onEdit: (variant: SequencePreview | null) => void;
+  onField: (field: { editSubject?: string; editBody?: string }) => void;
+  onSave: () => void;
+}) {
+  if (!editing) {
+    return (
+      <div>
+        <div style={css("display:flex; align-items:flex-start; justify-content:space-between; gap:10px;")}>
+          <div style={css(COL_LABEL)}>Subject{showSlot ? ` · ${variant.slot}` : ""}</div>
+          <Box
+            as="button"
+            disabled={disabled}
+            onClick={() => onEdit(variant)}
+            style={css(GHOST + "flex:0 0 auto; display:flex; align-items:center; gap:5px; padding:4px 9px;")}
+            hover={css("background:#f4f4f1;")}
+          >
+            <IconPencil size={12} /> Edit
+          </Box>
+        </div>
+        <div style={css("font-size:12.5px; font-weight:500; margin-top:3px;")}>
+          {variant.subject || <span style={css(MUTED)}>No subject</span>}
+        </div>
+        <div style={css(COL_LABEL + "margin-top:8px;")}>Body</div>
+        <div
+          style={css(
+            "margin-top:3px; padding:9px 11px; background:#fff; border:1px solid #ededea; border-radius:8px; font-size:12.5px; line-height:1.55; white-space:pre-wrap; max-height:220px; overflow-y:auto;",
+          )}
+        >
+          {variant.body || <span style={css(MUTED)}>No body written yet.</span>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={css(COL_LABEL)}>Subject{showSlot ? ` · ${variant.slot}` : ""}</div>
+      <input
+        value={subject}
+        maxLength={LIMITS.subject}
+        disabled={disabled}
+        autoFocus
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onField({ editSubject: e.target.value })
+        }
+        style={css(INPUT + "margin-top:3px;")}
+      />
+      <div style={css(COL_LABEL + "margin-top:8px;")}>Body</div>
+      <textarea
+        value={body}
+        maxLength={LIMITS.body}
+        disabled={disabled}
+        rows={10}
+        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
+          onField({ editBody: e.target.value })
+        }
+        style={css(
+          INPUT + "margin-top:3px; line-height:1.55; resize:vertical; min-height:120px;",
+        )}
+      />
+      <div
+        style={css(
+          "margin-top:8px; display:flex; align-items:center; justify-content:space-between; gap:10px;",
+        )}
+      >
+        <span style={css(MUTED)}>
+          Saves to the template — Templates and any other step using it show the same copy.
+        </span>
+        <span style={css("display:flex; gap:8px; flex:0 0 auto;")}>
+          <Box
+            as="button"
+            disabled={disabled}
+            onClick={() => onEdit(null)}
+            style={css(GHOST)}
+            hover={css("background:#f4f4f1;")}
+          >
+            Cancel
+          </Box>
+          <Box
+            as="button"
+            disabled={disabled}
+            onClick={onSave}
+            style={css(PRIMARY)}
+            hover={css("background:#333;")}
+          >
+            Save
+          </Box>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
  * The step list, and everything that edits it.
  *
  * Every control posts and waits — no optimistic reordering — which is the same
@@ -741,10 +913,15 @@ function SequenceBuilder({
   delayDrafts,
   addPick,
   dragToken,
+  editing,
+  editSubject,
+  editBody,
   onExpand,
   onDelayDraft,
   onAddPick,
   onDrag,
+  onEdit,
+  onEditField,
   onPost,
   onConfirmUpload,
 }: {
@@ -756,10 +933,15 @@ function SequenceBuilder({
   delayDrafts: Record<string, string>;
   addPick: string;
   dragToken: string | null;
+  editing: string | null;
+  editSubject: string;
+  editBody: string;
   onExpand: (key: string) => void;
   onDelayDraft: (key: string, value: string) => void;
   onAddPick: (value: string) => void;
   onDrag: (key: string | null) => void;
+  onEdit: (variant: SequencePreview | null) => void;
+  onEditField: (field: { editSubject?: string; editBody?: string }) => void;
   onPost: (fields: Record<string, string>) => void;
   onConfirmUpload: () => void;
 }) {
@@ -981,22 +1163,26 @@ function SequenceBuilder({
                 {open && (
                   <div style={css("padding:0 9px 10px 44px; display:flex; flex-direction:column; gap:10px;")}>
                     {step.preview.map((variant) => (
-                      <div key={variant.slot}>
-                        <div style={css(COL_LABEL)}>
-                          Subject{split ? ` · ${variant.slot}` : ""}
-                        </div>
-                        <div style={css("font-size:12.5px; font-weight:500; margin-top:3px;")}>
-                          {variant.subject || <span style={css(MUTED)}>No subject</span>}
-                        </div>
-                        <div style={css(COL_LABEL + "margin-top:8px;")}>Body</div>
-                        <div
-                          style={css(
-                            "margin-top:3px; padding:9px 11px; background:#fff; border:1px solid #ededea; border-radius:8px; font-size:12.5px; line-height:1.55; white-space:pre-wrap; max-height:220px; overflow-y:auto;",
-                          )}
-                        >
-                          {variant.body || <span style={css(MUTED)}>No body written yet.</span>}
-                        </div>
-                      </div>
+                      <StepCopy
+                        key={variant.variantId}
+                        variant={variant}
+                        showSlot={split}
+                        disabled={disabled}
+                        editing={editing === variant.variantId}
+                        subject={editSubject}
+                        body={editBody}
+                        onEdit={onEdit}
+                        onField={onEditField}
+                        onSave={() =>
+                          onPost({
+                            intent: "saveVariant",
+                            templateId: step.templateId,
+                            variantId: variant.variantId,
+                            subject: editSubject,
+                            body: editBody,
+                          })
+                        }
+                      />
                     ))}
                   </div>
                 )}
