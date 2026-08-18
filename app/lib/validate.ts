@@ -53,6 +53,16 @@ export const LIMITS = {
   // IANA zone identifier ("America/New_York"). Bounded well above the longest
   // real zone name.
   timezone: 60,
+  // The prospecting brief a user hands the Origami agent. Longer than any other
+  // field here because it is instructions, not a label — "RevOps directors at
+  // 50-200 person B2B software companies in the Bay Area who have posted about
+  // hiring in the last quarter" is a normal one, and truncating a brief changes
+  // who comes back.
+  prospectPrompt: 1_000,
+  // A prospect's job title, and the URL the agent found them at. Both are
+  // provider-supplied, so they are bounded on the way in rather than trusted.
+  title: 200,
+  sourceUrl: 500,
 } as const;
 
 /** Maximum rows accepted in one CSV / API import. */
@@ -89,6 +99,86 @@ export const MAX_VIEW_CONDITIONS = 10;
 export const MAX_SAVED_VIEWS = 50;
 
 /**
+ * Rows stored from one Origami agent run.
+ *
+ * The cap matters twice over here. An agent asked for twenty leads can build a
+ * table of several thousand — the brief is a suggestion, not a LIMIT clause —
+ * and every stored row is serialized into the panel's payload and rendered.
+ * Same discipline as MAX_IDS and MAX_IMPORT_ROWS: nothing unbounded reaches a
+ * render path, least of all something a third party decided the size of.
+ */
+export const MAX_PROSPECTS_PER_RUN = 200;
+
+/**
+ * Pages of rows one poll will read from an Origami table before it stops.
+ *
+ * Their rows endpoint caps a page at 200, so three pages is the natural partner
+ * to MAX_PROSPECTS_PER_RUN, and it also bounds the wall-clock a single Worker
+ * invocation can spend paging.
+ */
+export const MAX_PROSPECT_ROW_PAGES = 3;
+
+/**
+ * Origami's run statuses, verbatim.
+ *
+ * Only `running` is non-terminal. Note that the six failure-ish states are
+ * reported in the response BODY, not as HTTP errors, so nothing else in this app
+ * will notice them for us — branching on this value is mandatory.
+ *
+ * Whitelisted here rather than CHECKed in migration 0013 because the v2 API is
+ * documented as beta: a CHECK would turn a newly-added provider status into a
+ * failed write on a run already in flight, and SQLite cannot drop a CHECK
+ * without rebuilding the table.
+ */
+export const PROSPECT_STATUSES = [
+  "running",
+  "completed",
+  "needs_input",
+  "incomplete",
+  "step_cap_hit",
+  "cancelled",
+  "errored",
+  "timed_out",
+] as const;
+
+/**
+ * Terminal statuses a follow-up run can continue from.
+ *
+ * `incomplete` ended early on an unparseable tool call, `step_cap_hit` ran out
+ * of plan budget, and `cancelled` was stopped by hand — Origami keeps whatever
+ * each built, so all three are resumable by sending another run on the same
+ * agent. `errored` and `timed_out` are not in this list: both come back with a
+ * null response, so there is nothing to continue from.
+ */
+export const RESUMABLE_PROSPECT_STATUSES = [
+  "needs_input",
+  "incomplete",
+  "step_cap_hit",
+  "cancelled",
+] as const;
+
+/**
+ * Our own pipeline phase, which is deliberately not Origami's `status`.
+ *
+ * Origami reports no mid-run progress, so its status moves exactly once. This is
+ * what tells the next poll whether the work outstanding is "ask the provider
+ * again" (`researching`) or "read the table it built" (`reading`).
+ */
+export const PROSPECT_STAGES = ["starting", "researching", "reading", "ready", "failed"] as const;
+
+/**
+ * How much we trust a prospect's email address.
+ *
+ * DERIVED, never reported: the Origami v2 API exposes no confidence field. See
+ * emailConfidence() in app/crm/prospecting.ts for what each one actually means,
+ * and note that the UI says so rather than implying we verified anything.
+ */
+export const EMAIL_CONFIDENCE = ["verified", "likely", "none"] as const;
+
+/** Which test matched an existing contact. Null on a prospect that is new. */
+export const DEDUPE_REASONS = ["email", "name"] as const;
+
+/**
  * Why a deal died, offered when a contact's status is set to Dead. A closed set
  * rather than free text: the analytics panel groups on this value exactly, and a
  * typo would silently become its own bucket. The client imports it to render the
@@ -109,6 +199,11 @@ const TEMPLATE_STATUS_SET: ReadonlySet<string> = new Set(TEMPLATE_STATUSES);
 const VARIANT_SLOT_SET: ReadonlySet<string> = new Set(VARIANT_SLOTS);
 const VIEW_FIELD_SET: ReadonlySet<string> = new Set(VIEW_FIELDS.map((f) => f.key));
 const VIEW_OP_SET: ReadonlySet<string> = new Set(VIEW_OPS);
+const PROSPECT_STATUS_SET: ReadonlySet<string> = new Set(PROSPECT_STATUSES);
+const PROSPECT_STAGE_SET: ReadonlySet<string> = new Set(PROSPECT_STAGES);
+const RESUMABLE_PROSPECT_STATUS_SET: ReadonlySet<string> = new Set(RESUMABLE_PROSPECT_STATUSES);
+const EMAIL_CONFIDENCE_SET: ReadonlySet<string> = new Set(EMAIL_CONFIDENCE);
+const DEDUPE_REASON_SET: ReadonlySet<string> = new Set(DEDUPE_REASONS);
 
 /**
  * Each filterable field's closed value set, so a condition's value can be checked
@@ -902,4 +997,154 @@ export function safeMailto(email: string): string | null {
   // mangle legitimate addresses — `jane+crm@acme.co.uk` would become
   // `jane%2Bcrm@…`, which not every mail client decodes back.
   return "mailto:" + s;
+}
+
+// ---------------------------------------------------------------------------
+// Prospecting (the Origami agent)
+// ---------------------------------------------------------------------------
+
+export type ProspectStatus = (typeof PROSPECT_STATUSES)[number];
+export type ProspectStage = (typeof PROSPECT_STAGES)[number];
+export type EmailConfidence = (typeof EMAIL_CONFIDENCE)[number];
+export type DedupeReason = (typeof DEDUPE_REASONS)[number];
+
+export function isValidProspectStatus(value: unknown): value is ProspectStatus {
+  return typeof value === "string" && PROSPECT_STATUS_SET.has(value);
+}
+
+export function isValidProspectStage(value: unknown): value is ProspectStage {
+  return typeof value === "string" && PROSPECT_STAGE_SET.has(value);
+}
+
+export function isValidEmailConfidence(value: unknown): value is EmailConfidence {
+  return typeof value === "string" && EMAIL_CONFIDENCE_SET.has(value);
+}
+
+export function isValidDedupeReason(value: unknown): value is DedupeReason {
+  return typeof value === "string" && DEDUPE_REASON_SET.has(value);
+}
+
+/** True for a terminal status a follow-up run on the same agent can continue from. */
+export function isResumableProspectStatus(value: unknown): boolean {
+  return typeof value === "string" && RESUMABLE_PROSPECT_STATUS_SET.has(value);
+}
+
+/** True while Origami is still working. The one non-terminal status. */
+export function isProspectRunning(value: unknown): boolean {
+  return value === "running";
+}
+
+/**
+ * Bound the brief a user hands the agent.
+ *
+ * Length is the only check. There is deliberately no content filtering: the
+ * whole point of the feature is that a salesperson describes who they want in
+ * their own words, and a brief is passed to a third-party LLM agent, never
+ * compiled into SQL or a URL. What *is* worth knowing is that this text is
+ * wrapped by composeBrief() in app/crm/prospecting.ts before it is sent — the
+ * column instructions around it are built server-side so the client cannot
+ * replace them.
+ */
+export function validateProspectPrompt(raw: unknown):
+  | { ok: true; prompt: string }
+  | { ok: false; error: string } {
+  const prompt = asString(raw);
+  if (!prompt) return { ok: false, error: "Describe who you're looking for." };
+  if (prompt.length > LIMITS.prospectPrompt) {
+    return {
+      ok: false,
+      error: `Keep the brief to ${LIMITS.prospectPrompt} characters or fewer.`,
+    };
+  }
+  return { ok: true, prompt };
+}
+
+/** One mapped row from an Origami table, on its way into `prospects`. */
+export type ProspectFields = {
+  name: string;
+  company: string | null;
+  title: string | null;
+  email: string | null;
+  linkedin: string | null;
+  location: string | null;
+  sourceUrl: string | null;
+  emailConfidence: EmailConfidence;
+};
+
+/**
+ * Validate the rows mapped out of an Origami table.
+ *
+ * These arrive from a third party via an LLM agent, so they get the same
+ * treatment as a pasted CSV: every row checked, invalid ones skipped rather than
+ * failing the batch, and the count plus the first reason returned so the panel
+ * can say what was dropped. A run that finds forty people and mangles three
+ * should still show the other thirty-seven.
+ *
+ * A row with no name is dropped, because validateContact would reject it at
+ * promotion time anyway and a blank row in the review list is just noise. A bad
+ * email is NOT a reason to drop the row — the person may still be worth adding
+ * by hand — so it is nulled out and the confidence falls to "none".
+ */
+export function validateProspectRows(raw: unknown):
+  | { ok: true; rows: ProspectFields[]; skipped: number; firstError: string | null }
+  | { ok: false; error: string } {
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: "The agent returned something that wasn't a list of rows." };
+  }
+
+  const rows: ProspectFields[] = [];
+  let skipped = 0;
+  let firstError: string | null = null;
+
+  const drop = (reason: string) => {
+    skipped++;
+    if (!firstError) firstError = reason;
+  };
+
+  for (const row of raw) {
+    if (rows.length >= MAX_PROSPECTS_PER_RUN) break;
+
+    const r = (row ?? {}) as Record<string, unknown>;
+
+    const name = asString(r.name);
+    if (!name) {
+      drop("A row came back with no name.");
+      continue;
+    }
+    if (name.length > LIMITS.name) {
+      drop(`"${truncateForMessage(name)}" is too long to be a name.`);
+      continue;
+    }
+
+    const company = asString(r.company).slice(0, LIMITS.company);
+    const title = asString(r.title).slice(0, LIMITS.title);
+    const location = asString(r.location).slice(0, LIMITS.source);
+    const linkedin = asString(r.linkedin).slice(0, LIMITS.linkedin);
+    const sourceUrl = asString(r.sourceUrl).slice(0, LIMITS.sourceUrl);
+
+    // Nulled rather than dropped: the row is still a lead, just not a mailable
+    // one. Keeping it is what lets someone look the person up by hand.
+    const rawEmail = asString(r.email);
+    const email = isValidEmail(rawEmail) ? rawEmail : "";
+
+    const claimed = r.emailConfidence;
+    const emailConfidence: EmailConfidence = !email
+      ? "none"
+      : isValidEmailConfidence(claimed) && claimed !== "none"
+        ? claimed
+        : "likely";
+
+    rows.push({
+      name,
+      company: company || null,
+      title: title || null,
+      email: email || null,
+      linkedin: linkedin || null,
+      location: location || null,
+      sourceUrl: sourceUrl || null,
+      emailConfidence,
+    });
+  }
+
+  return { ok: true, rows, skipped, firstError };
 }

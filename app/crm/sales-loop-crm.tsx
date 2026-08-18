@@ -15,6 +15,7 @@ import {
 } from "./data";
 import {
   Box,
+  Checkbox,
   css,
   GLOBAL_CSS,
   IconCheck,
@@ -23,6 +24,7 @@ import {
   IconClose,
   IconFilter,
   IconPlus,
+  IconProspect,
   IconSave,
   IconSearch,
   IconTrash,
@@ -44,6 +46,8 @@ import {
   type ViewCondition,
   type ViewOp,
 } from "./views";
+import { ProspectingPanel } from "./prospecting-panel";
+import { buildRunView, type RunView } from "./prospecting";
 import { buildOwnerTabs, buildViewTabs, Sidebar } from "./sidebar";
 import {
   ContactDetail,
@@ -148,11 +152,35 @@ type State = {
   draftConditions: ViewCondition[];
   viewName: string;
   viewShared: boolean;
+  // The prospecting agent's slide-over. Its results are NOT here: they live in
+  // /api/prospect's payload, the same way contacts live in the loader. These are
+  // the panel's own UI knobs.
+  prospectOpen: boolean;
+  prospectDraft: string;
+  /** Which thread the panel is showing. Empty until a run is started or restored. */
+  prospectRunId: string;
+  prospectSelected: string[];
+  prospectLoop: number;
+  prospectOwner: string;
+  prospectSource: string;
+  prospectError: string;
 };
 
 // Mirrors the route action's return type. `message` carries a partial-success
 // note — currently "imported N, skipped M invalid rows" from a CSV import;
 // `savedViewId` is present only on a successful createSavedView.
+/**
+ * What /api/prospect's loader returns. Declared by hand, mirroring that route,
+ * the same way ActionResult below mirrors this page's action.
+ */
+type ProspectPayload = {
+  ok: boolean;
+  running?: boolean;
+  configured?: boolean;
+  turns?: RunView[];
+  error?: string;
+};
+
 type ActionResult =
   | { ok: true; message?: string; savedViewId?: string }
   | { ok: false; error: string };
@@ -172,39 +200,6 @@ const blankForm = (loops?: number[]): FormState => ({
 // Outreach channels offered in the detail panel's "Log touch" row. `meeting` is
 // deliberately absent — the "Log as meeting note" button above already records
 // one, and it requires a note where these don't.
-// Custom checkbox for row/bulk selection. `indeterminate` renders the "some
-// selected" dash used by the header select-all.
-function Checkbox({
-  checked,
-  indeterminate,
-  onClick,
-  title,
-}: {
-  checked: boolean;
-  indeterminate?: boolean;
-  onClick: (e: any) => void;
-  title?: string;
-}) {
-  const on = checked || indeterminate;
-  return (
-    <Box
-      as="button"
-      onClick={onClick}
-      title={title}
-      style={css(
-        `flex:0 0 auto; width:17px; height:17px; border-radius:5px; display:flex; align-items:center; justify-content:center; cursor:pointer; padding:0; border:1.5px solid ${on ? "#1a1a1a" : "#cfcfc9"}; background:${on ? "#1a1a1a" : "#fff"}; color:#fff;`,
-      )}
-      hover={css(on ? "filter:brightness(1.15);" : "border-color:#a9a9a3;")}
-    >
-      {indeterminate ? (
-        <span style={css("width:8px; height:2px; border-radius:1px; background:#fff;")} />
-      ) : checked ? (
-        <IconCheck style={css("width:11px; height:11px;")} />
-      ) : null}
-    </Box>
-  );
-}
-
 export type { Viewer } from "./data";
 
 export function SalesLoopCRM({
@@ -217,6 +212,12 @@ export function SalesLoopCRM({
   viewer: Viewer;
 }) {
   const fetcher = useFetcher();
+  // A SECOND fetcher, which is a deliberate departure from this page's
+  // one-fetcher idiom. The prospecting panel polls /api/prospect every few
+  // seconds for as long as a run is going; sharing the fetcher above would
+  // overwrite fetcher.data on a timer and re-fire the settle effect that owns
+  // every modal on this page, closing them under the user mid-edit.
+  const prospectFetcher = useFetcher();
   const [state, setState] = useState<State>(() => ({
     view: "all",
     owner: "all",
@@ -241,6 +242,14 @@ export function SalesLoopCRM({
     draftConditions: [],
     viewName: "",
     viewShared: true,
+    prospectOpen: false,
+    prospectDraft: "",
+    prospectRunId: "",
+    prospectSelected: [],
+    prospectLoop: 1,
+    prospectOwner: "Unassigned",
+    prospectSource: "",
+    prospectError: "",
   }));
 
   const patch = (u: Partial<State> | ((s: State) => Partial<State>)) =>
@@ -292,6 +301,117 @@ export function SalesLoopCRM({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.state, fetcher.data]);
+
+  // ---------------------------------------------------------------------
+  // Prospecting agent
+  // ---------------------------------------------------------------------
+
+  const prospectData = prospectFetcher.data as ProspectPayload | undefined;
+  const turns: RunView[] = prospectData?.turns ?? [];
+  const prospectRunning = !!prospectData?.running;
+  const prospectConfigured = prospectData?.configured !== false;
+  const prospectPending = prospectFetcher.state !== "idle";
+  const activeRunId = S.prospectRunId || turns[turns.length - 1]?.run.id || "";
+
+  /** GET, never POST: a POST would revalidate the whole contact list on a timer. */
+  const loadProspects = (runId: string) =>
+    prospectFetcher.load(runId ? `/api/prospect?run=${encodeURIComponent(runId)}` : "/api/prospect");
+
+  /**
+   * Drive the run forward.
+   *
+   * The server decides when a tick actually costs an Origami call (see
+   * next_poll_at in migration 0013); this cadence exists so the panel's elapsed
+   * timer stays honest, not because the provider is asked this often.
+   */
+  useEffect(() => {
+    if (!S.prospectOpen || !prospectRunning || prospectPending) return;
+    const timer = setTimeout(() => loadProspects(activeRunId), 3_000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [S.prospectOpen, prospectRunning, prospectPending, activeRunId]);
+
+  // Fold a settled prospecting write back into the panel. Separate from the
+  // settle effect above for the same reason the fetcher is separate.
+  useEffect(() => {
+    if (prospectFetcher.state !== "idle" || !prospectData) return;
+    if (prospectData.ok === false) {
+      patch({ prospectError: prospectData.error ?? "" });
+      return;
+    }
+    patch((s) => ({
+      prospectError: "",
+      // Drop selections whose prospect is gone: a re-read of the agent's table
+      // replaces its rows, so an id from the previous read may no longer exist.
+      prospectSelected: s.prospectSelected.filter((id) =>
+        (prospectData.turns ?? []).some((t) => t.visible.some((p) => p.id === id)),
+      ),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prospectFetcher.state, prospectFetcher.data]);
+
+  const openProspect = () => {
+    patch({ prospectOpen: true, prospectError: "" });
+    // Restore whatever this viewer last ran. Deliberately not in the page
+    // loader: most visits never open the panel and shouldn't pay for the reads.
+    if (!prospectData) loadProspects("");
+  };
+
+  const closeProspect = () => patch({ prospectOpen: false, prospectError: "" });
+
+  const sendProspect = () => {
+    const prompt = S.prospectDraft.trim();
+    if (!prompt) return;
+    prospectFetcher.submit(
+      // runId continues the existing thread when there is one, which is how a
+      // needs_input question gets answered and how a stalled run is resumed.
+      { intent: "startRun", prompt, runId: activeRunId },
+      { method: "post", action: "/api/prospect" },
+    );
+    patch({ prospectDraft: "", prospectError: "" });
+  };
+
+  const promoteProspects = () => {
+    if (!activeRunId || !S.prospectSelected.length) return;
+    prospectFetcher.submit(
+      {
+        intent: "promote",
+        runId: activeRunId,
+        ids: JSON.stringify(S.prospectSelected),
+        loop: String(S.prospectLoop),
+        owner: S.prospectOwner,
+        source: S.prospectSource,
+      },
+      { method: "post", action: "/api/prospect" },
+    );
+    patch({ prospectSelected: [] });
+  };
+
+  const cancelProspect = () => {
+    if (!activeRunId) return;
+    prospectFetcher.submit(
+      { intent: "cancel", runId: activeRunId },
+      { method: "post", action: "/api/prospect" },
+    );
+  };
+
+  // Served by the route as a text/csv attachment rather than built from a Blob
+  // here: the escaping that stops a scraped "=cmd" cell executing in Excel lives
+  // in csvCell on the server, with the rest of the output escaping.
+  const exportProspects = () => {
+    if (!activeRunId) return;
+    window.location.href = `/api/prospect?run=${encodeURIComponent(activeRunId)}&format=csv`;
+  };
+
+  const toggleProspect = (id: string) =>
+    patch((s) => ({
+      prospectSelected: s.prospectSelected.includes(id)
+        ? s.prospectSelected.filter((x) => x !== id)
+        : [...s.prospectSelected, id],
+    }));
+
+  const toggleAllProspects = (ids: string[]) =>
+    patch((s) => ({ prospectSelected: s.prospectSelected.length === ids.length ? [] : ids }));
 
   // Contacts can vanish under the UI (deleted here or in another tab), so drop
   // selection ids that no longer exist and close a detail panel whose contact is
@@ -990,6 +1110,14 @@ export function SalesLoopCRM({
             <IconUpload />
             Import CSV
           </Box>
+          {/* Secondary, and styled as the "New view" toggle rather than as a
+              black button: this opens a persistent surface, and "Add contact"
+              stays the one primary action on this header. The panel gets its own
+              primary ("Add N to Loop 1") because it is its own surface. */}
+          <Box as="button" onClick={S.prospectOpen ? closeProspect : openProspect} style={css(`display:flex; align-items:center; gap:6px; padding:8px 12px; border:1px solid ${S.prospectOpen ? "#c9c9c3" : "#e6e6e2"}; background:${S.prospectOpen ? "#f0f0ec" : "#fff"}; border-radius:8px; font-size:13px; font-weight:500; font-family:inherit; color:#3a3a38; cursor:pointer; white-space:nowrap;`)} hover={css("background:#f4f4f1;")}>
+            <IconProspect />
+            Prospect
+          </Box>
           <Box as="button" onClick={openAdd} style={css("display:flex; align-items:center; gap:6px; padding:8px 13px; border:none; background:#1a1a1a; border-radius:8px; font-size:13px; font-weight:500; font-family:inherit; color:#fff; cursor:pointer; white-space:nowrap;")} hover={css("background:#333;")}>
             <IconPlus />
             Add contact
@@ -1347,6 +1475,32 @@ export function SalesLoopCRM({
             <IconClose size={15} />
           </Box>
         </div>
+      )}
+
+      {/* PROSPECTING SLIDE-OVER */}
+      {S.prospectOpen && (
+        <ProspectingPanel
+          turns={turns}
+          draft={S.prospectDraft}
+          selected={S.prospectSelected}
+          loop={S.prospectLoop}
+          owner={S.prospectOwner}
+          source={S.prospectSource}
+          error={S.prospectError}
+          pending={prospectPending}
+          configured={prospectConfigured}
+          onDraft={(prospectDraft) => patch({ prospectDraft })}
+          onSend={sendProspect}
+          onToggle={toggleProspect}
+          onToggleAll={toggleAllProspects}
+          onLoop={(prospectLoop) => patch({ prospectLoop })}
+          onOwner={(prospectOwner) => patch({ prospectOwner })}
+          onSource={(prospectSource) => patch({ prospectSource })}
+          onPromote={promoteProspects}
+          onCancel={cancelProspect}
+          onExport={exportProspects}
+          onClose={closeProspect}
+        />
       )}
 
       {/* DETAIL SLIDE-OVER */}

@@ -38,6 +38,22 @@ RESEND_API_KEY=""
 #   wrangler secret put SMARTLEAD_API_KEY
 SMARTLEAD_API_KEY=""
 
+# --- Origami (the prospecting agent) ------------------------------------------
+# Drives the Prospect panel on the contacts page: you describe who you want in
+# plain English, an Origami agent researches them and builds a table, and the
+# panel stages the results for review before anything becomes a contact.
+#
+# Create one at origami.chat → Settings → API keys (a paid plan is required).
+# Keys look like `og_live_…` and are parent-wide. Leave blank to disable: the
+# panel still opens and explains what's missing, exactly as /smartlead does.
+#   wrangler secret put ORIGAMI_API_KEY
+ORIGAMI_API_KEY=""
+
+# Optional. Origami keys act on the parent org by default; set this to scope
+# every request to one child project instead (the x-origami-project header).
+# Not a secret, so it can equally live in wrangler.toml [vars].
+# ORIGAMI_PROJECT_ID=""
+
 # Optional. The auth base URL is normally derived from the incoming request, so
 # local dev, wrangler dev, and production all work with no config. Set this only
 # if a proxy rewrites the host.
