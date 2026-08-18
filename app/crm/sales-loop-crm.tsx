@@ -181,6 +181,16 @@ type ProspectPayload = {
   error?: string;
 };
 
+/**
+ * What /api/prospect's action returns. `runId` rides on both variants: a
+ * successful start names the new run, and a REFUSED start names the run that
+ * refused it, so the panel can show that one instead of leaving the user with an
+ * error and no way to reach it.
+ */
+type ProspectActionResult =
+  | { ok: true; runId?: string; message?: string }
+  | { ok: false; error: string; runId?: string };
+
 type ActionResult =
   | { ok: true; message?: string; savedViewId?: string }
   | { ok: false; error: string };
@@ -212,12 +222,20 @@ export function SalesLoopCRM({
   viewer: Viewer;
 }) {
   const fetcher = useFetcher();
-  // A SECOND fetcher, which is a deliberate departure from this page's
-  // one-fetcher idiom. The prospecting panel polls /api/prospect every few
-  // seconds for as long as a run is going; sharing the fetcher above would
-  // overwrite fetcher.data on a timer and re-fire the settle effect that owns
-  // every modal on this page, closing them under the user mid-edit.
-  const prospectFetcher = useFetcher();
+  // TWO MORE fetchers, a deliberate departure from this page's one-fetcher
+  // idiom, and they have to be two rather than one.
+  //
+  // Separate from `fetcher` above: the panel polls /api/prospect every few
+  // seconds for as long as a run is going, and sharing that fetcher would
+  // overwrite its data on a timer and re-fire the settle effect that owns every
+  // modal on this page, closing them under the user mid-edit.
+  //
+  // Separate from EACH OTHER for the same reason one level down. A fetcher holds
+  // a single `data`, so one serving both roles loses the polled thread the
+  // moment it submits a write — which orphaned the run it had just started and
+  // left the panel looking like nothing had happened.
+  const prospectPoll = useFetcher();
+  const prospectWrite = useFetcher();
   const [state, setState] = useState<State>(() => ({
     view: "all",
     owner: "all",
@@ -306,16 +324,35 @@ export function SalesLoopCRM({
   // Prospecting agent
   // ---------------------------------------------------------------------
 
-  const prospectData = prospectFetcher.data as ProspectPayload | undefined;
-  const turns: RunView[] = prospectData?.turns ?? [];
-  const prospectRunning = !!prospectData?.running;
-  const prospectConfigured = prospectData?.configured !== false;
-  const prospectPending = prospectFetcher.state !== "idle";
+  // Reading the panel's state comes from the POLL fetcher and nothing else.
+  //
+  // These two must not be the same fetcher. A fetcher holds one `data`, so a
+  // submit overwrites whatever the last load returned: the panel would lose the
+  // thread the instant it started a run, `running` would drop to false, polling
+  // would never begin, and the orphaned run then blocked every retry with "a run
+  // is already going". That is the same hazard the comment on prospectPoll's
+  // declaration describes for the page's main fetcher, one level down.
+  const pollData = prospectPoll.data as ProspectPayload | undefined;
+  const writeData = prospectWrite.data as ProspectActionResult | undefined;
+  const turns: RunView[] = pollData?.turns ?? [];
+  const prospectRunning = !!pollData?.running;
+  const prospectConfigured = pollData?.configured !== false;
+  const pollBusy = prospectPoll.state !== "idle";
+  const writeBusy = prospectWrite.state !== "idle";
+  const prospectPending = pollBusy || writeBusy;
   const activeRunId = S.prospectRunId || turns[turns.length - 1]?.run.id || "";
+
+  // Starting a run makes a real Origami call, so the POST can take a couple of
+  // seconds. Echo the brief straight from the in-flight form data meanwhile, or
+  // the panel looks like it swallowed what the user just typed.
+  const prospectSending =
+    writeBusy && prospectWrite.formData?.get("intent") === "startRun"
+      ? String(prospectWrite.formData.get("prompt") ?? "")
+      : "";
 
   /** GET, never POST: a POST would revalidate the whole contact list on a timer. */
   const loadProspects = (runId: string) =>
-    prospectFetcher.load(runId ? `/api/prospect?run=${encodeURIComponent(runId)}` : "/api/prospect");
+    prospectPoll.load(runId ? `/api/prospect?run=${encodeURIComponent(runId)}` : "/api/prospect");
 
   /**
    * Drive the run forward.
@@ -331,30 +368,44 @@ export function SalesLoopCRM({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [S.prospectOpen, prospectRunning, prospectPending, activeRunId]);
 
-  // Fold a settled prospecting write back into the panel. Separate from the
-  // settle effect above for the same reason the fetcher is separate.
+  // Fold a settled WRITE back into the panel, and pick the run up immediately.
+  // The load is what starts the polling loop — without it a freshly started run
+  // sits there with nothing watching it.
   useEffect(() => {
-    if (prospectFetcher.state !== "idle" || !prospectData) return;
-    if (prospectData.ok === false) {
-      patch({ prospectError: prospectData.error ?? "" });
+    if (prospectWrite.state !== "idle" || !writeData) return;
+    // A failure can still name a run: a blocked start returns the id of the run
+    // that is blocking it, so the panel can show that one rather than just
+    // refusing and leaving the user with no way to see or cancel it.
+    if (writeData.runId) patch({ prospectRunId: writeData.runId });
+    if (!writeData.ok) {
+      patch({ prospectError: writeData.error });
+      if (writeData.runId) loadProspects(writeData.runId);
       return;
     }
-    patch((s) => ({
-      prospectError: "",
-      // Drop selections whose prospect is gone: a re-read of the agent's table
-      // replaces its rows, so an id from the previous read may no longer exist.
-      prospectSelected: s.prospectSelected.filter((id) =>
-        (prospectData.turns ?? []).some((t) => t.visible.some((p) => p.id === id)),
-      ),
-    }));
+    patch({ prospectError: "", prospectSelected: [] });
+    loadProspects(writeData.runId || activeRunId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prospectFetcher.state, prospectFetcher.data]);
+  }, [prospectWrite.state, prospectWrite.data]);
+
+  // Drop selections whose prospect is gone: a re-read of the agent's table
+  // replaces its rows, so an id from the previous read may no longer exist.
+  useEffect(() => {
+    if (prospectPoll.state !== "idle" || !pollData) return;
+    setState((s) => {
+      const live = new Set(
+        (pollData.turns ?? []).flatMap((t) => t.visible.map((p) => p.id)),
+      );
+      const kept = s.prospectSelected.filter((id) => live.has(id));
+      return kept.length === s.prospectSelected.length ? s : { ...s, prospectSelected: kept };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prospectPoll.state, prospectPoll.data]);
 
   const openProspect = () => {
     patch({ prospectOpen: true, prospectError: "" });
     // Restore whatever this viewer last ran. Deliberately not in the page
     // loader: most visits never open the panel and shouldn't pay for the reads.
-    if (!prospectData) loadProspects("");
+    if (!pollData) loadProspects("");
   };
 
   const closeProspect = () => patch({ prospectOpen: false, prospectError: "" });
@@ -362,7 +413,7 @@ export function SalesLoopCRM({
   const sendProspect = () => {
     const prompt = S.prospectDraft.trim();
     if (!prompt) return;
-    prospectFetcher.submit(
+    prospectWrite.submit(
       // runId continues the existing thread when there is one, which is how a
       // needs_input question gets answered and how a stalled run is resumed.
       { intent: "startRun", prompt, runId: activeRunId },
@@ -373,7 +424,7 @@ export function SalesLoopCRM({
 
   const promoteProspects = () => {
     if (!activeRunId || !S.prospectSelected.length) return;
-    prospectFetcher.submit(
+    prospectWrite.submit(
       {
         intent: "promote",
         runId: activeRunId,
@@ -389,7 +440,7 @@ export function SalesLoopCRM({
 
   const cancelProspect = () => {
     if (!activeRunId) return;
-    prospectFetcher.submit(
+    prospectWrite.submit(
       { intent: "cancel", runId: activeRunId },
       { method: "post", action: "/api/prospect" },
     );
@@ -1488,6 +1539,7 @@ export function SalesLoopCRM({
           source={S.prospectSource}
           error={S.prospectError}
           pending={prospectPending}
+          sending={prospectSending}
           configured={prospectConfigured}
           onDraft={(prospectDraft) => patch({ prospectDraft })}
           onSend={sendProspect}
