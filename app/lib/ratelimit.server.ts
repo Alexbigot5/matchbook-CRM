@@ -183,3 +183,29 @@ export const SMARTLEAD_BUILDER_RULE: RateLimitRule = {
   limit: 240,
   windowMs: 60 * 1000,
 };
+
+/**
+ * Starting a prospecting run.
+ *
+ * Tight, and per hour rather than per minute, because a run is the only thing in
+ * this app that spends a third party's credits on work nobody can cancel the
+ * cost of. It also occupies the org's concurrent-agent slot, of which a starter
+ * plan has exactly one — so two people hammering this don't just overspend, they
+ * block each other.
+ *
+ * Keyed on the user's email like SMARTLEAD_RULE, not the IP: four people behind
+ * one office address should not share a research budget.
+ */
+export const PROSPECT_RUN_RULE = { bucket: "prospect:run", limit: 20, windowMs: 60 * 60 * 1000 };
+
+/**
+ * Polling an in-flight run, and everything else the panel does.
+ *
+ * Far looser, and a separate bucket for the reason SMARTLEAD_BUILDER_RULE is
+ * separate from SMARTLEAD_RULE: a poll usually costs one D1 read and reaches
+ * Origami only once its own Retry-After has elapsed, so metering it against the
+ * run budget would mean watching a run finish exhausted the allowance to start
+ * the next one. Sized for a panel left open on a five-minute run.
+ */
+export const PROSPECT_POLL_RULE = { bucket: "prospect:poll", limit: 240, windowMs: 60 * 1000 };
+

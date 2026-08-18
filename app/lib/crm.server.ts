@@ -17,7 +17,17 @@ import {
   type StoredSequenceStep,
 } from "../crm/smartlead-map";
 import { parseConditions, type SavedView } from "../crm/views";
-import { MAX_SAVED_VIEWS, type SavedViewFields, type StatCounts, type TemplateFields } from "./validate";
+import type { DedupedProspect, Prospect, RunCounts } from "../crm/prospecting";
+import {
+  isValidDedupeReason,
+  isValidEmailConfidence,
+  isValidProspectStage,
+  MAX_SAVED_VIEWS,
+  type ProspectStage,
+  type SavedViewFields,
+  type StatCounts,
+  type TemplateFields,
+} from "./validate";
 
 const DAY = 86_400_000;
 
@@ -1489,4 +1499,419 @@ export async function setSequenceStepVariant(
  */
 export async function clearSequenceSteps(db: D1Database, loop: number): Promise<void> {
   await db.prepare("DELETE FROM smartlead_sequence_steps WHERE loop = ?").bind(loop).run();
+}
+
+// ---------------------------------------------------------------------------
+// Prospecting (see migration 0013 and app/crm/prospecting.ts)
+// ---------------------------------------------------------------------------
+
+type ProspectRunRow = {
+  id: string;
+  agent_id: string | null;
+  provider_run_id: string | null;
+  previous_run_id: string | null;
+  prompt: string;
+  status: string;
+  stage: string;
+  next_poll_at: string | null;
+  summary: string | null;
+  actions: string | null;
+  question: string | null;
+  table_id: string | null;
+  counts: string | null;
+  error: string | null;
+  created_by: string;
+  created_by_name: string;
+  created_at: string;
+  updated_at: string | null;
+};
+
+type ProspectRowRecord = {
+  id: string;
+  run_id: string;
+  position: number;
+  name: string;
+  company: string | null;
+  title: string | null;
+  email: string | null;
+  linkedin: string | null;
+  location: string | null;
+  source_url: string | null;
+  email_confidence: string | null;
+  dedupe: string | null;
+  existing_contact_id: string | null;
+  promoted_contact_id: string | null;
+};
+
+const RUN_COLS = `id, agent_id, provider_run_id, previous_run_id, prompt, status, stage,
+  next_poll_at, summary, actions, question, table_id, counts, error,
+  created_by, created_by_name, created_at, updated_at`;
+
+const PROSPECT_COLS = `id, run_id, position, name, company, title, email, linkedin,
+  location, source_url, email_confidence, dedupe, existing_contact_id, promoted_contact_id`;
+
+/**
+ * The server-side view of a run: everything the poll state machine needs, which
+ * is strictly more than the client is given (the provider ids and next_poll_at
+ * never leave the server).
+ */
+export type StoredProspectRun = {
+  id: string;
+  agentId: string | null;
+  providerRunId: string | null;
+  prompt: string;
+  status: string;
+  stage: ProspectStage;
+  nextPollAt: number | null;
+  summary: string | null;
+  actions: unknown[];
+  question: string | null;
+  tableId: string | null;
+  counts: RunCounts | null;
+  error: string | null;
+  createdBy: string;
+  createdAtMs: number;
+  updatedAtMs: number | null;
+};
+
+/** Tolerant JSON read: a corrupt blob degrades the panel, it doesn't 500 a loader. */
+function parseJsonColumn<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    return (parsed ?? fallback) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * `Date.parse` a column written as an ISO string from JS, returning null for a
+ * missing or unreadable value. Migration 0013 explains why these columns must
+ * never use SQLite's datetime('now') default: it emits no timezone designator,
+ * so this call would read a UTC instant as local time.
+ */
+function parseIso(raw: string | null): number | null {
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function toStoredRun(row: ProspectRunRow): StoredProspectRun {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    providerRunId: row.provider_run_id,
+    prompt: row.prompt,
+    status: row.status,
+    stage: isValidProspectStage(row.stage) ? row.stage : "failed",
+    nextPollAt: parseIso(row.next_poll_at),
+    summary: row.summary,
+    actions: parseJsonColumn<unknown[]>(row.actions, []),
+    question: row.question,
+    tableId: row.table_id,
+    counts: parseJsonColumn<RunCounts | null>(row.counts, null),
+    error: row.error,
+    createdBy: row.created_by,
+    // created_at keeps the datetime('now') default because it is only ordered
+    // on — but the thread's "3m ago" label reads it, so it is parsed as UTC
+    // explicitly here rather than being handed to a bare Date.parse, which would
+    // read "2026-08-18 14:03:00" as local time.
+    createdAtMs: Date.parse(row.created_at.replace(" ", "T") + "Z"),
+    updatedAtMs: parseIso(row.updated_at),
+  };
+}
+
+function toProspect(row: ProspectRowRecord): Prospect {
+  return {
+    id: row.id,
+    name: row.name,
+    company: row.company,
+    title: row.title,
+    email: row.email,
+    linkedin: row.linkedin,
+    location: row.location,
+    sourceUrl: row.source_url,
+    emailConfidence: isValidEmailConfidence(row.email_confidence)
+      ? row.email_confidence
+      : "none",
+    dedupe: isValidDedupeReason(row.dedupe) ? row.dedupe : null,
+    existingContactId: row.existing_contact_id,
+    promotedContactId: row.promoted_contact_id,
+  };
+}
+
+/**
+ * The runs of one thread, oldest first.
+ *
+ * A thread is every run sharing an `agent_id` — an Origami agent keeps its
+ * workspace and conversation across runs, so that grouping IS the conversation.
+ * A run whose agent id was never assigned (its POST /agents failed) is a thread
+ * of one, addressed by its own id.
+ */
+export async function listProspectThread(
+  db: D1Database,
+  runId: string,
+  viewerEmail: string,
+): Promise<StoredProspectRun[]> {
+  const anchor = await db
+    .prepare(`SELECT ${RUN_COLS} FROM prospect_runs WHERE id = ? AND created_by = ?`)
+    .bind(runId, viewerEmail)
+    .first<ProspectRunRow>();
+  if (!anchor) return [];
+  if (!anchor.agent_id) return [toStoredRun(anchor)];
+
+  const res = await db
+    .prepare(
+      // The id tiebreak matters here for the same reason listSavedViews gives:
+      // created_at has second resolution, and a follow-up run answering a
+      // question can easily land in the same second as the run before it.
+      `SELECT ${RUN_COLS} FROM prospect_runs
+        WHERE agent_id = ? AND created_by = ?
+        ORDER BY created_at ASC, id ASC`,
+    )
+    .bind(anchor.agent_id, viewerEmail)
+    .all<ProspectRunRow>();
+
+  return (res.results ?? []).map(toStoredRun);
+}
+
+/** The viewer's most recent run, used to restore the panel when it reopens. */
+export async function latestProspectRun(
+  db: D1Database,
+  viewerEmail: string,
+): Promise<StoredProspectRun | null> {
+  const row = await db
+    .prepare(
+      `SELECT ${RUN_COLS} FROM prospect_runs
+        WHERE created_by = ?
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
+    )
+    .bind(viewerEmail)
+    .first<ProspectRunRow>();
+  return row ? toStoredRun(row) : null;
+}
+
+/** Every prospect of one run, in the order the agent ranked them. */
+export async function listProspects(db: D1Database, runId: string): Promise<Prospect[]> {
+  const res = await db
+    .prepare(`SELECT ${PROSPECT_COLS} FROM prospects WHERE run_id = ? ORDER BY position ASC`)
+    .bind(runId)
+    .all<ProspectRowRecord>();
+  return (res.results ?? []).map(toProspect);
+}
+
+/** Prospects across a whole thread, keyed by run id. One query, not one per run. */
+export async function listProspectsForRuns(
+  db: D1Database,
+  runIds: string[],
+): Promise<Map<string, Prospect[]>> {
+  const out = new Map<string, Prospect[]>();
+  if (!runIds.length) return out;
+  // Bounded by the thread length, which is bounded by PROSPECT_RUN_RULE — but
+  // the placeholder list is built from the ids' count, never from their content.
+  const holes = runIds.map(() => "?").join(",");
+  const res = await db
+    .prepare(
+      `SELECT ${PROSPECT_COLS} FROM prospects WHERE run_id IN (${holes})
+        ORDER BY position ASC`,
+    )
+    .bind(...runIds)
+    .all<ProspectRowRecord>();
+  for (const row of res.results ?? []) {
+    const list = out.get(row.run_id) ?? [];
+    list.push(toProspect(row));
+    out.set(row.run_id, list);
+  }
+  return out;
+}
+
+/**
+ * True when this viewer already has a run in flight.
+ *
+ * Checked before every start, because an Origami agent does one run at a time
+ * and the org's concurrent-run pool is as small as ONE on a starter plan. Losing
+ * that race costs a 429 and a confusing error; catching it here costs a read.
+ */
+export async function hasRunningProspectRun(
+  db: D1Database,
+  viewerEmail: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT id FROM prospect_runs
+        WHERE created_by = ? AND status = 'running' AND stage != 'failed' LIMIT 1`,
+    )
+    .bind(viewerEmail)
+    .first<{ id: string }>();
+  return !!row;
+}
+
+/**
+ * Insert the run row BEFORE the provider call.
+ *
+ * Order matters: a run row with no agent_id is a run whose POST /agents never
+ * came back, and it can be shown as failed with the reason. Calling first and
+ * inserting after would lose a started (and billed) run whenever the write lost.
+ */
+export async function createProspectRun(
+  db: D1Database,
+  input: {
+    prompt: string;
+    agentId: string | null;
+    previousRunId: string | null;
+    createdBy: string;
+    createdByName: string;
+  },
+): Promise<string> {
+  const id = crypto.randomUUID();
+  await db
+    .prepare(
+      `INSERT INTO prospect_runs
+         (id, agent_id, previous_run_id, prompt, status, stage, created_by, created_by_name, updated_at)
+       VALUES (?, ?, ?, ?, 'running', 'starting', ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      input.agentId,
+      input.previousRunId,
+      input.prompt,
+      input.createdBy,
+      input.createdByName,
+      new Date().toISOString(),
+    )
+    .run();
+  return id;
+}
+
+/**
+ * Patch a run. Only the named fields move; `updated_at` always does.
+ *
+ * A hand-built SET list rather than one statement per caller, because the poll
+ * state machine writes a different subset at each stage and five near-identical
+ * UPDATEs would drift. Column names come from this function's own literals, not
+ * from the caller.
+ */
+export async function updateProspectRun(
+  db: D1Database,
+  runId: string,
+  patch: {
+    agentId?: string | null;
+    providerRunId?: string | null;
+    status?: string;
+    stage?: ProspectStage;
+    nextPollAt?: number | null;
+    summary?: string | null;
+    actions?: unknown[] | null;
+    question?: string | null;
+    tableId?: string | null;
+    counts?: RunCounts | null;
+    error?: string | null;
+  },
+): Promise<void> {
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+
+  const put = (column: string, value: unknown) => {
+    sets.push(`${column} = ?`);
+    binds.push(value);
+  };
+
+  if ("agentId" in patch) put("agent_id", patch.agentId ?? null);
+  if ("providerRunId" in patch) put("provider_run_id", patch.providerRunId ?? null);
+  if ("status" in patch) put("status", patch.status);
+  if ("stage" in patch) put("stage", patch.stage);
+  // ISO string, never datetime('now') — this column is Date.parse()d. See 0013.
+  if ("nextPollAt" in patch) {
+    put("next_poll_at", patch.nextPollAt ? new Date(patch.nextPollAt).toISOString() : null);
+  }
+  if ("summary" in patch) put("summary", patch.summary ?? null);
+  if ("actions" in patch) put("actions", patch.actions ? JSON.stringify(patch.actions) : null);
+  if ("question" in patch) put("question", patch.question ?? null);
+  if ("tableId" in patch) put("table_id", patch.tableId ?? null);
+  if ("counts" in patch) put("counts", patch.counts ? JSON.stringify(patch.counts) : null);
+  if ("error" in patch) put("error", patch.error ?? null);
+
+  put("updated_at", new Date().toISOString());
+
+  await db
+    .prepare(`UPDATE prospect_runs SET ${sets.join(", ")} WHERE id = ?`)
+    .bind(...binds, runId)
+    .run();
+}
+
+/**
+ * Store a run's mapped, deduped prospects.
+ *
+ * Deletes first so a re-read of the same table replaces rather than appends —
+ * the `reading` stage is re-enterable if a page of rows times out, and these are
+ * a snapshot of one table, not an accumulating log.
+ */
+export async function replaceProspects(
+  db: D1Database,
+  runId: string,
+  rows: DedupedProspect[],
+): Promise<number> {
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`DELETE FROM prospects WHERE run_id = ?`).bind(runId),
+  ];
+  rows.forEach((row, index) => {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO prospects
+             (id, run_id, position, name, company, title, email, linkedin, location,
+              source_url, email_confidence, dedupe, existing_contact_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          runId,
+          index,
+          row.name,
+          row.company,
+          row.title,
+          row.email,
+          row.linkedin,
+          row.location,
+          row.sourceUrl,
+          row.emailConfidence,
+          row.dedupe,
+          row.existingContactId,
+        ),
+    );
+  });
+  // One batch: a half-written result set would show a truncated list with no
+  // sign that anything was missing.
+  await db.batch(statements);
+  return rows.length;
+}
+
+/**
+ * Mark prospects as promoted, so a second click adds nothing.
+ *
+ * The contact ids are positional against `ids` — createManyContacts inserts in
+ * order and drops only nameless rows, which validateContact has already
+ * rejected by this point, so the two lists line up.
+ */
+export async function markProspectsPromoted(
+  db: D1Database,
+  runId: string,
+  ids: string[],
+): Promise<void> {
+  if (!ids.length) return;
+  const now = new Date().toISOString();
+  await db.batch(
+    ids.map((id) =>
+      db
+        .prepare(
+          // AND run_id = ? for the reason every template_variants write is
+          // scoped by template_id: without it a caller could mark another run's
+          // prospect promoted by passing its id.
+          `UPDATE prospects SET promoted_contact_id = ?
+            WHERE id = ? AND run_id = ? AND promoted_contact_id IS NULL`,
+        )
+        .bind(now, id, runId),
+    ),
+  );
 }

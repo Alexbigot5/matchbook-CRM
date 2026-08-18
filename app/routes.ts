@@ -13,4 +13,8 @@ export default [
   // Machine-callable JSON API for the HyperAgent integration (resource route).
   // Authed by a bearer token, not the session cookie — deliberately not gated.
   route("api/hyperagent", "routes/api.hyperagent.ts"),
+  // The prospecting agent's resource route. SESSION-gated, unlike the one above:
+  // it spends Origami credits and writes contacts, which is not a thing to hang
+  // off a shared bearer token. See its module header for why its GET mutates.
+  route("api/prospect", "routes/api.prospect.ts"),
 ] satisfies RouteConfig;

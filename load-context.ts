@@ -15,6 +15,8 @@ type IntegrationEnv = {
   RESEND_API_KEY?: string;
   AUTH_EMAIL_FROM?: string;
   SMARTLEAD_API_KEY?: string;
+  ORIGAMI_API_KEY?: string;
+  ORIGAMI_PROJECT_ID?: string;
 };
 
 export function getLoadContext(env: Env, request: Request) {
@@ -44,6 +46,15 @@ export function getLoadContext(env: Env, request: Request) {
     // Smartlead (app/lib/smartlead.server.ts). Same "" = disabled convention:
     // /smartlead renders and explains itself rather than erroring.
     SMARTLEAD_API_KEY: e.SMARTLEAD_API_KEY ?? "",
+    // The prospecting agent (app/lib/origami.server.ts). Same "" = disabled
+    // convention again: the panel opens and explains itself rather than
+    // erroring, and this key must NOT join REQUIRED_BINDINGS in workers/app.ts —
+    // a CRM with no research integration is still a CRM.
+    ORIGAMI_API_KEY: e.ORIGAMI_API_KEY ?? "",
+    // Optional. Origami keys are parent-wide; this scopes every request to one
+    // child org via the x-origami-project header. Not a secret, so it can live
+    // in wrangler.toml [vars] — empty means "act on the parent org".
+    ORIGAMI_PROJECT_ID: e.ORIGAMI_PROJECT_ID ?? "",
   };
 }
 

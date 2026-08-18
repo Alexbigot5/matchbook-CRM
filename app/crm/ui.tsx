@@ -134,6 +134,26 @@ export function IconPlus({ size = 15, style }: { size?: number; style?: CSSPrope
     </svg>
   );
 }
+/**
+ * The prospecting agent: a magnifier with a spark on it. Distinct from
+ * IconSearch, which means "filter this list" — this one means "go and find
+ * people who aren't in the list yet", and the two sit within 200px of each other
+ * in the contacts header.
+ */
+export function IconProspect({ size = 15, style }: { size?: number; style?: CSSProperties } = {}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={style}>
+      <circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" strokeWidth="2" />
+      <path d="m19.5 19.5-3.5-3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path
+        d="M10.5 7.2l.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9.9-2.4Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 export function IconFilter({ size = 15, style }: { size?: number; style?: CSSProperties } = {}) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={style}>
@@ -271,5 +291,50 @@ export function IconCalendar({ style }: { style?: CSSProperties }) {
       <rect x="3" y="5" width="18" height="16" rx="2.5" stroke="currentColor" strokeWidth="2" />
       <path d="M3 9h18M8 3v4M16 3v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
+  );
+}
+
+/**
+ * Custom checkbox for row and bulk selection. `indeterminate` renders the "some
+ * selected" dash used by a header select-all.
+ *
+ * Lives here rather than in sales-loop-crm.tsx because two modules now need it,
+ * and the second one — prospecting-panel.tsx — must not import from the page
+ * component. That is the same dependency rule contact-detail.tsx and sidebar.tsx
+ * state in their headers: the page imports the panels, never the reverse, so a
+ * panel doesn't drag the whole contacts page into a bundle that only wanted a
+ * checkbox.
+ */
+export function Checkbox({
+  checked,
+  indeterminate,
+  onClick,
+  title,
+  disabled,
+}: {
+  checked: boolean;
+  indeterminate?: boolean;
+  onClick: (e: any) => void;
+  title?: string;
+  disabled?: boolean;
+}) {
+  const on = checked || indeterminate;
+  return (
+    <Box
+      as="button"
+      onClick={onClick}
+      title={title}
+      disabled={disabled}
+      style={css(
+        `flex:0 0 auto; width:17px; height:17px; border-radius:5px; display:flex; align-items:center; justify-content:center; cursor:${disabled ? "default" : "pointer"}; padding:0; border:1.5px solid ${on ? "#1a1a1a" : "#cfcfc9"}; background:${on ? "#1a1a1a" : "#fff"}; color:#fff; opacity:${disabled ? "0.45" : "1"};`,
+      )}
+      hover={css(disabled ? "" : on ? "filter:brightness(1.15);" : "border-color:#a9a9a3;")}
+    >
+      {indeterminate ? (
+        <span style={css("width:8px; height:2px; border-radius:1px; background:#fff;")} />
+      ) : checked ? (
+        <IconCheck style={css("width:11px; height:11px;")} />
+      ) : null}
+    </Box>
   );
 }
