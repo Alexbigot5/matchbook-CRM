@@ -243,6 +243,140 @@ export function mapRow(row: Record<string, unknown>, map: ColumnMap): Record<str
 }
 
 // ---------------------------------------------------------------------------
+// Choosing which table to read
+// ---------------------------------------------------------------------------
+
+/**
+ * Rows to sample from a candidate table before judging it.
+ *
+ * Ten is plenty to tell "every row has an email" from "almost none do", and the
+ * difference we are looking for is a gulf, not a rounding error. Reading a whole
+ * page to decide which page to read would be silly.
+ */
+export const TABLE_SAMPLE_ROWS = 10;
+
+/**
+ * How much better one table's email fill rate must be to win on merit rather
+ * than on size, in percentage points.
+ *
+ * Twenty is deliberately coarse. We are separating "this is the filtered
+ * deliverable" from "this is the raw search pool", which in practice differ by
+ * most of the range — not tuning a threshold. Anything closer than this is noise
+ * on a ten-row sample, so size decides instead.
+ */
+export const EMAIL_FILL_MARGIN = 0.2;
+
+export type CandidateTable = { id?: string; name?: string; leadCount?: number };
+
+export type TableCandidate = {
+  table: CandidateTable;
+  /** The table's columns, from listColumns. Empty when they couldn't be read. */
+  columns: { slug?: string; name?: string; kind?: string }[];
+  /**
+   * A sample of the table's rows, already unwrapped from any `cells` envelope.
+   * EMPTY MEANS UNKNOWN, not "no emails" — a table we failed to sample must not
+   * be scored as though we had sampled it and found nothing.
+   */
+  sampledRows: Record<string, unknown>[];
+};
+
+export type TablePick = {
+  table: CandidateTable | null;
+  /** One line for the log, naming what actually decided it. */
+  reason: string;
+};
+
+/**
+ * Pick the table a finished run's results are actually in.
+ *
+ * WHY THIS IS NOT `sort BY leadCount DESC LIMIT 1`. That was the original rule
+ * and it is wrong in exactly the case the feature is for. A brief with a hard
+ * requirement in it — "must have a work email", "only companies still hiring" —
+ * makes the agent build a raw search pool and then a filtered deliverable, and
+ * the deliverable is SMALLER than the pool by construction. Biggest-wins picks
+ * the pool every time, so the panel fills with the unfiltered candidates the
+ * user explicitly asked to exclude, and it looks like the filter was ignored.
+ *
+ * Size is not meaningless — a scratch table really is usually small, which is
+ * why the original heuristic worked at all — it just cannot be the only signal.
+ *
+ * So the tables are judged on what the CRM actually needs out of them: how many
+ * of their rows carry an email address. A filtered deliverable is dense; a raw
+ * pool is sparse. Where two tables are comparably dense, size breaks the tie and
+ * the old behaviour is recovered.
+ *
+ * Pure and isomorphic like everything else in this module: the caller fetches
+ * the samples, this only decides. The scoring is a plain fraction over a
+ * ten-row sample, so it costs nothing and can be reasoned about in a test.
+ */
+export function pickResultTable(candidates: TableCandidate[]): TablePick {
+  if (!candidates.length) return { table: null, reason: "the run built no tables" };
+  if (candidates.length === 1) {
+    return { table: candidates[0].table, reason: "the run built one table" };
+  }
+
+  const scored = candidates.map((c) => ({
+    table: c.table,
+    leads: Number(c.table.leadCount) || 0,
+    fill: emailFillRate(c),
+  }));
+
+  const known = scored.filter((s) => s.fill !== null);
+
+  // Nothing could be sampled, so there is no evidence to weigh and size is all
+  // that is left. This is also the honest degradation when the rows endpoint is
+  // having a bad day: it lands exactly on the old behaviour rather than on a
+  // comparison built from half the data.
+  if (!known.length) {
+    const biggest = [...scored].sort((a, b) => b.leads - a.leads)[0];
+    return {
+      table: biggest.table,
+      reason: `no rows could be sampled from ${scored.length} tables; fell back to the largest`,
+    };
+  }
+
+  const maxFill = Math.max(...known.map((s) => s.fill as number));
+  // Everything within a margin of the best fill rate is "comparably dense", and
+  // among those the largest wins. Banding rather than comparing pairwise keeps
+  // the choice transitive — a pairwise "is A meaningfully better than B" rule
+  // gives different answers depending on the order the tables arrive in.
+  const tier = known
+    .filter((s) => (s.fill as number) >= maxFill - EMAIL_FILL_MARGIN)
+    .sort((a, b) => b.leads - a.leads);
+
+  const winner = tier[0];
+  const beaten = known.find((s) => s.leads > winner.leads);
+
+  return {
+    table: winner.table,
+    reason: beaten
+      ? // The interesting case, and the one worth reading in a log: a bigger
+        // table lost because its rows were mostly empty.
+        `picked "${winner.table.name ?? winner.table.id}" (${pct(winner.fill)} of sampled rows have an email, ${winner.leads} leads) over the larger "${beaten.table.name ?? beaten.table.id}" (${pct(beaten.fill)}, ${beaten.leads} leads)`
+      : `picked "${winner.table.name ?? winner.table.id}" (${pct(winner.fill)} of sampled rows have an email, ${winner.leads} leads)`,
+  };
+}
+
+/**
+ * What fraction of a candidate's sampled rows carry an email address, or null
+ * when there is nothing to judge on.
+ *
+ * A table with no email column scores 0 rather than null: that is a real answer
+ * about the table, not a gap in our evidence.
+ */
+function emailFillRate(candidate: TableCandidate): number | null {
+  if (!candidate.sampledRows.length) return null;
+  const slug = mapColumns(candidate.columns).bySlug.email;
+  if (!slug) return 0;
+  const filled = candidate.sampledRows.filter((row) => !!cell(row, slug)).length;
+  return filled / candidate.sampledRows.length;
+}
+
+function pct(fill: number | null): string {
+  return fill === null ? "unsampled" : `${Math.round(fill * 100)}%`;
+}
+
+// ---------------------------------------------------------------------------
 // Dedupe
 // ---------------------------------------------------------------------------
 
