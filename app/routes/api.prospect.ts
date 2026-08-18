@@ -30,7 +30,7 @@ import { requireUser } from "../lib/session.server";
 import {
   createManyContacts,
   createProspectRun,
-  hasRunningProspectRun,
+  findRunningProspectRun,
   latestProspectRun,
   listContacts,
   listProspects,
@@ -91,6 +91,16 @@ const json = <T,>(data: T, status = 200) => Response.json(data, { status });
 
 /** Rows a run may promote at once. Bounded for the same reason MAX_IDS is. */
 const MAX_PROMOTE = 200;
+
+/**
+ * How long a run may go without moving before it is treated as abandoned.
+ *
+ * Nothing advances a run except a poll, so a closed tab strands one in flight
+ * and the one-run-at-a-time guard would then lock the feature forever. Origami's
+ * runs finish in one to five minutes, so fifteen leaves a wide margin for a slow
+ * one while still self-healing inside a coffee break.
+ */
+const STALE_RUN_MS = 15 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Provider error translation
@@ -583,10 +593,30 @@ async function startRun(
   // An Origami agent runs one at a time and the org's concurrent pool is as
   // small as one on a starter plan. Catching this here costs a read; losing the
   // race costs a 429 and a confusing message.
-  if (await hasRunningProspectRun(db, user.email)) {
-    return json<ActionResult>({
-      ok: false,
-      error: "A run is already going. Wait for it to finish before starting another.",
+  //
+  // But a run in this table is only evidence that one was STARTED. Nothing
+  // advances it except a poll, so a browser closed mid-run, a lost tab or a bug
+  // in the panel leaves a row that is "in flight" forever and locks the feature
+  // permanently. Anything that has not moved in STALE_RUN_MS is therefore closed
+  // out rather than believed — Origami's own runs finish in one to five minutes,
+  // so this is generous by a wide margin.
+  const inFlight = await findRunningProspectRun(db, user.email);
+  if (inFlight) {
+    const lastMoved = inFlight.updatedAtMs ?? inFlight.createdAtMs ?? 0;
+    if (Date.now() - lastMoved < STALE_RUN_MS) {
+      return json<ActionResult>({
+        ok: false,
+        error: "A run is already going. Wait for it to finish, or cancel it, before starting another.",
+        // Named so the panel can show the run that is in the way. Without this
+        // the user gets a refusal and no route to the thing refusing them.
+        runId: inFlight.id,
+      });
+    }
+    await updateProspectRun(db, inFlight.id, {
+      status: "timed_out",
+      stage: "failed",
+      nextPollAt: null,
+      error: "This run stopped reporting progress and was closed out.",
     });
   }
 

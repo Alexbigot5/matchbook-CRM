@@ -1727,24 +1727,32 @@ export async function listProspectsForRuns(
 }
 
 /**
- * True when this viewer already has a run in flight.
+ * This viewer's run that is still in flight, or null.
  *
  * Checked before every start, because an Origami agent does one run at a time
  * and the org's concurrent-run pool is as small as ONE on a starter plan. Losing
  * that race costs a 429 and a confusing error; catching it here costs a read.
+ *
+ * Keyed on OUR stage rather than Origami's status, for the reason threadPayload
+ * gives: a run can be `completed` upstream and still owe us the `reading` step.
+ *
+ * Returns the row rather than a boolean so the caller can tell a live run from
+ * an abandoned one and say which run is in the way — a bare `true` left a stuck
+ * run blocking every future start with no way to see or cancel it.
  */
-export async function hasRunningProspectRun(
+export async function findRunningProspectRun(
   db: D1Database,
   viewerEmail: string,
-): Promise<boolean> {
+): Promise<StoredProspectRun | null> {
   const row = await db
     .prepare(
-      `SELECT id FROM prospect_runs
-        WHERE created_by = ? AND status = 'running' AND stage != 'failed' LIMIT 1`,
+      `SELECT ${RUN_COLS} FROM prospect_runs
+        WHERE created_by = ? AND stage NOT IN ('ready', 'failed')
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
     )
     .bind(viewerEmail)
-    .first<{ id: string }>();
-  return !!row;
+    .first<ProspectRunRow>();
+  return row ? toStoredRun(row) : null;
 }
 
 /**
