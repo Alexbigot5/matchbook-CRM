@@ -65,6 +65,12 @@ export type ProspectingPanelProps = {
   source: string;
   error: string;
   pending: boolean;
+  /**
+   * The brief currently being submitted, if any. Starting a run makes a real
+   * Origami call, so the POST can take seconds; without echoing it here the
+   * panel looks like it swallowed what the user just typed.
+   */
+  sending: string;
   /** False when ORIGAMI_API_KEY is unset. Everything stays read-only. */
   configured: boolean;
   onDraft: (value: string) => void;
@@ -89,6 +95,7 @@ export function ProspectingPanel({
   source,
   error,
   pending,
+  sending,
   configured,
   onDraft,
   onSend,
@@ -103,7 +110,7 @@ export function ProspectingPanel({
   onClose,
 }: ProspectingPanelProps) {
   const last = turns[turns.length - 1];
-  const running = !!last?.running;
+  const running = !!last?.running || !!sending;
   // Only the newest turn's results are selectable. Older turns are history —
   // their rows are still shown, but a thread of four runs with four separate
   // selection sets is a footer that cannot say what "Add 3" means.
@@ -192,7 +199,7 @@ export function ProspectingPanel({
             </div>
           )}
 
-          {!turns.length && <EmptyThread onPick={onDraft} disabled={!configured} />}
+          {!turns.length && !sending && <EmptyThread onPick={onDraft} disabled={!configured} />}
 
           {turns.map((turn, index) => (
             <Turn
@@ -209,6 +216,27 @@ export function ProspectingPanel({
               onCancel={onCancel}
             />
           ))}
+
+          {/* The optimistic turn. Rendered straight from the in-flight form data
+              so the brief appears the instant it is sent, rather than after the
+              round trip that creates the agent at Origami. */}
+          {sending && (
+            <div>
+              <div style={css("display:flex; justify-content:flex-end; margin-bottom:11px;")}>
+                <div
+                  style={css(
+                    "max-width:82%; background:#1a1a1a; color:#fff; border-radius:11px; padding:9px 13px; font-size:12.5px; line-height:1.5;",
+                  )}
+                >
+                  {sending}
+                </div>
+              </div>
+              <div style={css(CARD + "padding:13px 15px; display:flex; align-items:center; gap:11px;")}>
+                <Spinner />
+                <div style={css("font-size:12.5px; color:#3a3a38;")}>Handing this to the agent…</div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* FOOTER: what happens to the ticked rows */}
@@ -255,26 +283,32 @@ export function ProspectingPanel({
                 style={css(SELECT + "width:96px;")}
               />
             )}
-            <Box
-              as="button"
-              onClick={onExport}
-              style={css(GHOST + "padding:5px 10px; font-size:11.5px;")}
-              hover={css("background:#f4f4f1;")}
-            >
-              Export CSV
-            </Box>
-            <Box
-              as="button"
-              onClick={onPromote}
-              disabled={pending || !chosen.length}
-              style={css(
-                PRIMARY +
-                  `padding:5px 12px; font-size:11.5px; opacity:${pending || !chosen.length ? "0.5" : "1"};`,
-              )}
-              hover={css("background:#333;")}
-            >
-              {pending ? "Adding…" : `Add ${chosen.length} to Loop ${loop}`}
-            </Box>
+            {/* Kept together and pushed right, so that when the row wraps — which
+                it does at this width once the Loop 2 source box appears — the
+                buttons move as a pair instead of the primary stranding itself
+                alone on the left of a second line. */}
+            <div style={css("display:flex; gap:8px; margin-left:auto;")}>
+              <Box
+                as="button"
+                onClick={onExport}
+                style={css(GHOST + "padding:5px 10px; font-size:11.5px;")}
+                hover={css("background:#f4f4f1;")}
+              >
+                Export CSV
+              </Box>
+              <Box
+                as="button"
+                onClick={onPromote}
+                disabled={pending || !chosen.length}
+                style={css(
+                  PRIMARY +
+                    `padding:5px 12px; font-size:11.5px; opacity:${pending || !chosen.length ? "0.5" : "1"};`,
+                )}
+                hover={css("background:#333;")}
+              >
+                {pending ? "Adding…" : `Add ${chosen.length} to Loop ${loop}`}
+              </Box>
+            </div>
           </div>
         )}
 
