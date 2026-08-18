@@ -7,10 +7,13 @@ import {
   dedupeProspects,
   mapColumns,
   mapRow,
+  pickResultTable,
+  TABLE_SAMPLE_ROWS,
   toContactRow,
   type Prospect,
   type ProspectRun,
   type RunCounts,
+  type TableCandidate,
 } from "../crm/prospecting";
 import {
   createOrigamiClient,
@@ -20,6 +23,7 @@ import {
   type OrigamiFlatRow,
   type OrigamiResult,
   type OrigamiRun,
+  type OrigamiTable,
 } from "../lib/origami.server";
 import {
   PROSPECT_POLL_RULE,
@@ -101,6 +105,17 @@ const MAX_PROMOTE = 200;
  * one while still self-healing inside a coffee break.
  */
 const STALE_RUN_MS = 15 * 60 * 1000;
+
+/**
+ * Tables examined before deciding which one holds a run's results.
+ *
+ * Each one costs two reads. Reads are free in credits, but they still count
+ * against Origami's 100-per-minute per-organization ceiling, and a run that
+ * leaves a dozen scratch tables behind should not be able to turn a single poll
+ * into two dozen calls. Three covers the pool-plus-deliverable shape this
+ * exists for, with room to spare.
+ */
+const MAX_TABLE_CANDIDATES = 3;
 
 // ---------------------------------------------------------------------------
 // Provider error translation
@@ -242,7 +257,7 @@ async function advanceRun(
       return;
     }
 
-    await recordRunOutcome(db, run, res.data, res.retryAfterSeconds, now);
+    await recordRunOutcome(db, client, run, res.data, res.retryAfterSeconds, now);
     return;
   }
 
@@ -261,6 +276,7 @@ async function advanceRun(
  */
 async function recordRunOutcome(
   db: D1Database,
+  client: OrigamiClient,
   run: StoredProspectRun,
   data: OrigamiRun | undefined,
   retryAfterSeconds: number | undefined,
@@ -282,9 +298,13 @@ async function recordRunOutcome(
   const response = data?.response ?? null;
   const actions = Array.isArray(response?.actions) ? response.actions : [];
   const tables = Array.isArray(response?.tables) ? response.tables : [];
-  // The table with the most leads, not the first: a run that creates a scratch
-  // table before its real one lists both, and the results are in the big one.
-  const table = [...tables].sort((a, b) => (b.leadCount ?? 0) - (a.leadCount ?? 0))[0];
+  // Which table holds the results is NOT simply the biggest one, and this used
+  // to sort by leadCount and take the first. See pickResultTable's header: a
+  // brief carrying a hard requirement makes the agent build a raw pool and then
+  // a filtered deliverable, and the deliverable is the SMALLER of the two. Do
+  // not "simplify" this back into a sort — it silently serves up the very rows
+  // the user asked to exclude.
+  const table = await chooseResultTable(client, tables);
 
   // Origami documents response.text as null on errored and timed_out, so this
   // must never be rendered as a summary for those.
@@ -333,6 +353,72 @@ async function recordRunOutcome(
       missingColumns: [],
     },
   });
+}
+
+/**
+ * Work out which of a finished run's tables the results are in.
+ *
+ * The decision itself is pickResultTable() in app/crm/prospecting.ts, which
+ * explains why size alone is the wrong signal. This half only gathers the
+ * evidence it needs: for each candidate, the columns and one page of rows.
+ *
+ * WHY IT IS AFFORDABLE TO CHECK RATHER THAN GUESS. Origami documents table reads
+ * as free, so there is no credit cost to looking, and a run that has already
+ * taken one to five minutes is not troubled by a few hundred milliseconds more.
+ * The costs that do exist are bounded deliberately: nothing happens at all in
+ * the single-table case, which is the common one, and at most
+ * MAX_TABLE_CANDIDATES tables are examined so a run that left a dozen scratch
+ * tables behind cannot turn one poll into two dozen calls. Those calls are free
+ * in credits but they are not free against Origami's 100-per-minute
+ * per-organization ceiling, which is the real reason for the cap.
+ */
+async function chooseResultTable(
+  client: OrigamiClient,
+  tables: OrigamiTable[],
+): Promise<OrigamiTable | undefined> {
+  // The common case: nothing to choose between, so nothing is spent choosing.
+  if (tables.length <= 1) return tables[0];
+
+  const ranked = [...tables].sort((a, b) => (b.leadCount ?? 0) - (a.leadCount ?? 0));
+  const shortlist = ranked.slice(0, MAX_TABLE_CANDIDATES);
+
+  const candidates: TableCandidate[] = [];
+  for (const table of shortlist) {
+    const id = asString(table.id);
+    if (!id) continue;
+
+    // A candidate that cannot be sampled is still passed along, with an empty
+    // sample. pickResultTable reads that as "unknown", not as "no emails" —
+    // scoring an unread table as zero would hand the win to whichever table
+    // happened to respond.
+    let columns: TableCandidate["columns"] = [];
+    let sampledRows: TableCandidate["sampledRows"] = [];
+
+    const columnsRes = await client.listColumns(id);
+    if (columnsRes.ok) {
+      columns = columnsRes.data?.items ?? [];
+      const rowsRes = await client.listRows(id);
+      if (rowsRes.ok) {
+        sampledRows = (rowsRes.data?.items ?? [])
+          .slice(0, TABLE_SAMPLE_ROWS)
+          // Same defensive unwrap readTable does: a flat row is either
+          // { slug: value } at the top level or under `cells`.
+          .map((row) => (row.cells as Record<string, unknown>) ?? row);
+      }
+    }
+
+    candidates.push({ table, columns, sampledRows });
+  }
+
+  const pick = pickResultTable(candidates);
+  // Logged rather than stored: it explains a surprising choice to whoever is
+  // reading `wrangler tail`, and it is diagnostic detail about the provider's
+  // tables, not something the panel should be reporting to a salesperson.
+  console.log(`[prospect] table choice: ${pick.reason}`);
+
+  // pickResultTable only ever returns one of the tables it was handed, so the
+  // fallback covers the case where every candidate lacked an id.
+  return (pick.table as OrigamiTable | null) ?? ranked[0];
 }
 
 /**
