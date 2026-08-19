@@ -10,6 +10,7 @@ import {
   pickResultTable,
   TABLE_SAMPLE_ROWS,
   toContactRow,
+  type ColumnMap,
   type Prospect,
   type ProspectRun,
   type RunCounts,
@@ -18,6 +19,7 @@ import {
 import {
   createOrigamiClient,
   DEFAULT_RETRY_AFTER_SECONDS,
+  type OrigamiAction,
   type OrigamiAgentCreated,
   type OrigamiClient,
   type OrigamiFlatRow,
@@ -304,7 +306,7 @@ async function recordRunOutcome(
   // a filtered deliverable, and the deliverable is the SMALLER of the two. Do
   // not "simplify" this back into a sort — it silently serves up the very rows
   // the user asked to exclude.
-  const table = await chooseResultTable(client, tables);
+  const table = await chooseResultTable(client, tablesFromRun(tables, actions));
 
   // Origami documents response.text as null on errored and timed_out, so this
   // must never be rendered as a summary for those.
@@ -372,10 +374,51 @@ async function recordRunOutcome(
  * in credits but they are not free against Origami's 100-per-minute
  * per-organization ceiling, which is the real reason for the cap.
  */
+/**
+ * Every table a finished run mentions, deduped by id, `response.tables[]` first.
+ *
+ * `response.actions[]` is the audit trail of what the agent changed and carries
+ * a tableId, tableName and leadCount of its own. A table named only there is one
+ * we would otherwise never consider — and that is a real risk in exactly the
+ * shape this feature exists for, where the agent builds a candidate pool and
+ * then a smaller qualified table and we want the qualified one.
+ *
+ * Entries with no id are dropped, since nothing can be read from them, unless
+ * that would empty the list — in which case the originals are handed back and
+ * the caller's own `asString(table?.id)` decides, exactly as before.
+ */
+function tablesFromRun(tables: OrigamiTable[], actions: OrigamiAction[]): OrigamiTable[] {
+  const merged: OrigamiTable[] = [];
+  const seen = new Set<string>();
+
+  const add = (table: OrigamiTable) => {
+    const id = asString(table.id);
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    merged.push(table);
+  };
+
+  for (const table of tables) add(table);
+  for (const action of actions) {
+    if (!action?.tableId) continue;
+    add({ id: action.tableId, name: action.tableName, leadCount: action.leadCount });
+  }
+
+  return merged.length ? merged : tables;
+}
+
 async function chooseResultTable(
   client: OrigamiClient,
   tables: OrigamiTable[],
 ): Promise<OrigamiTable | undefined> {
+  // Always logged, including the single-table case below, because "what did the
+  // run actually report?" is the first question every diagnosis starts from and
+  // it is unanswerable after the fact from a stored run.
+  console.log(
+    `[prospect] run reported ${tables.length} table(s): ` +
+      tables.map((t) => `${asString(t.id) || "?"}("${t.name ?? ""}", ${t.leadCount ?? "?"})`).join(", "),
+  );
+
   // The common case: nothing to choose between, so nothing is spent choosing.
   if (tables.length <= 1) return tables[0];
 
@@ -471,6 +514,8 @@ async function readTable(
     .slice(0, MAX_PROSPECTS_PER_RUN)
     .map((row) => mapRow((row.cells as Record<string, unknown>) ?? row, map));
 
+  logTableShape(run.tableId, columnsRes.data?.items ?? [], map, raw, mapped);
+
   const validated = validateProspectRows(mapped);
   if (!validated.ok) {
     await updateProspectRun(db, run.id, { stage: "ready", error: validated.error });
@@ -495,6 +540,53 @@ async function readTable(
   };
 
   await updateProspectRun(db, run.id, { stage: "ready", counts, error: null });
+}
+
+/**
+ * Log the shape of what we just read: the table's columns, what they resolved
+ * to, and what TYPE the email cells arrived as.
+ *
+ * Types, never values. This is a log and these rows are people — but the shape
+ * of a cell is the one thing a screenshot of the panel can never tell you, and
+ * it is what a whole class of failure hides in. A run reported "0 verified · 0
+ * likely · 43 no match" with no missing column, which is only possible if the
+ * email column was found and every cell in it read as empty; `emailCellTypes`
+ * is the line that says whether those cells were empty or merely wrapped in a
+ * shape cell() couldn't unwrap.
+ *
+ * `withEmail` next to `rows` is the same check the table-choice heuristic runs,
+ * on the table actually chosen, so a bad pick and a bad read stop looking alike.
+ */
+function logTableShape(
+  tableId: string,
+  columns: { slug?: string; name?: string; kind?: string }[],
+  map: ColumnMap,
+  raw: OrigamiFlatRow[],
+  mapped: Record<string, string>[],
+): void {
+  const built = columns
+    .map((c) => `${c.slug ?? "?"}:${c.kind ?? "?"}`)
+    .join(",")
+    .slice(0, 400);
+  const resolved = Object.entries(map.bySlug)
+    .map(([field, slug]) => `${field}=${slug}`)
+    .join(",");
+  const emailSlug = map.bySlug.email;
+  const shapes = raw
+    .slice(0, 3)
+    .map((row) => {
+      const flat = (row.cells as Record<string, unknown>) ?? row;
+      const value = emailSlug ? flat[emailSlug] : undefined;
+      if (value === null) return "null";
+      return Array.isArray(value) ? "array" : typeof value;
+    })
+    .join(",");
+
+  console.log(
+    `[prospect] table=${tableId} columns=[${built}] resolved=[${resolved}] ` +
+      `missing=[${map.missing.join(",")}] rows=${raw.length} ` +
+      `withEmail=${mapped.filter((m) => !!m.email).length} emailCellTypes=[${shapes}]`,
+  );
 }
 
 // ---------------------------------------------------------------------------

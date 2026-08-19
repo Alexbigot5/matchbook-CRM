@@ -73,7 +73,17 @@ export function composeBrief(prompt: string): string {
     `"Email Status" should say whether the email address is verified or a guess. ` +
     `"Phone Number" is optional — leave it empty unless you found a real one. ` +
     `"Source URL" should link to where you found the person. ` +
-    `Leave a cell empty rather than inventing a value.`
+    `Leave a cell empty rather than inventing a value. ` +
+    // Both of these are asking for the DELIVERABLE, not the working set, and
+    // both are here because a run got them wrong. An agent asked for ten people
+    // built a 43-row candidate pool, qualified four of them, and reported those
+    // four only in its reply — so the table we read was the pool, at four times
+    // the size asked for, with an empty email on every row.
+    `The final table must hold only the people who meet every requirement above, ` +
+    `including how many were asked for — candidates you could not qualify do not ` +
+    `belong in it. ` +
+    `Put every value in the table's cells; a summary in your reply is not a ` +
+    `substitute for a filled-in column.`
   );
 }
 
@@ -198,18 +208,88 @@ export function mapColumns(columns: { slug?: string; name?: string; kind?: strin
   return { bySlug, missing };
 }
 
-/** Pull one field out of a flat row, as a trimmed string. */
+/**
+ * Keys a wrapped flat cell has been seen to carry its actual value under, most
+ * specific first. `value` and `text` are the general envelopes; the rest are the
+ * shapes typed enrichment columns use.
+ */
+const CELL_VALUE_KEYS = [
+  "value",
+  "text",
+  "email",
+  "url",
+  "address",
+  "number",
+  "display",
+  "label",
+  "raw",
+] as const;
+
+/** How deep to chase a wrapped value before giving up. Envelopes nest at most twice. */
+const MAX_CELL_DEPTH = 3;
+
+/**
+ * Pull one field out of a flat row, as a trimmed string.
+ *
+ * UNWRAPS RATHER THAN DROPS, and that is the whole point. This used to return ""
+ * for anything that wasn't a scalar, reasoning that "a flat cell should be a
+ * scalar, so an object means the caller forgot cells=flat". That reasoning holds
+ * for the columns the agent types in — Full Name, Job Title, Company come back as
+ * plain strings — and fails for exactly the columns that matter most: an
+ * ENRICHMENT column (Work Email, Phone Number, Source URL) carries its result in
+ * an envelope, so every one of them read as empty while the text columns read
+ * fine.
+ *
+ * The damage was not limited to blank cells. emailFillRate() scores a candidate
+ * table by how many of its sampled rows have an email, through this same
+ * function, so every table scored 0%; pickResultTable()'s tier then contained
+ * every table and size broke the tie — handing back the raw candidate pool over
+ * the agent's smaller qualified table. A brief asking for 10 people came back
+ * with 43 rows, all of them marked "no match", for a run whose own summary
+ * listed four verified addresses.
+ *
+ * So: scalars pass through, arrays yield their first usable entry, and an object
+ * is searched for a value key. A single-property object is unwrapped even under
+ * a key we don't know — losing the field outright is worse than following the
+ * one branch there is. Anything genuinely unreadable still returns "", because
+ * stringifying it would put "[object Object]" in front of a salesperson.
+ */
 function cell(row: Record<string, unknown>, slug: string | undefined): string {
   if (!slug) return "";
-  const raw = row[slug];
+  return readCellValue(row[slug], 0);
+}
+
+function readCellValue(raw: unknown, depth: number): string {
   if (raw === null || raw === undefined) return "";
   if (typeof raw === "string") return raw.trim();
   if (typeof raw === "number" || typeof raw === "boolean") return String(raw);
-  // A flat cell should be a scalar. An object here means the caller forgot
-  // `cells=flat`, or the column is polymorphic after all — either way there is
-  // nothing sensible to render, and stringifying it would put "[object Object]"
-  // in front of a salesperson.
-  return "";
+  if (depth >= MAX_CELL_DEPTH || typeof raw !== "object") return "";
+
+  if (Array.isArray(raw)) {
+    // A multi-value column (several found addresses, say). The first usable
+    // entry is the one the agent ranked highest.
+    for (const entry of raw) {
+      const found = readCellValue(entry, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+
+  const obj = raw as Record<string, unknown>;
+  for (const key of CELL_VALUE_KEYS) {
+    // Object.hasOwn, not `in`: `in` walks the prototype chain, so a bare object
+    // would answer to "constructor". Same reasoning as isAllowed() in
+    // app/lib/allowlist.ts.
+    if (!Object.hasOwn(obj, key)) continue;
+    const found = readCellValue(obj[key], depth + 1);
+    if (found) return found;
+  }
+
+  // A wrapper under a name we don't know. With exactly one property there is
+  // only one thing it could be; with several we would be guessing which is the
+  // value and which is metadata, and a guess here lands in a contact record.
+  const entries = Object.entries(obj);
+  return entries.length === 1 ? readCellValue(entries[0][1], depth + 1) : "";
 }
 
 /**
