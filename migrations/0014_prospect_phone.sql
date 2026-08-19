@@ -1,0 +1,16 @@
+-- A phone number for a prospect, when the agent's table carried one.
+--
+-- `contacts` has had a phone column since 0001 and the contact detail panel
+-- already renders it, but nothing in the prospecting pipeline ever asked for a
+-- number or captured one: toContactRow() promoted every prospect with a
+-- hardcoded `phone: null`. This is the storage half of wiring it through — see
+-- REQUESTED_COLUMNS / COLUMN_ALIASES in app/crm/prospecting.ts for the ask, and
+-- validateProspectRows() in app/lib/validate.ts for what happens to the answer.
+--
+-- Nullable with no default and no CHECK, deliberately. Most tables an agent
+-- builds will not have this column at all, and a scraped number arrives in
+-- every shape there is — "+1 (415) 555-0134 ext. 22" as readily as
+-- "4155550134". It is length-capped on the way in (LIMITS.phone) and never
+-- format-validated, the same treatment `location` and `linkedin` get and the
+-- same treatment contacts.phone already gets on CSV import.
+ALTER TABLE prospects ADD COLUMN phone TEXT;

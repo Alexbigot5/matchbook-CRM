@@ -45,6 +45,7 @@ export const REQUESTED_COLUMNS = [
   { field: "company", label: "Company", slug: "company" },
   { field: "email", label: "Work Email", slug: "work-email" },
   { field: "emailStatus", label: "Email Status", slug: "email-status" },
+  { field: "phone", label: "Phone Number", slug: "phone-number" },
   { field: "linkedin", label: "LinkedIn URL", slug: "linkedin-url" },
   { field: "location", label: "Location", slug: "location" },
   { field: "sourceUrl", label: "Source URL", slug: "source-url" },
@@ -70,6 +71,7 @@ export function composeBrief(prompt: string): string {
     `Return the results as a table with these columns, using exactly these names: ` +
     `${columns}. ` +
     `"Email Status" should say whether the email address is verified or a guess. ` +
+    `"Phone Number" is optional — leave it empty unless you found a real one. ` +
     `"Source URL" should link to where you found the person. ` +
     `Leave a cell empty rather than inventing a value.`
   );
@@ -101,6 +103,7 @@ const COLUMN_ALIASES: Record<ProspectField, readonly string[]> = {
   company: ["company", "company-name", "organization", "organisation", "employer", "account"],
   email: ["work-email", "email", "email-address", "ceo-email", "contact-email", "work-email-address"],
   emailStatus: ["email-status", "email-confidence", "email-verification", "email-validity"],
+  phone: ["phone-number", "phone", "mobile", "telephone", "tel", "direct-dial", "contact-number"],
   linkedin: ["linkedin-url", "linkedin", "linkedin-profile", "li-url", "profile-url"],
   location: ["location", "city", "region", "geo", "country"],
   sourceUrl: ["source-url", "source", "url", "website", "profile", "link"],
@@ -183,8 +186,10 @@ export function mapColumns(columns: { slug?: string; name?: string; kind?: strin
   }
 
   // Only the fields whose absence changes what a human sees are reported.
-  // emailStatus and sourceUrl are enrichments on top; their absence degrades
-  // gracefully and saying so would just be noise on every run.
+  // emailStatus, phone and sourceUrl are enrichments on top; their absence
+  // degrades gracefully and saying so would just be noise on every run — a
+  // phone number in particular is missing from most tables by nature, so
+  // reporting it would put a warning on runs that went fine.
   const reportable: ProspectField[] = ["name", "title", "company", "email", "linkedin"];
   const missing = REQUESTED_COLUMNS.filter(
     (c) => reportable.includes(c.field) && !bySlug[c.field],
@@ -235,6 +240,7 @@ export function mapRow(row: Record<string, unknown>, map: ColumnMap): Record<str
     company: cell(row, bySlug.company),
     title: cell(row, bySlug.title),
     email,
+    phone: cell(row, bySlug.phone),
     linkedin: cell(row, bySlug.linkedin),
     location: cell(row, bySlug.location),
     sourceUrl: cell(row, bySlug.sourceUrl),
@@ -432,6 +438,7 @@ export type Prospect = {
   company: string | null;
   title: string | null;
   email: string | null;
+  phone: string | null;
   linkedin: string | null;
   location: string | null;
   sourceUrl: string | null;
@@ -459,7 +466,11 @@ export function toContactRow(
     name: prospect.name,
     company: prospect.company ?? "",
     email: prospect.email,
-    phone: null,
+    // Carried through rather than nulled: `contacts` has a phone column and the
+    // detail panel already renders it, so a number the agent found is one fewer
+    // thing to look up by hand. Length-capped in validateProspectRows, never
+    // format-checked — a scraped number arrives in every shape there is.
+    phone: prospect.phone,
     linkedin: prospect.linkedin,
     loops: [opts.loop],
     owner: opts.owner,

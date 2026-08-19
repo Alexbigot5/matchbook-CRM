@@ -1065,6 +1065,7 @@ export type ProspectFields = {
   company: string | null;
   title: string | null;
   email: string | null;
+  phone: string | null;
   linkedin: string | null;
   location: string | null;
   sourceUrl: string | null;
@@ -1119,6 +1120,11 @@ export function validateProspectRows(raw: unknown):
     const company = asString(r.company).slice(0, LIMITS.company);
     const title = asString(r.title).slice(0, LIMITS.title);
     const location = asString(r.location).slice(0, LIMITS.source);
+    // Capped, not format-checked, exactly like location and linkedin. A scraped
+    // number arrives as "+1 (415) 555-0134 ext. 22" as readily as "4155550134",
+    // and rejecting the shapes a regex doesn't know would throw away the field's
+    // whole value. validateContact treats it the same way.
+    const phone = asString(r.phone).slice(0, LIMITS.phone);
     const linkedin = asString(r.linkedin).slice(0, LIMITS.linkedin);
     const sourceUrl = asString(r.sourceUrl).slice(0, LIMITS.sourceUrl);
 
@@ -1139,6 +1145,7 @@ export function validateProspectRows(raw: unknown):
       company: company || null,
       title: title || null,
       email: email || null,
+      phone: phone || null,
       linkedin: linkedin || null,
       location: location || null,
       sourceUrl: sourceUrl || null,

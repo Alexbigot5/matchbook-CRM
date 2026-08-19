@@ -568,7 +568,7 @@ async function csvResponse(db: D1Database, runId: string, viewerEmail: string) {
   if (!runs.length) return json({ ok: false, error: "That run no longer exists." }, 404);
 
   const prospects = await listProspects(db, runId);
-  const header = ["Name", "Title", "Company", "Email", "Email confidence", "LinkedIn", "Location", "Source"];
+  const header = ["Name", "Title", "Company", "Email", "Email confidence", "Phone", "LinkedIn", "Location", "Source"];
   const lines = [header.join(",")];
   for (const p of prospects) {
     if (p.dedupe) continue;
@@ -579,6 +579,7 @@ async function csvResponse(db: D1Database, runId: string, viewerEmail: string) {
         p.company ?? "",
         p.email ?? "",
         p.emailConfidence,
+        p.phone ?? "",
         p.linkedin ?? "",
         p.location ?? "",
         p.sourceUrl ?? "",
