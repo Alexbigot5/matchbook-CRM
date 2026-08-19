@@ -1534,6 +1534,7 @@ type ProspectRowRecord = {
   company: string | null;
   title: string | null;
   email: string | null;
+  phone: string | null;
   linkedin: string | null;
   location: string | null;
   source_url: string | null;
@@ -1547,7 +1548,7 @@ const RUN_COLS = `id, agent_id, provider_run_id, previous_run_id, prompt, status
   next_poll_at, summary, actions, question, table_id, counts, error,
   created_by, created_by_name, created_at, updated_at`;
 
-const PROSPECT_COLS = `id, run_id, position, name, company, title, email, linkedin,
+const PROSPECT_COLS = `id, run_id, position, name, company, title, email, phone, linkedin,
   location, source_url, email_confidence, dedupe, existing_contact_id, promoted_contact_id`;
 
 /**
@@ -1629,6 +1630,7 @@ function toProspect(row: ProspectRowRecord): Prospect {
     company: row.company,
     title: row.title,
     email: row.email,
+    phone: row.phone,
     linkedin: row.linkedin,
     location: row.location,
     sourceUrl: row.source_url,
@@ -1868,9 +1870,9 @@ export async function replaceProspects(
       db
         .prepare(
           `INSERT INTO prospects
-             (id, run_id, position, name, company, title, email, linkedin, location,
+             (id, run_id, position, name, company, title, email, phone, linkedin, location,
               source_url, email_confidence, dedupe, existing_contact_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           crypto.randomUUID(),
@@ -1880,6 +1882,7 @@ export async function replaceProspects(
           row.company,
           row.title,
           row.email,
+          row.phone,
           row.linkedin,
           row.location,
           row.sourceUrl,

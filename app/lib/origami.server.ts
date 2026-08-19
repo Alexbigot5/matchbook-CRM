@@ -346,9 +346,28 @@ export function createOrigamiClient(apiKey: string, projectId = "") {
      *
      * `cells=flat` asks for the plain { slug: value } shape instead of the
      * polymorphic typed cells, which is all we need and far less to map.
-     * `defaults=false` bypasses the table's saved filters and sort so we read
-     * every row in insertion order — the saved view is a dashboard preference,
-     * and inheriting it would silently hide rows from a table we just created.
+     *
+     * `defaults` IS DELIBERATELY NOT SENT, so the read inherits the table's
+     * saved filters and sort — the view docs.origami.chat/reading-data describes
+     * as "the same view you see in the Origami dashboard", and the flow their
+     * fetch-the-data example follows.
+     *
+     * This used to pass `defaults=false`, reasoned as "the saved view is a
+     * dashboard preference, and inheriting it would silently hide rows from a
+     * table we just created". That reasoning is backwards for a table an AGENT
+     * built. A hard requirement in the brief — "must have a work email", "only
+     * companies still hiring" — is encoded by Origami as a default filter or
+     * relevance condition ON the table, not as a second table. So the default
+     * view IS the qualified deliverable, and bypassing it reads every candidate
+     * ever added, in raw insertion order: a brief asking for ten people came
+     * back with a hundred and fifty, and because only the filtered subset is
+     * enriched, the panel's checklist read "0 verified · 0 likely · 150 no
+     * match" for a run whose own summary said it had built a small table of
+     * qualified contacts with verified emails.
+     *
+     * Don't reintroduce it without rereading docs.origami.chat/reading-data
+     * first. If some future caller genuinely needs the unfiltered pool, that is
+     * a separate parameter on this method, not a change to what every read does.
      */
     listRows(tableId: string, cursor?: string) {
       const safe = safeId(tableId);
@@ -356,7 +375,6 @@ export function createOrigamiClient(apiKey: string, projectId = "") {
       return call<OrigamiList<OrigamiFlatRow>>("GET", `/tables/${safe}/rows`, {
         query: {
           cells: "flat",
-          defaults: "false",
           limit: ORIGAMI_ROW_PAGE,
           ...(cursor ? { cursor } : {}),
         },
