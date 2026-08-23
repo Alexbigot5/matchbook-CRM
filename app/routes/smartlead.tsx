@@ -5,8 +5,10 @@ import { ownerAvatar } from "../crm/data";
 import {
   buildSequencePlan,
   duplicateStatKeys,
+  planContactSends,
   planImport,
   planLeads,
+  sendsByLead,
   statKey,
   totalStatsBySequence,
   type SequencePlan,
@@ -20,8 +22,10 @@ import {
   appendSequenceStep,
   bindCampaign,
   clearSequenceSteps,
+  countEmailedLeads,
   createManyContacts,
   getCampaignBindings,
+  listCampaignLeadState,
   listContacts,
   listPushedContactIds,
   listPushedEmails,
@@ -29,6 +33,7 @@ import {
   listSequenceStepsByLoop,
   listTemplates,
   materializeSequenceSteps,
+  recordContactSends,
   recordPushedLeads,
   recordVariantStats,
   removeSequenceStep,
@@ -117,6 +122,8 @@ export type LoopView = {
   leads: {
     eligible: number;
     alreadyPushed: number;
+    /** Of those, how many Smartlead has confirmed at least one send to. */
+    emailed: number;
     noEmail: number;
     inOtherCampaign: number;
     wrongStatus: Record<string, number>;
@@ -149,11 +156,19 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     // campaign so a loop's push can exclude the *other* loop's leads — a contact
     // in loops [1,2] would otherwise receive two concurrent cold sequences.
     const pushedByLoop: Record<number, Set<string>> = {};
+    // How many of those leads Smartlead has confirmed actually receiving an
+    // email. Shown next to "already in campaign" because the two numbers are
+    // routinely far apart — a campaign paced at 40 new leads a day has most of
+    // its pushed contacts still waiting — and the gap between them is the thing
+    // an operator is really asking about when they wonder whether the sequence
+    // is running.
+    const emailedByLoop: Record<number, number> = {};
     for (const loop of LOOPS) {
       const binding = bindings[loop];
       pushedByLoop[loop] = binding
         ? await listPushedContactIds(DB, binding.campaignId)
         : new Set<string>();
+      emailedByLoop[loop] = binding ? await countEmailedLeads(DB, binding.campaignId) : 0;
     }
 
     const loops: LoopView[] = LOOPS.map((loop) => {
@@ -192,6 +207,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
           // server-side on push so the client can't influence who gets emailed.
           eligible: leadPlan.leads.length,
           alreadyPushed: leadPlan.alreadyPushed,
+          emailed: emailedByLoop[loop],
           noEmail: leadPlan.noEmail,
           inOtherCampaign: leadPlan.inOtherCampaign,
           wrongStatus: leadPlan.wrongStatus,
@@ -841,14 +857,12 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
        */
       case "syncStats": {
         if (!binding) return { ok: false, error: "Link a campaign first." };
-        const [templates, steps] = await Promise.all([
+        const [templates, steps, leadState] = await Promise.all([
           listTemplates(DB, Date.now()),
           listSequenceSteps(DB, loop),
+          listCampaignLeadState(DB, binding.campaignId),
         ]);
         const plan = buildSequencePlan(templates, loop, steps);
-        if (!plan.included.length) {
-          return { ok: false, error: "No uploaded steps on this loop to attribute numbers to." };
-        }
 
         const rows: SmartleadStatRow[] = [];
         let total: number | null = null;
@@ -868,50 +882,84 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           if (page === SMARTLEAD_STATS_MAX_PAGES - 1) exhausted = true;
         }
 
-        if (exhausted && total !== null && total > rows.length) {
-          return {
-            ok: false,
-            error: `This campaign has ${total} sends, more than one sync can total. Nothing was recorded, because a partial total would read as a drop in performance.`,
-          };
+        /*
+         * Half one: the sends land on the CONTACTS they were sent to.
+         *
+         * This runs before the template totals and is not gated by either of
+         * their guards, because the two halves fail differently. A template
+         * counter is an absolute lifetime total, so a half-read campaign must
+         * write nothing. A contact's "we emailed this person" is a per-person
+         * fact keyed on the sequence step: reading only the first pages marks
+         * fewer people, never the wrong one, and the next press picks up the
+         * rest. Refusing to mark anyone because the OTHER half can't be totalled
+         * would leave contacts reading "New" months after a campaign emailed
+         * them, which is the bug this exists to fix.
+         */
+        const sends = planContactSends(leadState, sendsByLead(rows));
+        const marked = await recordContactSends(
+          DB,
+          binding.campaignId,
+          binding.campaignName,
+          sends,
+          user.name,
+        );
+        const contactSummary = marked.touchpoints
+          ? `Logged ${marked.touchpoints} send${marked.touchpoints === 1 ? "" : "s"} onto ` +
+            `${sends.length} contact${sends.length === 1 ? "" : "s"}` +
+            (marked.contacted
+              ? `, ${marked.contacted} now Contacted.`
+              : ".")
+          : "No new sends to record onto contacts.";
+
+        // Half two: the same rows, totalled by step onto the template counters.
+        let statsSummary: string;
+        if (!plan.included.length) {
+          statsSummary = "No uploaded steps on this loop to attribute numbers to.";
+        } else if (exhausted && total !== null && total > rows.length) {
+          statsSummary =
+            `Template numbers were left alone: this campaign has ${total} sends, more than ` +
+            `one sync can total, and a partial total would read as a drop in performance.`;
+        } else {
+          const bySeq = totalStatsBySequence(rows);
+          const written: string[] = [];
+          const skippedAb: string[] = [];
+          const skippedRepeat: string[] = [];
+          // The builder can put the same (template, variant) in two steps. These
+          // counters are ABSOLUTE totals, so writing both would leave the template
+          // reporting whichever step happened to be written last as if it were the
+          // whole picture. Skipped, and said out loud.
+          const repeated = duplicateStatKeys(plan.included);
+
+          for (const step of plan.included) {
+            if (step.variantCount > 1) {
+              skippedAb.push(step.name);
+              continue;
+            }
+            const key = statKey(step);
+            if (key && repeated.has(key)) {
+              skippedRepeat.push(`${step.name} · ${step.slots[0]}`);
+              continue;
+            }
+            const totals = bySeq.get(step.seqNumber);
+            if (!totals) continue;
+            const ok = await recordVariantStats(
+              DB,
+              { templateId: step.templateId, slot: step.slots[0] },
+              { sends: totals.sends, opens: totals.opens, replies: totals.replies, meetings: null },
+            );
+            if (ok) written.push(step.name);
+          }
+
+          statsSummary =
+            `Updated ${written.length} template${written.length === 1 ? "" : "s"} from ${rows.length} sends` +
+            (skippedAb.length ? `. A/B not split: ${skippedAb.join(", ")}` : "") +
+            (skippedRepeat.length
+              ? `. In the sequence more than once, so left alone: ${[...new Set(skippedRepeat)].join(", ")}`
+              : "") +
+            ".";
         }
 
-        const bySeq = totalStatsBySequence(rows);
-        const written: string[] = [];
-        const skippedAb: string[] = [];
-        const skippedRepeat: string[] = [];
-        // The builder can put the same (template, variant) in two steps. These
-        // counters are ABSOLUTE totals, so writing both would leave the template
-        // reporting whichever step happened to be written last as if it were the
-        // whole picture. Skipped, and said out loud.
-        const repeated = duplicateStatKeys(plan.included);
-
-        for (const step of plan.included) {
-          if (step.variantCount > 1) {
-            skippedAb.push(step.name);
-            continue;
-          }
-          const key = statKey(step);
-          if (key && repeated.has(key)) {
-            skippedRepeat.push(`${step.name} · ${step.slots[0]}`);
-            continue;
-          }
-          const totals = bySeq.get(step.seqNumber);
-          if (!totals) continue;
-          const ok = await recordVariantStats(
-            DB,
-            { templateId: step.templateId, slot: step.slots[0] },
-            { sends: totals.sends, opens: totals.opens, replies: totals.replies, meetings: null },
-          );
-          if (ok) written.push(step.name);
-        }
-
-        const summary =
-          `Updated ${written.length} template${written.length === 1 ? "" : "s"} from ${rows.length} sends` +
-          (skippedAb.length ? `. A/B not split: ${skippedAb.join(", ")}` : "") +
-          (skippedRepeat.length
-            ? `. In the sequence more than once, so left alone: ${[...new Set(skippedRepeat)].join(", ")}`
-            : "") +
-          ".";
+        const summary = `${statsSummary} ${contactSummary}`;
         await stampCampaignSync(DB, loop, "stats", summary);
         return { ok: true, message: summary };
       }

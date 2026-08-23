@@ -14,6 +14,9 @@ import {
 import {
   buildSequencePlan,
   MAX_SEQUENCE_STEPS,
+  SENT_STATUS,
+  type ContactSendUpdate,
+  type StoredLeadState,
   type StoredSequenceStep,
 } from "../crm/smartlead-map";
 import { parseConditions, type SavedView } from "../crm/views";
@@ -1186,8 +1189,10 @@ export async function bindCampaign(
  * Forget a loop's campaign.
  *
  * The smartlead_leads rows are deliberately kept: they record that those contacts
- * were really emailed by that campaign, which stays true after unlinking. Binding
- * the same campaign again therefore still knows who is already in it.
+ * were handed to that campaign — and, in `emailed_steps`, which of its sends have
+ * already landed on them — both of which stay true after unlinking. Binding the
+ * same campaign again therefore still knows who is already in it, and does not
+ * log its sends onto their timelines a second time.
  */
 export async function unbindCampaign(db: D1Database, loop: number): Promise<void> {
   await db.prepare("DELETE FROM smartlead_campaigns WHERE loop = ?").bind(loop).run();
@@ -1270,6 +1275,202 @@ export async function recordPushedLeads(
       ),
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Smartlead sends -> contacts
+// ---------------------------------------------------------------------------
+//
+// Turning "Smartlead says it emailed this address" into the two things the CRM
+// already understands: an `email` touchpoint on the contact's timeline, and a
+// status that is no longer "New". Everything about WHICH sends are new is
+// decided by planContactSends() in app/crm/smartlead-map.ts; this half only
+// reads the state it needs and writes what it is told.
+
+/**
+ * Format an instant the way `datetime('now')` does: UTC, space-separated, no
+ * timezone designator.
+ *
+ * Every other touchpoint's `created_at` comes from that column default, and
+ * listContacts() orders touchpoints by the raw string. Writing an ISO
+ * `2026-08-22T09:00:00.000Z` alongside a stored `2026-08-22 09:00:00` would sort
+ * every backdated send after every logged touch on the same day, and would also
+ * be parsed on a different timezone assumption than its neighbours. So a
+ * Smartlead timestamp is converted into the format the column already speaks
+ * rather than the format it arrived in — the opposite of the smartlead_campaigns
+ * sync stamps, which are ISO precisely because nothing else writes them.
+ *
+ * Returns null for anything unparseable, which the caller turns into "now".
+ */
+function sqliteUTC(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+}
+
+type LeadStateRow = {
+  contact_id: string;
+  email: string;
+  emailed_steps: string | null;
+  status: string;
+  owner: string | null;
+  loops: string;
+};
+
+/** Send keys already logged for a lead. Same defensive shape as parseLoops. */
+function parseSendKeys(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((key): key is string => typeof key === "string" && key.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every lead in this campaign, joined to the contact it points at.
+ *
+ * An INNER JOIN on purpose: deleteContacts() drops a contact's lead links in the
+ * same batch as the contact, so a link with no contact is a row that should not
+ * exist, and a send arriving for one has nowhere to land.
+ */
+export async function listCampaignLeadState(
+  db: D1Database,
+  campaignId: string,
+): Promise<StoredLeadState[]> {
+  const res = await db
+    .prepare(
+      `SELECT l.contact_id, l.email, l.emailed_steps, c.status, c.owner, c.loops
+         FROM smartlead_leads l
+         JOIN contacts c ON c.id = l.contact_id
+        WHERE l.campaign_id = ?`,
+    )
+    .bind(campaignId)
+    .all<LeadStateRow>();
+
+  return (res.results ?? []).map((row) => ({
+    contactId: row.contact_id,
+    email: (row.email ?? "").toLowerCase(),
+    status: row.status,
+    owner: row.owner ?? null,
+    loop: Math.min(...parseLoops(row.loops)),
+    loggedKeys: parseSendKeys(row.emailed_steps),
+  }));
+}
+
+/** How many of a campaign's leads Smartlead has confirmed at least one send for. */
+export async function countEmailedLeads(
+  db: D1Database,
+  campaignId: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM smartlead_leads
+        WHERE campaign_id = ? AND last_emailed_at IS NOT NULL`,
+    )
+    .bind(campaignId)
+    .first<{ n: number }>();
+  return Number(row?.n) || 0;
+}
+
+/**
+ * Write one `email` touchpoint per newly observed send, move any still-"New"
+ * contact to Contacted, and remember the send keys so the next sync skips them.
+ *
+ * The status UPDATE carries `AND status = 'New'` rather than trusting the read
+ * that produced `markContacted`: the plan is built from a snapshot, and a sync
+ * of a two-thousand-row campaign is long enough for someone to mark a contact
+ * Replied in the CRM while it runs. The WHERE clause is what makes the write
+ * lose that race instead of winning it.
+ *
+ * Statements are flushed in fixed-size batches rather than one batch per
+ * contact, because a contact contributes between two and half a dozen of them —
+ * chunking by contact would size the batch on a number nobody controls. A batch
+ * is atomic, so a failure mid-sync leaves earlier batches applied; that is safe
+ * here for the same reason recordPushedLeads() writes after each chunk, since
+ * the keys written alongside each touchpoint are what stop it being written
+ * twice.
+ */
+export async function recordContactSends(
+  db: D1Database,
+  campaignId: string,
+  campaignName: string,
+  updates: ContactSendUpdate[],
+  actor: string,
+): Promise<{ touchpoints: number; contacted: number }> {
+  const BATCH = 50;
+  const label = (campaignName || "Smartlead").slice(0, 60);
+  let statements: D1PreparedStatement[] = [];
+  // Which statements in the pending batch are the status UPDATE, so the count
+  // reported back is the number of contacts that actually moved rather than the
+  // number the plan hoped to move. They differ exactly when the guard clause
+  // above fires, which is the one case worth not lying about.
+  let statusSlots: number[] = [];
+  let touchpoints = 0;
+  let contacted = 0;
+
+  const flush = async () => {
+    if (!statements.length) return;
+    const results = await db.batch(statements);
+    for (const slot of statusSlots) {
+      contacted += Number(results[slot]?.meta?.changes) || 0;
+    }
+    statements = [];
+    statusSlots = [];
+  };
+
+  for (const update of updates) {
+    for (const send of update.newSends) {
+      const note =
+        send.seqNumber === null
+          ? `Sent by ${label}`
+          : `Sent step ${send.seqNumber} of ${label}`;
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO touchpoints (id, contact_id, type, loop, owner, note, created_at) VALUES (?, ?, 'email', ?, ?, ?, ?)",
+          )
+          .bind(
+            crypto.randomUUID(),
+            update.contactId,
+            update.loop,
+            // The campaign sends on the contact's owner's behalf; an unassigned
+            // contact falls back to whoever pressed Sync, exactly as markAdsSent
+            // does for a bulk ad send.
+            update.owner || actor,
+            note,
+            sqliteUTC(send.sentAt) ?? sqliteUTC(new Date().toISOString())!,
+          ),
+      );
+      touchpoints++;
+    }
+
+    if (update.markContacted) {
+      statusSlots.push(statements.length);
+      statements.push(
+        db
+          .prepare("UPDATE contacts SET status = ? WHERE id = ? AND status = 'New'")
+          .bind(SENT_STATUS, update.contactId),
+      );
+    }
+
+    statements.push(
+      db
+        .prepare(
+          `UPDATE smartlead_leads SET emailed_steps = ?, last_emailed_at = ?
+            WHERE campaign_id = ? AND contact_id = ?`,
+        )
+        .bind(JSON.stringify(update.allKeys), update.lastSentAt, campaignId, update.contactId),
+    );
+
+    if (statements.length >= BATCH) await flush();
+  }
+
+  await flush();
+  return { touchpoints, contacted };
 }
 
 // ---------------------------------------------------------------------------

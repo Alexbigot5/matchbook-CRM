@@ -262,7 +262,8 @@ the table.
 The actual sending tool. `/smartlead` binds **one Smartlead campaign per loop** and drives
 five things: building the sequence out of templates from the Templates page, pushing
 contacts in as leads, uploading that sequence as the campaign's steps, setting the sending
-schedule, and a manual stats sync back onto the template variant counters. There is
+schedule, and a manual sync that reads back what the campaign actually sent — onto the
+template variant counters, and onto the contacts it emailed. There is
 deliberately **no cron and no inbound webhook** — every operation is a button. The builder
 is the only one of the five that never leaves D1.
 
@@ -293,10 +294,41 @@ is the only one of the five that never leaves D1.
   (an empty table means "derive", so it would restore every template rather than nothing),
   and `deleteTemplate` must drop a template's steps *before* the template, since D1 does
   enforce that foreign key.
+- **`migrations/0015_smartlead_lead_sends.sql` — pushing a lead is not sending it.** A
+  `smartlead_leads` row is written the moment Smartlead accepts the lead; the campaign then
+  sends on its own schedule, paced by `max_new_leads_per_day`, and a paused campaign or a
+  suppressed address means some pushed leads are never emailed at all. So "Sync stats" has a
+  second half: the same `/statistics` rows it totals by step are also grouped by
+  `lead_email` (`sendsByLead`), and every send Smartlead reports is written back onto the
+  **contact** — one `email` touchpoint per send, and a contact still marked `New` moves to
+  `Contacted` (`planContactSends` → `recordContactSends`). Before this, a contact pushed
+  months earlier still read `New` everywhere in the CRM.
+  - **`emailed_steps` is a JSON array of send keys, not a count.** The key is the
+    `sequence_number` (`s:3`), or `t:<sent_time>` when the row carries no usable one. Keying
+    on the step is what makes pressing Sync twice a no-op rather than a second timeline
+    entry, without assuming the pages come back in the same order.
+  - **The two halves of the sync fail differently, so only one of them is all-or-nothing.**
+    Template counters are absolute lifetime totals, so a campaign larger than
+    `SMARTLEAD_STATS_MAX_PAGES` writes *nothing* (a partial aggregate reads as a collapse in
+    performance). A contact's "we emailed this person" is per-person and keyed on the step:
+    a short read marks fewer people, never the wrong one, and the next press picks up the
+    rest. Contact marking therefore runs first and is gated by neither the page budget nor
+    "no uploaded steps to attribute numbers to".
+  - **`SENT_PROMOTES_FROM` is `{New}` only** — the mirror of `PUSHABLE_STATUSES`. A step-3
+    send arriving after someone replied must not walk `Replied`/`Meeting booked`/`Won`/`Dead`
+    backwards. The `UPDATE` also carries `AND status = 'New'` rather than trusting the
+    snapshot the plan was built from, and the reported count comes from `meta.changes`, so a
+    status changed mid-sync loses the race rather than winning it. A contact manually set
+    back to `New` after its sends were logged is left alone: `markContacted` needs a *new*
+    send.
 - **Sync timestamps are written as ISO strings from JS**, not via `datetime('now')`. The
   loader `Date.parse`es them to build a label, and SQLite's default has no timezone
   designator, so the column default would read a UTC instant as local time. `created_at`
-  keeps the default because it is only ordered on, never parsed.
+  keeps the default because it is only ordered on, never parsed — except on the backdated
+  touchpoints above, which set it explicitly and therefore go through `sqliteUTC()` to match
+  `datetime('now')`'s exact format. `listContacts` orders touchpoints by the raw string, so
+  an ISO `…T09:00:00.000Z` next to a stored `… 09:00:00` would sort every backdated send
+  after every logged touch on the same day.
 - **`pushSequence` pauses the campaign and leaves it paused.** Smartlead refuses sequence
   edits on an ACTIVE campaign with an opaque 400, so the pause is required; not
   auto-resuming is a choice — silently restarting sends right after the copy changed
@@ -322,10 +354,11 @@ Security headers (CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS on https, etc.
 `npm run start` to see them.
 
 Gotchas:
-- **Touchpoints are written by three paths**: the `logTouch` intent (the detail panel's "Log
-  touch" channel chips), `logMeeting`, and the bulk `markAdsSent`. They only reflect activity
-  logged in-app — nothing backfills historical outreach, so the analytics channel and activity
-  panels start sparse. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
+- **Touchpoints are written by four paths**: the `logTouch` intent (the detail panel's "Log
+  touch" channel chips), `logMeeting`, the bulk `markAdsSent`, and `recordContactSends` from
+  the Smartlead sync. The first three only reflect activity logged in-app; the fourth is the
+  one that backfills, and only for campaigns this CRM pushed to — so the analytics channel
+  and activity panels still start sparse for anything sent elsewhere. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
   live conflict flag remains the name-based `hasNameConflict`/`conflictOwners`.
 - **`contacts.dead_reason`** is captured by a prompt that intercepts the shared `setStatus`
   handler whenever a contact is set to Dead (covering both the row and detail status menus).

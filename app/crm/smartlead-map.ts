@@ -718,6 +718,11 @@ export function planImport(
 /** One row of GET /campaigns/{id}/statistics. */
 export type SmartleadStatRow = {
   sequence_number?: number | string | null;
+  // The address the email went to. Unused by the totals below, which aggregate
+  // across leads, and load-bearing for sendsByLead() further down, which does
+  // the opposite. Read through statEmail() rather than directly — the field is
+  // spelled differently on the neighbouring /leads endpoint.
+  lead_email?: string | null;
   sent_time?: string | null;
   open_time?: string | null;
   reply_time?: string | null;
@@ -749,4 +754,181 @@ export function totalStatsBySequence(rows: SmartleadStatRow[]): Map<number, Step
     bySeq.set(seq, totals);
   }
   return bySeq;
+}
+
+// ---------------------------------------------------------------------------
+// Sends (Smartlead per-email rows -> CRM contacts)
+// ---------------------------------------------------------------------------
+//
+// The other direction of the same /statistics read that feeds the counters
+// above. Those rows are totalled by sequence step to score a TEMPLATE; here the
+// identical rows are grouped by address to answer a question about a PERSON —
+// has this contact actually been emailed, and when.
+//
+// Pushing a lead is not sending it. planLeads() above hands a contact to a
+// campaign; Smartlead then sends on its own schedule, paced by
+// max_new_leads_per_day, and a paused campaign or a suppressed address means
+// some pushed leads are never emailed at all. `sent_time` is the only fact that
+// says an email left, so it is the only thing these functions treat as one.
+
+/**
+ * Statuses a send is allowed to move a contact OUT of.
+ *
+ * Only "New". Every other status is either further along the pipeline than
+ * "Contacted" (Replied, Meeting booked, Won) or a deliberate end (Dead), and a
+ * step-three send arriving after someone replied must not walk the contact
+ * backwards over a human's judgement. The set is the mirror image of
+ * PUSHABLE_STATUSES: that one says who may be emailed, this one says whose
+ * status an email may still change.
+ */
+export const SENT_PROMOTES_FROM: ReadonlySet<string> = new Set(["New"]);
+
+/** The status a contact reaches once a campaign has emailed it. */
+export const SENT_STATUS = "Contacted";
+
+/** One email Smartlead reports having sent to one lead. */
+export type LeadSend = {
+  /** Stable identity of this send within the lead — see migration 0015. */
+  key: string;
+  /** The sequence step it came from, or null when the row does not say. */
+  seqNumber: number | null;
+  /** `sent_time` verbatim. */
+  sentAt: string;
+};
+
+/**
+ * The address a statistics row is about.
+ *
+ * Smartlead names this field `lead_email` on /statistics, but the same account's
+ * /leads rows call it `email` and arrive wrapped as `{ lead: {...} }` — which is
+ * why unwrapLead() exists in the route. Rather than assume statistics never
+ * wraps, this reads both shapes and all three spellings, and returns "" when
+ * none of them holds a string. An empty result skips the row: attributing a send
+ * to the wrong person is worse than not recording it.
+ */
+export function statEmail(row: SmartleadStatRow): string {
+  const obj = (row ?? {}) as Record<string, unknown>;
+  const nested = (obj.lead ?? {}) as Record<string, unknown>;
+  for (const source of [obj, nested]) {
+    for (const field of ["lead_email", "to_email", "email"]) {
+      const value = source[field];
+      if (typeof value === "string" && value.trim()) return value.trim().toLowerCase();
+    }
+  }
+  return "";
+}
+
+/**
+ * Group statistics rows into the sends made to each address, oldest first.
+ *
+ * Rows without a `sent_time` are dropped — those are queued or skipped emails,
+ * and this whole path exists to distinguish them from ones that went out. Rows
+ * are deduped by key within a lead, so the same step appearing twice across two
+ * pages counts once.
+ *
+ * Sorting is by the `sent_time` string rather than a parsed date: these are ISO
+ * timestamps from one source, so they sort correctly as text, and no Date is
+ * constructed in a module that must stay pure (see the header of this file).
+ */
+export function sendsByLead(rows: SmartleadStatRow[]): Map<string, LeadSend[]> {
+  const byEmail = new Map<string, Map<string, LeadSend>>();
+
+  for (const row of rows) {
+    const sentAt = typeof row.sent_time === "string" ? row.sent_time.trim() : "";
+    if (!sentAt) continue;
+    const email = statEmail(row);
+    if (!email) continue;
+
+    const seq = Number(row.sequence_number);
+    const seqNumber = Number.isInteger(seq) && seq >= 1 ? seq : null;
+    // A row with no usable step number still describes a real send, so it is
+    // keyed on its timestamp instead of dropped. Two sends to one lead at the
+    // identical instant would collapse into one; a duplicate row is the far
+    // likelier explanation of that than two simultaneous emails.
+    const key = seqNumber === null ? `t:${sentAt}` : `s:${seqNumber}`;
+
+    let sends = byEmail.get(email);
+    if (!sends) {
+      sends = new Map<string, LeadSend>();
+      byEmail.set(email, sends);
+    }
+    if (!sends.has(key)) sends.set(key, { key, seqNumber, sentAt });
+  }
+
+  const out = new Map<string, LeadSend[]>();
+  for (const [email, sends] of byEmail) {
+    out.set(
+      email,
+      [...sends.values()].sort((a, b) => (a.sentAt < b.sentAt ? -1 : a.sentAt > b.sentAt ? 1 : 0)),
+    );
+  }
+  return out;
+}
+
+/** A campaign's lead link joined to the contact it points at. */
+export type StoredLeadState = {
+  contactId: string;
+  /** The address as it was pushed, lowercased by the reader. */
+  email: string;
+  status: string;
+  owner: string | null;
+  /** The contact's primary (lowest) loop, for the touchpoint row. */
+  loop: number;
+  /** Send keys already written as touchpoints for this lead. */
+  loggedKeys: string[];
+};
+
+export type ContactSendUpdate = {
+  contactId: string;
+  owner: string | null;
+  loop: number;
+  /** Sends seen for the first time — one touchpoint each. */
+  newSends: LeadSend[];
+  /** Every key now known for this lead, for the emailed_steps column. */
+  allKeys: string[];
+  /** Newest `sent_time` observed, for last_emailed_at. */
+  lastSentAt: string;
+  /** True when this contact is still "New" and the send moves it to Contacted. */
+  markContacted: boolean;
+};
+
+/**
+ * Work out what each lead's observed sends change about its contact.
+ *
+ * A lead with nothing new produces no update at all, which is what makes
+ * pressing Sync twice a no-op rather than a second timeline entry: the keys
+ * already stored are subtracted before anything is proposed.
+ *
+ * `markContacted` is deliberately gated on there being a NEW send. A contact
+ * someone has manually set back to "New" after the sends were already logged is
+ * left alone — the operator is saying something about the contact, and this
+ * function has no newer fact to answer with.
+ */
+export function planContactSends(
+  leads: StoredLeadState[],
+  sends: Map<string, LeadSend[]>,
+): ContactSendUpdate[] {
+  const updates: ContactSendUpdate[] = [];
+
+  for (const lead of leads) {
+    const observed = sends.get(lead.email.trim().toLowerCase());
+    if (!observed?.length) continue;
+
+    const known = new Set(lead.loggedKeys);
+    const newSends = observed.filter((send) => !known.has(send.key));
+    if (!newSends.length) continue;
+    for (const send of newSends) known.add(send.key);
+
+    updates.push({
+      contactId: lead.contactId,
+      owner: lead.owner,
+      loop: lead.loop,
+      newSends,
+      allKeys: [...known],
+      lastSentAt: observed[observed.length - 1].sentAt,
+      markContacted: SENT_PROMOTES_FROM.has(lead.status),
+    });
+  }
+
+  return updates;
 }
