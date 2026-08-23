@@ -1,0 +1,51 @@
+-- Record which sends Smartlead has actually reported for each lead, so a send
+-- can be reflected onto the contact exactly once.
+--
+-- THE GAP THIS CLOSES. Migration 0009's smartlead_leads table records that a
+-- contact was HANDED to a campaign, and unbindCampaign()'s comment even calls
+-- those rows proof that "those contacts were really emailed by that campaign".
+-- They were not. A push writes a row the moment Smartlead accepts the lead; the
+-- campaign then sends on its own schedule, bounded by max_new_leads_per_day, and
+-- may be paused, may bounce the address, or may never reach that lead at all. So
+-- the CRM had no idea who had been emailed: a contact pushed months ago still
+-- read "New" on the contacts page, in the queue, and in every lifecycle count.
+--
+-- The truthful signal is Smartlead's own /campaigns/{id}/statistics, where one
+-- row is one email and `sent_time` is when it left. The stats sync already reads
+-- every one of those rows to total them by sequence step; it simply threw away
+-- the `lead_email` on each. Reading it is what lets a send land on a contact.
+--
+-- WHY A COLUMN HERE RATHER THAN A SENDS TABLE. The thing being recorded is
+-- per (contact, campaign), which is precisely what a smartlead_leads row already
+-- is — and the unique (contact_id, campaign_id) index means there is exactly one
+-- place to write. A separate table would need that same key plus its own index
+-- to answer the only question ever asked of it ("what have we already logged for
+-- this lead?"), for a set that holds one entry per sequence step.
+--
+-- Applied via Wrangler's D1 migrations (tracked in the `d1_migrations` table):
+--   npm run db:migrate:local
+--   npm run db:migrate:remote
+
+-- JSON array of send keys already written as touchpoints for this lead, e.g.
+-- ["s:1","s:3"]. A key is the Smartlead `sequence_number` when the row carries a
+-- usable one, and `t:<sent_time>` when it does not.
+--
+-- KEYS, NOT A COUNT, because the sync is a button and the button is pressed
+-- repeatedly. A count would have to assume the same rows come back in the same
+-- order every time to know which are new; keying on the step means a re-sync of
+-- the same send is recognised as the same send no matter how the pages were
+-- read, which is what makes "log one touchpoint per email" idempotent. It is
+-- also why the stats page budget does not have to gate this half of the sync:
+-- reading only the first N pages logs fewer sends, never a wrong one, and the
+-- next press picks up the rest.
+--
+-- NULL means "nothing observed yet", which is the state every row written before
+-- this migration is in — correct rather than in need of a backfill, since what
+-- those campaigns actually sent is knowable only from Smartlead, and the first
+-- sync after this migration reads it.
+ALTER TABLE smartlead_leads ADD COLUMN emailed_steps TEXT;
+
+-- The most recent `sent_time` observed for this lead, stored verbatim as
+-- Smartlead reports it. Display and ordering only — the touchpoint rows are what
+-- the contact timeline reads. Nullable for the same reason as above.
+ALTER TABLE smartlead_leads ADD COLUMN last_emailed_at TEXT;

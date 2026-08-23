@@ -566,6 +566,7 @@ function LoopCard({
           <Stat label="on this loop" value={leads.onLoop} />
           <Stat label="ready to push" value={leads.eligible} />
           <Stat label="already in campaign" value={leads.alreadyPushed} />
+          <Stat label="emailed so far" value={leads.emailed} />
           {leads.noEmail > 0 && <Stat label="no email" value={leads.noEmail} />}
           {leads.inOtherCampaign > 0 && (
             <Stat label={`in Loop ${loop === 1 ? 2 : 1}'s campaign`} value={leads.inOtherCampaign} />
@@ -583,6 +584,13 @@ function LoopCard({
           <div style={css(MUTED + "margin-top:7px;")}>
             Contacts in both loops are held back so they aren’t emailed by two campaigns
             at once.
+          </div>
+        )}
+        {binding && leads.alreadyPushed > leads.emailed && (
+          <div style={css(MUTED + "margin-top:7px;")}>
+            “Emailed so far” counts what Smartlead has confirmed sending, and only
+            updates when you sync below. Pushing a contact queues it; the campaign
+            decides when it goes out.
           </div>
         )}
       </div>
@@ -730,7 +738,9 @@ function LoopCard({
           {binding?.statsSyncedLabel
             ? `Last synced ${binding.statsSyncedLabel}.`
             : "Never synced."}{" "}
-          Numbers land on each template’s variant counters over on Templates.
+          Numbers land on each template’s variant counters over on Templates, and every
+          send is logged as an email touchpoint on the contact it went to — moving anyone
+          still marked New to Contacted.
         </div>
         {binding?.lastResult && (
           <div style={css(MUTED + "margin-top:5px;")}>{binding.lastResult}</div>
