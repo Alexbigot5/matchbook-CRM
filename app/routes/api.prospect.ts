@@ -916,7 +916,7 @@ async function promote(db: D1Database, form: FormData, viewerEmail: string): Pro
   );
   if (!rows.ok) return json<ActionResult>({ ok: false, error: rows.error });
 
-  const added = await createManyContacts(db, rows.rows);
+  const { inserted: added } = await createManyContacts(db, rows.rows);
   await markProspectsPromoted(db, runId, selected.map((p) => p.id));
 
   return json<ActionResult>({

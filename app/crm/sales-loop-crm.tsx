@@ -167,8 +167,9 @@ type State = {
 };
 
 // Mirrors the route action's return type. `message` carries a partial-success
-// note — currently "imported N, skipped M invalid rows" from a CSV import;
-// `savedViewId` is present only on a successful createSavedView.
+// note — currently "Imported N contacts. Skipped M already in the CRM (…). Skipped
+// K invalid rows" from a CSV import, where either skip clause appears only when
+// it is nonzero; `savedViewId` is present only on a successful createSavedView.
 /**
  * What /api/prospect's loader returns. Declared by hand, mirroring that route,
  * the same way ActionResult below mirrors this page's action.

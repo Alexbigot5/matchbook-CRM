@@ -210,15 +210,39 @@ export async function handleContactIntent(
         // valid row admitted the whole array unchecked, with no cap on its length.
         const result = validateImportRows(parsed);
         if (!result.ok) return { ok: false, error: result.error };
-        await createManyContacts(DB, result.rows);
+        // This is the one import route with no upstream dedupe of its own, so it
+        // is the one that asks createManyContacts for it — the same file pasted
+        // twice used to land twice.
+        const { inserted, skipped } = await createManyContacts(DB, result.rows, {
+          dedupe: true,
+        });
+
+        const dupes = skipped.email + skipped.name;
+        const notes: string[] = [];
+        if (dupes) {
+          // Only break the total down when both rules actually fired; "8 already
+          // in the CRM (8 by email, 0 by name)" reads as noise.
+          const breakdown =
+            skipped.email && skipped.name
+              ? ` (${skipped.email} by email, ${skipped.name} by name)`
+              : "";
+          notes.push(`Skipped ${dupes} already in the CRM${breakdown}.`);
+        }
+        if (result.skipped) {
+          notes.push(
+            `Skipped ${result.skipped} invalid row${result.skipped === 1 ? "" : "s"}${
+              result.firstError ? `. First problem: ${result.firstError}` : "."
+            }`,
+          );
+        }
+
         return {
           ok: true,
           // This message is load-bearing on the client: its presence is what
-          // holds the import modal open to report the skipped rows.
-          message: result.skipped
-            ? `Imported ${result.rows.length}. Skipped ${result.skipped} invalid row${
-                result.skipped === 1 ? "" : "s"
-              }${result.firstError ? `. First problem: ${result.firstError}` : "."}`
+          // holds the import modal open to report the rows that didn't land.
+          // Absent on a clean import, which is what lets the modal close.
+          message: notes.length
+            ? `Imported ${inserted} contact${inserted === 1 ? "" : "s"}. ${notes.join(" ")}`
             : undefined,
         };
       }

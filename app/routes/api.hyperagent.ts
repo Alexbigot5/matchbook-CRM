@@ -195,8 +195,8 @@ export async function action({ request, context }: Route.ActionArgs) {
       case "importContacts": {
         const result = validateImportRows(body?.rows);
         if (!result.ok) return json({ ok: false, error: result.error }, 400);
-        const count = await createManyContacts(DB, result.rows);
-        return json({ ok: true, count, skipped: result.skipped });
+        const { inserted } = await createManyContacts(DB, result.rows);
+        return json({ ok: true, count: inserted, skipped: result.skipped });
       }
       case "setStatus": {
         const status = asString(body?.status);
