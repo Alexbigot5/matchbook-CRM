@@ -162,12 +162,16 @@ export function normalizeName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-export function buildNameIndex(contacts: Contact[]): NameIndex {
-  const idx: NameIndex = new Map();
+// Generic over the row shape so callers that only hold a name (the CSV-import
+// dedupe reads just id/name/email out of the contacts table) can share this one
+// implementation instead of fabricating whole Contacts to satisfy the type.
+// Passing Contact[] still yields a NameIndex, which is what every UI caller does.
+export function buildNameIndex<T extends { name: string }>(contacts: T[]): Map<string, T[]> {
+  const idx = new Map<string, T[]>();
   for (const c of contacts) {
     const key = normalizeName(c.name);
     if (!key) continue;
-    const list = idx.get(key) ?? [];
+    const list: T[] = idx.get(key) ?? [];
     list.push(c);
     idx.set(key, list);
   }

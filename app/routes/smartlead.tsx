@@ -806,7 +806,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
 
         const validated = validateImportRows(plan.rows);
         if (!validated.ok) return { ok: false, error: validated.error };
-        await createManyContacts(DB, validated.rows);
+        const { inserted } = await createManyContacts(DB, validated.rows);
 
         // Link them so a later push doesn't re-send to people who came FROM the
         // campaign. Matched back by email, which is the key both sides share.
@@ -828,7 +828,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         );
 
         const summary =
-          `Imported ${validated.rows.length} contact${validated.rows.length === 1 ? "" : "s"}` +
+          `Imported ${inserted} contact${inserted === 1 ? "" : "s"}` +
           (plan.duplicates ? `, skipped ${plan.duplicates} already here` : "") +
           (validated.skipped ? `, skipped ${validated.skipped} invalid` : "") +
           ".";

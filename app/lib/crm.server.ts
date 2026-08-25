@@ -4,6 +4,7 @@
 // calculation here (against a single `now` captured in the loader) is what keeps
 // SSR and client hydration deterministic — no `Date` runs in the render path.
 
+import { buildNameIndex, normalizeName } from "../crm/data";
 import type { Contact, Note, Touch } from "../crm/data";
 import {
   TEMPLATE_STATUSES,
@@ -289,18 +290,98 @@ export async function createContact(db: D1Database, input: NewContactInput): Pro
   await insertContactStmt(db, input).run();
 }
 
-/** Bulk insert (CSV import) in batched, atomic chunks. */
+/** How many rows a bulk insert actually wrote, and what it turned away. */
+export type CreateManyResult = {
+  inserted: number;
+  skipped: { email: number; name: number };
+};
+
+/**
+ * Everything needed to answer "is this person already in the CRM", read in one
+ * lean query.
+ *
+ * Deliberately not `listContacts` — that pulls every note and touchpoint in the
+ * database to shape full `Contact` objects, and the only two fields a dedupe
+ * pass reads are the name and the address. Emails are trimmed and lowercased to
+ * match `listPushedEmails`, so the CRM and Smartlead agree on when two addresses
+ * are the same inbox; names go through the shared `buildNameIndex`, which is the
+ * same index the contacts table builds for its cross-owner conflict flag.
+ */
+async function loadDedupeIndex(db: D1Database): Promise<{
+  emails: Set<string>;
+  names: Map<string, { id: string; name: string }[]>;
+}> {
+  const res = await db
+    .prepare("SELECT id, name, email FROM contacts")
+    .all<{ id: string; name: string; email: string | null }>();
+  const existing = res.results ?? [];
+
+  const emails = new Set<string>();
+  for (const c of existing) {
+    const email = (c.email ?? "").trim().toLowerCase();
+    if (email) emails.add(email);
+  }
+  return { emails, names: buildNameIndex(existing) };
+}
+
+/**
+ * Bulk insert (CSV import) in batched, atomic chunks.
+ *
+ * `dedupe` is opt-in and off by default because the callers differ in what
+ * protection they already have. The CSV import is the one route with none — it
+ * writes whatever the file says, so the same list pasted twice lands twice. The
+ * other three callers dedupe upstream against rules this function can't see
+ * (Origami flags prospects at read time via `dedupeProspects`; the Smartlead
+ * import compares against the campaign's pushed set, not the contact book), and
+ * turning this on for them would silently drop rows they mean to write —
+ * notably any lead sharing a name with an existing contact.
+ *
+ * When on, the checks run per row in identity order, mirroring `dedupeProspects`:
+ * email first, because an address is an identity and two people with one name are
+ * still two people, then name. Skips are counted by reason rather than collapsed
+ * into one number so the import can report which rule turned a row away.
+ *
+ * Chunking is unchanged — dedupe filters the list, it does not touch how the
+ * survivors are batched.
+ */
 export async function createManyContacts(
   db: D1Database,
   rows: NewContactInput[],
-): Promise<number> {
+  opts: { dedupe?: boolean } = {},
+): Promise<CreateManyResult> {
   const valid = rows.filter((r) => r.name && r.name.trim());
+  const skipped = { email: 0, name: 0 };
+
+  let toInsert = valid;
+  if (opts.dedupe) {
+    const { emails, names } = await loadDedupeIndex(db);
+    toInsert = [];
+    for (const row of valid) {
+      const email = (row.email ?? "").trim().toLowerCase();
+      if (email && emails.has(email)) {
+        skipped.email++;
+        continue;
+      }
+      if (names.has(normalizeName(row.name))) {
+        skipped.name++;
+        continue;
+      }
+      // Fold the accepted row into the index so a file containing the same
+      // person twice is caught on the second occurrence too — the DB read
+      // happened before any of these inserts.
+      if (email) emails.add(email);
+      const key = normalizeName(row.name);
+      if (key) names.set(key, [{ id: "", name: row.name }]);
+      toInsert.push(row);
+    }
+  }
+
   const CHUNK = 50;
-  for (let i = 0; i < valid.length; i += CHUNK) {
-    const chunk = valid.slice(i, i + CHUNK).map((r) => insertContactStmt(db, r));
+  for (let i = 0; i < toInsert.length; i += CHUNK) {
+    const chunk = toInsert.slice(i, i + CHUNK).map((r) => insertContactStmt(db, r));
     if (chunk.length) await db.batch(chunk);
   }
-  return valid.length;
+  return { inserted: toInsert.length, skipped };
 }
 
 /**
