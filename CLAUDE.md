@@ -61,7 +61,7 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    campaign bindings and the sequence-builder steps against one `now`, and **makes no
    Smartlead calls**: a loader that reaches a third party makes the page 500 whenever that
    party is down, and every operation here is a manual button anyway. Its `action` has
-   sixteen intents (see "Smartlead" below) and is the only session-gated action carrying a
+   twenty intents (see "Smartlead" below) and is the only session-gated action carrying a
    rate limiter — two of them, in fact: the seven builder/copy-editor intents touch nothing
    but D1 and are metered on their own far looser bucket (`SMARTLEAD_BUILDER_RULE`), listed in
    the `BUILDER_INTENTS` set. Add a builder intent without adding it there and ordinary
@@ -122,7 +122,7 @@ shared shell:
   the verdict: the figure is `1 − p` for "the rates are equal", **not** the probability that
   the leader is better, and it's a fixed-horizon test read continuously.
 - **`smartlead-map.ts`** — pure, isomorphic translation to Smartlead's model
-  (`buildSequencePlan`, `toHtmlBody`, `planLeads`, `planImport`,
+  (`buildSequencePlan`, `toHtmlBody`, `planLeads`, `planImport`, `planSenders`,
   `totalStatsBySequence`). No React, no server imports, **no `Date`**. Three
   non-obvious rules live here: a step's `delay_in_days` is the wait *relative to the
   previous step*, so `sendDay` 0/3/7 becomes delays 0/3/4; a single-variant step must
@@ -140,8 +140,8 @@ shared shell:
   adding Loop 1), so without that guard a resumed contact gets two concurrent
   sequences. Variant key names are in the single `SEQ_VARIANT_KEYS` const.
 - **`smartlead-page.tsx`** — the `/smartlead` UI, same one-client-component idiom. One
-  card per loop: campaign binding, the sequence builder, contact eligibility, schedule,
-  stats. The builder (`SequenceBuilder`) is a reorderable step list — native HTML5 drag
+  card per loop: campaign binding, the mailboxes it sends from, the sequence builder,
+  contact eligibility, schedule, stats. The builder (`SequenceBuilder`) is a reorderable step list — native HTML5 drag
   plus ↑/↓ buttons as the **keyboard path**, the same pairing `lifecycle-page.tsx`
   documents — with a per-step variant chip, an editable wait, an expandable copy preview
   and a template picker. The expanded preview also carries an **Edit** button per variant,
@@ -260,7 +260,8 @@ the table.
 ## Smartlead
 
 The actual sending tool. `/smartlead` binds **one Smartlead campaign per loop** and drives
-five things: building the sequence out of templates from the Templates page, pushing
+six things: choosing which of the account's mailboxes the campaign sends from, building
+the sequence out of templates from the Templates page, pushing
 contacts in as leads, uploading that sequence as the campaign's steps, setting the sending
 schedule, and a manual sync that reads back what the campaign actually sent — onto the
 template variant counters, and onto the contacts it emailed. There is
@@ -329,6 +330,22 @@ is the only one of the five that never leaves D1.
   `datetime('now')`'s exact format. `listContacts` orders touchpoints by the raw string, so
   an ISO `…T09:00:00.000Z` next to a stored `… 09:00:00` would sort every backdated send
   after every logged touch on the same day.
+- **The SENDERS section is a live read, not a mirror.** Which mailboxes a campaign
+  rotates between is Smartlead's own state, so nothing about it reaches D1 and there is
+  no migration behind it: `fetchSenders` reads `/campaigns/{id}/email-accounts` plus a
+  paged `/email-accounts/`, `planSenders` splits them into assigned/available, and
+  `assignSender`/`removeSender` re-read through the same helper afterwards rather than
+  moving a row between two client-side lists. Three consequences. The section renders
+  only once a campaign is linked, and shows nothing until the button is pressed — the
+  loader still makes no Smartlead calls, so "not loaded" and "none assigned" are
+  deliberately different captions. The fetched list is keyed on the campaign id it came
+  from, so re-linking a loop doesn't leave the old campaign's rotation on screen. And
+  **warmup reputation is Smartlead's percentage, printed verbatim** — `warmupTone`'s
+  bands are ours and colour the dot only, which is why the figure is always beside it.
+  Emptying the rotation is allowed (swapping every mailbox has to pass through zero) and
+  said out loud, because Smartlead reports a campaign with no sender as nothing
+  happening rather than as an error. Nothing here buys or connects a mailbox: assigning
+  what already exists upstream is the same bargain the campaign and template bindings make.
 - **`pushSequence` pauses the campaign and leaves it paused.** Smartlead refuses sequence
   edits on an ACTIVE campaign with an opaque 400, so the pause is required; not
   auto-resuming is a choice — silently restarting sends right after the copy changed

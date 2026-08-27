@@ -11,9 +11,10 @@
 
 import { useEffect, useState } from "react";
 import { useFetcher } from "react-router";
-import type { CampaignChoice, LoopView } from "../routes/smartlead";
+import type { CampaignChoice, LoopView, SenderView } from "../routes/smartlead";
 import type { Contact, Viewer } from "./data";
-import type { SequencePreview } from "./smartlead-map";
+import type { SequencePreview, SmartleadSender, WarmupTone } from "./smartlead-map";
+import { warmupTone } from "./smartlead-map";
 import { Sidebar, buildOwnerTabs, buildViewTabs } from "./sidebar";
 import { Box, GLOBAL_CSS, IconClose, IconPencil, IconPlus, IconWarn, MONO, css } from "./ui";
 // The client imports the same bounds the action enforces, so the wait box's
@@ -29,6 +30,7 @@ type ActionResult =
       message?: string;
       campaigns?: CampaignChoice[];
       closed?: "editor";
+      senders?: SenderView;
     }
   | { ok: false; error: string };
 
@@ -69,6 +71,15 @@ type State = {
   notice: string;
   /** Campaigns fetched from Smartlead, shared by both loop cards. */
   campaigns: CampaignChoice[];
+  /**
+   * Mailboxes fetched per loop, or undefined for "not fetched yet".
+   *
+   * Per loop, not shared like `campaigns`: which mailboxes are assigned is a
+   * fact about one campaign. Undefined is a meaningful third state — the loader
+   * makes no Smartlead calls, so nothing here is known until the button is
+   * pressed, and an empty rotation must not read the same as an unread one.
+   */
+  senders: Record<number, SenderView | undefined>;
   /** Per-loop picker selection and new-campaign name draft. */
   pick: Record<number, string>;
   newName: Record<number, string>;
@@ -135,6 +146,7 @@ export function SmartleadPage({
     actionError: "",
     notice: "",
     campaigns: [],
+    senders: {},
     pick: {},
     newName: {},
     schedule: { 1: { ...DEFAULT_SCHEDULE }, 2: { ...DEFAULT_SCHEDULE } },
@@ -175,6 +187,12 @@ export function SmartleadPage({
         // successful action leaves it alone.
         ...(result.campaigns ? { campaigns: result.campaigns } : {}),
       });
+      // Merged, not replaced, and through the functional form: this is one
+      // loop's answer, and the other card's list has to survive it.
+      const senders = result.senders;
+      if (senders) {
+        setState((s) => ({ ...s, senders: { ...s.senders, [senders.loop]: senders } }));
+      }
     } else {
       patch({ actionError: result.error, notice: "", delayDrafts: {}, dragToken: null });
     }
@@ -268,6 +286,7 @@ export function SmartleadPage({
                 pending={pending}
                 maxLeadPush={maxLeadPush}
                 campaigns={S.campaigns}
+                senders={S.senders[loopView.loop]}
                 pick={S.pick[loopView.loop] ?? ""}
                 newName={S.newName[loopView.loop] ?? ""}
                 schedule={S.schedule[loopView.loop]}
@@ -328,6 +347,7 @@ function LoopCard({
   pending,
   maxLeadPush,
   campaigns,
+  senders,
   pick,
   newName,
   schedule,
@@ -355,6 +375,7 @@ function LoopCard({
   pending: boolean;
   maxLeadPush: number;
   campaigns: CampaignChoice[];
+  senders: SenderView | undefined;
   pick: string;
   newName: string;
   schedule: ScheduleDraft;
@@ -513,6 +534,18 @@ function LoopCard({
           </div>
         )}
       </div>
+
+      {/* --- Senders ------------------------------------------------------ */}
+      {binding && (
+        <Senders
+          loop={loop}
+          // Re-linked to a different campaign since the fetch? Then this list is
+          // about a campaign that is no longer on this card — back to unread.
+          senders={senders?.campaignId === binding.campaignId ? senders : undefined}
+          disabled={disabled}
+          onPost={post}
+        />
+      )}
 
       {/* --- Sequence ---------------------------------------------------- */}
       <SequenceBuilder
@@ -755,6 +788,189 @@ function Stat({ label, value }: { label: string; value: number }) {
     <span style={css("font-size:12px; color:#575753;")}>
       <span style={css(MONO + "font-weight:500; color:#1a1a1a;")}>{value}</span> {label}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Senders
+// ---------------------------------------------------------------------------
+
+const SENDER_ROW =
+  "display:flex; align-items:center; gap:9px; font-size:12.5px; padding:7px 9px; background:#fafaf8; border-radius:8px;";
+const SENDER_CHIP =
+  "flex:0 0 auto; font-size:10.5px; padding:2px 6px; border-radius:5px; background:#eeeee9; color:#575753;";
+
+/**
+ * The warmup dot's colour, by band.
+ *
+ * The band is this CRM's reading of Smartlead's percentage, not a grade
+ * Smartlead publishes — see warmupTone(). The figure itself is always printed
+ * beside the dot, so the colour never has to be taken on trust.
+ */
+const WARMUP_DOT: Record<WarmupTone, string> = {
+  strong: "#6f8f6f",
+  fair: "#c1a05a",
+  weak: "#b57070",
+  unknown: "#c4c4be",
+};
+
+/**
+ * Which mailboxes this loop's campaign sends from.
+ *
+ * Rendered only once a campaign is linked, and empty until "Fetch senders" is
+ * pressed: the loader deliberately makes no Smartlead calls (see the route), so
+ * an assignment made in Smartlead's own dashboard five minutes ago is invisible
+ * here until someone asks for it. That is why the caption distinguishes "not
+ * loaded" from "none assigned" rather than showing an empty list for both.
+ *
+ * Assigning and unassigning are the whole scope. Buying or connecting a mailbox
+ * happens in Smartlead, the same way the campaign and the templates do.
+ */
+function Senders({
+  loop,
+  senders,
+  disabled,
+  onPost,
+}: {
+  loop: number;
+  senders: SenderView | undefined;
+  disabled: boolean;
+  onPost: (fields: Record<string, string>) => void;
+}) {
+  const assigned = senders?.assigned ?? [];
+  const available = senders?.available ?? [];
+
+  return (
+    <div style={css(SECTION)}>
+      <div style={css("display:flex; align-items:center; justify-content:space-between; gap:8px;")}>
+        <div style={css(COL_LABEL)}>Senders</div>
+        <Box
+          as="button"
+          disabled={disabled}
+          onClick={() => onPost({ intent: "fetchSenders" })}
+          style={css(GHOST)}
+          hover={css("background:#f4f4f1;")}
+        >
+          Fetch senders
+        </Box>
+      </div>
+
+      {assigned.length > 0 && (
+        <div style={css("margin-top:9px; display:flex; flex-direction:column; gap:5px;")}>
+          {assigned.map((sender) => (
+            <SenderRow key={sender.accountId} sender={sender}>
+              <Box
+                as="button"
+                disabled={disabled}
+                title={`Take ${sender.fromEmail || "this mailbox"} out of the rotation`}
+                onClick={() =>
+                  onPost({ intent: "removeSender", accountId: sender.accountId })
+                }
+                style={css(ICON_BTN)}
+                hover={css("background:#eeeee9; color:#9a5b5b;")}
+              >
+                <IconClose size={12} />
+              </Box>
+            </SenderRow>
+          ))}
+        </div>
+      )}
+
+      {senders && available.length > 0 && (
+        <>
+          <div style={css(COL_LABEL + "margin-top:12px;")}>
+            On the account, not on this campaign
+          </div>
+          <div
+            style={css(
+              "margin-top:6px; display:flex; flex-direction:column; gap:5px; max-height:220px; overflow-y:auto;",
+            )}
+          >
+            {available.map((sender) => (
+              <SenderRow key={sender.accountId} sender={sender}>
+                <Box
+                  as="button"
+                  disabled={disabled}
+                  onClick={() =>
+                    onPost({ intent: "assignSender", accountId: sender.accountId })
+                  }
+                  style={css(PRIMARY + "flex:0 0 auto; padding:4px 10px;")}
+                  hover={css("background:#333;")}
+                >
+                  Assign
+                </Box>
+              </SenderRow>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div style={css(MUTED + "margin-top:8px;")}>
+        {!senders ? (
+          <>
+            Not loaded. Press “Fetch senders” to read this campaign’s mailboxes from
+            Smartlead — none of it is stored here, so nothing is asked for until you ask.
+          </>
+        ) : (
+          <>
+            {assigned.length
+              ? `${assigned.length} mailbox${assigned.length === 1 ? "" : "es"} rotating.`
+              : "No mailboxes assigned, so this campaign can’t send."}{" "}
+            Warmup health is pulled from Smartlead, not tracked separately here.
+          </>
+        )}
+      </div>
+
+      {senders && !available.length && (
+        <div style={css(MUTED + "margin-top:5px;")}>
+          Every mailbox on this Smartlead account is already on this campaign. Connect
+          more in Smartlead.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One mailbox: warmup dot, address, provider, and whatever control the list needs. */
+function SenderRow({
+  sender,
+  children,
+}: {
+  sender: SmartleadSender;
+  children: React.ReactNode;
+}) {
+  const tone = warmupTone(sender);
+  return (
+    <div style={css(SENDER_ROW)}>
+      <span
+        title={
+          sender.warmupReputation
+            ? `Warmup reputation ${sender.warmupReputation}, as Smartlead reports it`
+            : "Smartlead reports no warmup reputation for this mailbox"
+        }
+        style={css(
+          `flex:0 0 auto; width:8px; height:8px; border-radius:50%; background:${WARMUP_DOT[tone]};`,
+        )}
+      />
+      <span
+        style={css(
+          "flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
+        )}
+      >
+        {sender.fromEmail || <span style={css(MUTED)}>No address</span>}
+        {sender.fromName && <span style={css(MUTED)}> · {sender.fromName}</span>}
+      </span>
+      {sender.provider && <span style={css(SENDER_CHIP)}>{sender.provider}</span>}
+      {/* The figure verbatim, never rounded into a word of ours — the dot is the
+          only interpretation on this row, and it is documented as one. */}
+      <span style={css(MUTED + "flex:0 0 auto;")}>
+        {sender.warmupReputation
+          ? `warmup ${sender.warmupReputation}`
+          : "warmup not reported"}
+        {sender.warmupReputation && !sender.warmupEnabled ? " · off" : ""}
+      </span>
+      {children}
+    </div>
   );
 }
 
