@@ -27,12 +27,20 @@
 //   * `owner is not Tom` MATCHES unassigned contacts. `!(c.owner === "Tom")` is
 //     the defensible reading of "is not", and stating it here is cheaper than
 //     having it rediscovered as a bug report.
+//   * `category is Food & Beverage` matches on the GROUP, not the stored string.
+//     The directory spells ten categories thirty-six ways, so the raw value is
+//     mapped through categoryGroup() in ./data.ts first. A contact whose
+//     spelling that table has never seen is in no group and matches no category
+//     condition — deliberately, see the note on categoryGroup.
+//   * `category is not Food & Beverage` therefore MATCHES a contact with no
+//     category at all, which is most of the book. Same reading as `owner is
+//     not Tom` above, and the same trap: pair it with another condition.
 //   * matchesConditions(c, []) is true (a vacuous AND). validateSavedView refuses
 //     to save an empty condition list, so that only happens for a corrupt or
 //     hand-edited row — and showing everything is the safer failure than showing
 //     nothing, which reads as data loss.
 
-import { STATUSES, type Contact } from "./data";
+import { CATEGORY_GROUPS, categoryGroup, STATUSES, type Contact } from "./data";
 
 export type ViewOp = "is" | "isNot";
 
@@ -59,7 +67,7 @@ export type SavedView = {
   conditions: ViewCondition[];
 };
 
-export const VIEW_FIELD_KEYS = ["status", "owner", "loop"] as const;
+export const VIEW_FIELD_KEYS = ["status", "owner", "loop", "category"] as const;
 export const VIEW_OPS = ["is", "isNot"] as const;
 
 /**
@@ -110,6 +118,15 @@ export const VIEW_FIELDS: ViewField[] = [
       { value: "1", label: "Loop 1 · always-on" },
       { value: "2", label: "Loop 2 · community blitz" },
     ],
+  },
+  {
+    // Values are the GROUP labels, not the raw category strings. A closed set
+    // like the other three, which is what keeps validateSavedView's per-field
+    // whitelist working unchanged — and what stops a saved view from carrying a
+    // spelling that matches nothing.
+    key: "category",
+    label: "Category",
+    options: CATEGORY_GROUPS.map((g) => ({ value: g, label: g })),
   },
 ];
 
@@ -180,6 +197,10 @@ function satisfies(c: Contact, field: string, value: string): boolean {
       return value === UNASSIGNED ? !c.owner : c.owner === value;
     case "loop":
       return c.loops.includes(Number(value));
+    case "category":
+      // Group, not raw string — see the header. A contact with no category, or
+      // one whose spelling is unmapped, groups to "" and matches nothing.
+      return categoryGroup(c.category) === value;
     default:
       // An unknown field can only come from a corrupt row (parseConditions drops
       // them). Match nothing rather than everything, so a broken clause narrows

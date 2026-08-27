@@ -99,6 +99,8 @@ type State = {
   delayDrafts: Record<string, string>;
   /** Per-loop "add a step" selection, as "<templateId>|<slot or all>". */
   addPick: Record<number, string>;
+  /** Per loop, the saved view to push a segment of. "" = the whole loop. */
+  segment: Record<number, string>;
   /** The step being dragged, or null. */
   dragToken: string | null;
   /**
@@ -154,6 +156,7 @@ export function SmartleadPage({
     expanded: {},
     delayDrafts: {},
     addPick: {},
+    segment: {},
     dragToken: null,
     editing: null,
     editSubject: "",
@@ -293,6 +296,7 @@ export function SmartleadPage({
                 expanded={S.expanded}
                 delayDrafts={S.delayDrafts}
                 addPick={S.addPick[loopView.loop] ?? ""}
+                segment={S.segment[loopView.loop] ?? ""}
                 dragToken={S.dragToken}
                 editing={S.editing}
                 editSubject={S.editSubject}
@@ -307,6 +311,7 @@ export function SmartleadPage({
                   patch({ delayDrafts: { ...S.delayDrafts, [key]: value } })
                 }
                 onAddPick={(value) => patch({ addPick: { ...S.addPick, [loopView.loop]: value } })}
+                onSegment={(value) => patch({ segment: { ...S.segment, [loopView.loop]: value } })}
                 onDrag={(key) => patch({ dragToken: key })}
                 onEdit={(variant) =>
                   patch({
@@ -354,6 +359,7 @@ function LoopCard({
   expanded,
   delayDrafts,
   addPick,
+  segment,
   dragToken,
   editing,
   editSubject,
@@ -364,6 +370,7 @@ function LoopCard({
   onExpand,
   onDelayDraft,
   onAddPick,
+  onSegment,
   onDrag,
   onEdit,
   onEditField,
@@ -382,6 +389,7 @@ function LoopCard({
   expanded: Record<string, boolean>;
   delayDrafts: Record<string, string>;
   addPick: string;
+  segment: string;
   dragToken: string | null;
   editing: string | null;
   editSubject: string;
@@ -392,13 +400,24 @@ function LoopCard({
   onExpand: (key: string) => void;
   onDelayDraft: (key: string, value: string) => void;
   onAddPick: (value: string) => void;
+  onSegment: (value: string) => void;
   onDrag: (key: string | null) => void;
   onEdit: (variant: SequencePreview | null) => void;
   onEditField: (field: { editSubject?: string; editBody?: string }) => void;
   onSubmit: (fields: Record<string, string>) => void;
   onConfirmUpload: () => void;
 }) {
-  const { loop, binding, sequence, leads } = view;
+  const { loop, binding, sequence, leads, segments } = view;
+
+  // What the button will actually push. A segment's count comes from the
+  // loader's per-view plan, not from filtering here — the client has the
+  // contacts but not the campaign membership that decides eligibility.
+  //
+  // A selected id that is no longer in `segments` (deleted in another tab
+  // between load and click) resolves to 0 rather than silently falling back to
+  // the whole loop, so the widest possible push is never one stale render away.
+  const activeSegment = segment ? segments.find((s) => s.id === segment) ?? null : null;
+  const pushCount = segment ? activeSegment?.eligible ?? 0 : leads.eligible;
   const loopName = loop === 1 ? "always-on outbound" : "event / community blitz";
   const disabled = !configured || pending;
   const post = (fields: Record<string, string>) => onSubmit({ ...fields, loop: String(loop) });
@@ -584,14 +603,33 @@ function LoopCard({
             >
               Import leads
             </Box>
+            {segments.length > 0 && (
+              // Only rendered once a saved view exists. With none, this is a
+              // one-option dropdown that says "everything" — noise on a button
+              // row that is already four controls wide.
+              <select
+                value={segment}
+                disabled={disabled || !binding}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onSegment(e.target.value)}
+                title="Push only the contacts in a saved view"
+                style={css(INPUT + "max-width:210px;")}
+              >
+                <option value="">Everyone on this loop ({leads.eligible})</option>
+                {segments.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.eligible})
+                  </option>
+                ))}
+              </select>
+            )}
             <Box
               as="button"
-              disabled={disabled || !binding || !leads.eligible}
-              onClick={() => post({ intent: "pushContacts" })}
+              disabled={disabled || !binding || !pushCount}
+              onClick={() => post({ intent: "pushContacts", viewId: segment })}
               style={css(PRIMARY)}
               hover={css("background:#333;")}
             >
-              Push {leads.eligible}
+              Push {pushCount}
             </Box>
           </div>
         </div>
@@ -608,7 +646,7 @@ function LoopCard({
             <Stat key={status} label={status.toLowerCase()} value={count} />
           ))}
         </div>
-        {leads.eligible > maxLeadPush && (
+        {pushCount > maxLeadPush && (
           <div style={css(MUTED + "margin-top:7px;")}>
             Pushes {maxLeadPush} at a time. Press again to continue.
           </div>

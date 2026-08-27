@@ -19,6 +19,7 @@ import {
   type SmartleadStatRow,
   type StoredSequenceStep,
 } from "../crm/smartlead-map";
+import { matchesConditions } from "../crm/views";
 import { crmFontLinks } from "../crm/ui";
 import { requireUser } from "../lib/session.server";
 import {
@@ -32,6 +33,7 @@ import {
   listContacts,
   listPushedContactIds,
   listPushedEmails,
+  listSavedViews,
   listSequenceSteps,
   listSequenceStepsByLoop,
   listTemplates,
@@ -106,6 +108,9 @@ export type AddableTemplate = {
   usableSlots: string[];
 };
 
+/** One "push only these" option: a saved view, plus what it would push now. */
+export type LeadSegment = { id: string; name: string; eligible: number };
+
 export type LoopView = {
   loop: number;
   binding: CampaignBinding | null;
@@ -126,6 +131,16 @@ export type LoopView = {
     /** Every template on this loop, for the "add a step" picker. */
     addable: AddableTemplate[];
   };
+  /**
+   * The saved views this loop can be pushed a segment of, each with the number
+   * of contacts that would actually go — the same planLeads() count the Push
+   * button shows, narrowed to the view's members.
+   *
+   * Sent as counts rather than as the views' conditions because the client never
+   * needs to evaluate them: picking a segment sends an id, and the action
+   * re-resolves it against D1. See the note on pushContacts.
+   */
+  segments: LeadSegment[];
   leads: {
     eligible: number;
     alreadyPushed: number;
@@ -152,11 +167,15 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     // operation on it is a manual button anyway, so the live campaign list is
     // fetched by an explicit intent instead. `contacts` also feeds the shared
     // sidebar's OWNER counts, exactly as on /templates.
-    const [contacts, templates, bindings, stepsByLoop] = await Promise.all([
+    const [contacts, templates, bindings, stepsByLoop, savedViews] = await Promise.all([
       listContacts(DB, now),
       listTemplates(DB, now),
       getCampaignBindings(DB, now),
       listSequenceStepsByLoop(DB),
+      // Same per-viewer read the contacts page does: shared views plus this
+      // user's private ones. A segment nobody can see is a segment nobody can
+      // push.
+      listSavedViews(DB, user.email),
     ]);
 
     // Which contacts are already sequencing in each campaign. Read per bound
@@ -183,7 +202,30 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       const plan = buildSequencePlan(templates, loop, steps);
       const other = loop === 1 ? 2 : 1;
       const leadPlan = planLeads(contacts, loop, pushedByLoop[loop], pushedByLoop[other]);
+
+      // One plan per saved view, so the picker can show what each segment would
+      // actually push rather than how many contacts it contains. The two numbers
+      // are routinely far apart — a view of 60 Food & Beverage contacts pushes 4
+      // if the other 56 are already in the campaign — and the count on the
+      // button is the one an operator is deciding against.
+      //
+      // Views that would push nothing are kept, not filtered out. A segment
+      // vanishing from the list reads as the view having been deleted; a segment
+      // sitting there saying 0 says what is true, which is that everyone in it
+      // has already been pushed.
+      const segments: LeadSegment[] = savedViews.map((view) => ({
+        id: view.id,
+        name: view.name,
+        eligible: planLeads(
+          contacts.filter((c) => matchesConditions(c, view.conditions)),
+          loop,
+          pushedByLoop[loop],
+          pushedByLoop[other],
+        ).leads.length,
+      }));
+
       return {
+        segments,
         loop,
         binding: bindings[loop] ?? null,
         sequence: {
@@ -872,21 +914,52 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
        * three must not lose the record that chunks one and two were already sent.
        * Re-clicking then pushes only the remainder.
        */
+      /**
+       * Push this loop's contacts, or just one saved view's worth of them.
+       *
+       * `viewId` is an id, never a list of contacts, and it is re-resolved here
+       * against D1 rather than trusted: the client says WHICH segment, the
+       * server decides WHO is in it. That is the same rule the loader's comment
+       * states about lead payloads, and it is what stops a hand-made POST from
+       * naming its own recipients. Resolving through listSavedViews also settles
+       * visibility for free — a private view belonging to someone else is not in
+       * this user's list, so its id resolves to nothing.
+       */
       case "pushContacts": {
         if (!binding) return { ok: false, error: "Link a campaign first." };
         const other = loop === 1 ? 2 : 1;
         const otherBinding = bindings[other];
-        const [contacts, pushed, otherPushed] = await Promise.all([
+        const viewId = form.get("viewId")?.toString().trim() ?? "";
+        const [allContacts, pushed, otherPushed, savedViews] = await Promise.all([
           listContacts(DB, Date.now()),
           listPushedContactIds(DB, binding.campaignId),
           otherBinding
             ? listPushedContactIds(DB, otherBinding.campaignId)
             : Promise.resolve(new Set<string>()),
+          viewId ? listSavedViews(DB, user.email) : Promise.resolve([]),
         ]);
+
+        // A named-but-missing view is refused, not silently widened to the whole
+        // loop. The failure mode of the alternative is the one that matters
+        // here: a stale tab pushes the entire contact book at a campaign because
+        // the segment it meant was deleted a minute ago.
+        const view = viewId ? savedViews.find((v) => v.id === viewId) ?? null : null;
+        if (viewId && !view) {
+          return { ok: false, error: "That view no longer exists. Reload and pick again." };
+        }
+
+        const contacts = view
+          ? allContacts.filter((c) => matchesConditions(c, view.conditions))
+          : allContacts;
 
         const plan = planLeads(contacts, loop, pushed, otherPushed);
         if (!plan.leads.length) {
-          return { ok: false, error: "No new contacts to push for this loop." };
+          return {
+            ok: false,
+            error: view
+              ? `No new contacts to push in "${view.name}".`
+              : "No new contacts to push for this loop.",
+          };
         }
 
         // Bounded so one press can't exceed the Worker's subrequest budget. The
@@ -914,6 +987,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         const remaining = plan.leads.length - sent;
         const summary =
           `Pushed ${sent} contact${sent === 1 ? "" : "s"}` +
+          (view ? ` from "${view.name}"` : "") +
           (remaining > 0 ? `, ${remaining} still to go.` : ".");
         if (sent) await stampCampaignSync(DB, loop, "leads", summary);
 
