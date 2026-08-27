@@ -6,6 +6,7 @@ import {
   CH,
   type Contact,
   hasNameConflict,
+  isArrFigure,
   loopBadge,
   needsAttention,
   statusMeta,
@@ -50,6 +51,8 @@ import { ProspectingPanel } from "./prospecting-panel";
 import { buildRunView, type RunView } from "./prospecting";
 import { buildOwnerTabs, buildViewTabs, Sidebar } from "./sidebar";
 import {
+  ArrLabel,
+  CategoryTag,
   ContactDetail,
   DeadReasonModal,
   DeleteContactsModal,
@@ -1066,6 +1069,11 @@ export function SalesLoopCRM({
       linkedinHref: linkedinUrl(c.linkedin),
       hasSource: c.loops.includes(2) && !!(c.source && c.source.trim()),
       source: (c.source || "").trim(),
+      category: (c.category || "").trim(),
+      // Only the figure reaches the table. The prose variant is a paragraph,
+      // and a paragraph ellipsised into a table cell reads as a broken field
+      // rather than as information; the detail panel shows that kind in full.
+      arrFigure: isArrFigure(c.arr) ? (c.arr || "").trim() : "",
       loops: c.loops.map((l) => loopBadge(l, true)),
       touch: {
         channel: ch.label,
@@ -1429,6 +1437,8 @@ export function SalesLoopCRM({
                         <div style={css("display:flex; align-items:center; gap:6px; min-width:0;")}>
                           <span style={css("font-size:12px; color:#9a9a95; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.25;")}>{row.company}</span>
                           {row.hasSource && <SourceTag label={row.source} />}
+                          {row.category && <CategoryTag label={row.category} />}
+                          {row.arrFigure && <ArrLabel value={row.arrFigure} />}
                         </div>
                       </div>
                     </div>
