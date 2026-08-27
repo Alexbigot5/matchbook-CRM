@@ -24,6 +24,7 @@ import {
   conflictOwners,
   type Contact,
   fmtDate,
+  isArrFigure,
   loopBadge,
   type NameIndex,
   NO_TOUCH_ICON,
@@ -111,6 +112,49 @@ export function SourceTag({ label }: { label: string }) {
         <path d="M12 6v12" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1.5 2.5" />
       </svg>
       <span style={css("overflow:hidden; text-overflow:ellipsis;")}>{label}</span>
+    </span>
+  );
+}
+
+// Small slate pill marking the brand's product vertical, backfilled from
+// scripts/brand-directory.csv. Same shape as SourceTag but deliberately not the
+// same colour: the two sit side by side on a Loop 2 contact, and two amber pills
+// would read as one field split in half rather than two different facts.
+export function CategoryTag({ label }: { label: string }) {
+  return (
+    <span
+      title={"Category: " + label}
+      style={css(
+        "display:inline-flex; align-items:center; gap:4px; max-width:150px; padding:1px 7px 1px 6px; border-radius:6px; font-size:11px; font-weight:500; background:#eff1f6; color:#586277; border:1px solid #e2e6ef; white-space:nowrap; overflow:hidden; flex:0 0 auto;",
+      )}
+    >
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" style={css("flex:0 0 auto;")}>
+        <path
+          d="M3 11V4a1 1 0 0 1 1-1h7l10 10-8 8L3 11Z"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+        <circle cx="7.2" cy="7.2" r="1.4" fill="currentColor" />
+      </svg>
+      <span style={css("overflow:hidden; text-overflow:ellipsis;")}>{label}</span>
+    </span>
+  );
+}
+
+// The ARR figure as a plain muted label, not a pill. A pill is for a taxonomy —
+// something you would filter or group by — and "$5M - $20M" is a reading off a
+// dial. Giving it a border and a background would claim a significance the
+// number does not have, and would compete with the category beside it.
+//
+// Mono because it is a figure, matching the last-touch age in the same row.
+export function ArrLabel({ value }: { value: string }) {
+  return (
+    <span
+      title={"ARR: " + value}
+      style={css(MONO + "font-size:11px; color:#8f8f89; white-space:nowrap; flex:0 0 auto;")}
+    >
+      {value}
     </span>
   );
 }
@@ -307,6 +351,14 @@ export function ContactDetail({
   const ownerName = contact.owner || "Unassigned";
   const ownerColor = o ? o.color : "#b0b0aa";
   const ownerInitial = o ? o.initial : "?";
+  // Backfilled brand facts. `arr` holds a figure for most matched brands and the
+  // enrichment model's prose about why it could not find one for the rest, so it
+  // splits into two very different things to render (see isArrFigure).
+  const category = (contact.category ?? "").trim();
+  const arrRaw = (contact.arr ?? "").trim();
+  const arrFigure = isArrFigure(arrRaw) ? arrRaw : "";
+  const arrNote = arrRaw && !arrFigure ? arrRaw : "";
+
   const hasSource = !!(contact.source && contact.source.trim());
   const canResume = contact.loops.includes(2) && !contact.resumedToLoop1At;
   const conflictText = conflict
@@ -325,6 +377,32 @@ export function ContactDetail({
             <div style={css("flex:1; min-width:0;")}>
               <div style={css("font-size:18px; font-weight:600; letter-spacing:-0.015em; line-height:1.2;")}>{contact.name}</div>
               <div style={css("font-size:13px; color:#9a9a95; margin-top:2px;")}>{contact.company} · owned by {ownerName}</div>
+              {(category || arrFigure) && (
+                <div style={css("display:flex; align-items:center; gap:7px; margin-top:6px; flex-wrap:wrap;")}>
+                  {category && <CategoryTag label={category} />}
+                  {arrFigure && <ArrLabel value={arrFigure} />}
+                </div>
+              )}
+              {arrNote && (
+                // Clamped rather than wrapped in full: these run to 684
+                // characters, and the header is not in the panel's scroll
+                // container, so an unbounded note would push the status pills
+                // and the whole timeline below the fold. The title carries it
+                // all. Set as an object because css() cannot express the
+                // vendor-prefixed line clamp.
+                <div
+                  title={arrNote}
+                  style={{
+                    ...css("font-size:11.5px; color:#a3a39d; margin-top:5px; line-height:1.45;"),
+                    display: "-webkit-box",
+                    WebkitBoxOrient: "vertical",
+                    WebkitLineClamp: 3,
+                    overflow: "hidden",
+                  }}
+                >
+                  {arrNote}
+                </div>
+              )}
               {hasSource && (
                 <div style={css("font-size:12.5px; color:#b45309; margin-top:3px; display:flex; align-items:center; gap:5px;")}>
                   <span style={css("width:6px; height:6px; border-radius:3px; background:#e0930a; flex:0 0 auto;")} />

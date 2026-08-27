@@ -38,6 +38,13 @@ export const LIMITS = {
   linkedin: 500,
   source: 200,
   status: 60,
+  // Brand facts from the directory backfill. `category` sits with the other
+  // labels; `arr` needs an order more room because it is not always a figure —
+  // the source data runs to 684 characters of enrichment prose on the rows
+  // where revenue could not be pinned down, and clipping that would leave a
+  // sentence cut mid-word in the UI.
+  category: 200,
+  arr: 1_000,
   note: 5_000,
   // Email templates. `body` is twice `note` because an email body is not a CRM
   // note — a real cold intro with merge tokens runs long, and truncating one at

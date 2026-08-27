@@ -111,6 +111,8 @@ type ContactRow = {
   status: string;
   loops: string;
   source: string | null;
+  category: string | null;
+  arr: string | null;
   follow_up_at: string | null;
   resumed_to_loop1_at: string | null;
   dead_reason: string | null;
@@ -158,11 +160,11 @@ export async function listContacts(
   const [contactsRes, notesRes, touchesRes] = await Promise.all([
     (limit === null
       ? db.prepare(
-          "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
+          "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
         )
       : db
           .prepare(
-            "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
           )
           .bind(limit, offset)
     ).all<ContactRow>(),
@@ -231,6 +233,8 @@ export async function listContacts(
       followUp,
       followUpDateLabel,
       source: row.source ?? null,
+      category: row.category ?? null,
+      arr: row.arr ?? null,
       resumedToLoop1At: row.resumed_to_loop1_at ?? null,
       resumedLabel,
       deadReason: row.dead_reason ?? null,

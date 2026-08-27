@@ -33,6 +33,14 @@ export type Contact = {
   followUpDateLabel?: string | null;
   // Loop 2 origin - the community/event a contact came from (e.g. "Newtopia").
   source?: string | null;
+  // Brand facts backfilled from scripts/brand-directory.csv, matched on company
+  // name. Null for the ~third of the book (influencer handles, test rows) the
+  // directory has no entry for, so both render conditionally.
+  category?: string | null;
+  // Free text, not a number: the directory gives a figure for about 60% of
+  // brands ("$5M - $20M") and an enrichment model's prose about why it could
+  // not pin one down for the rest. See isArrFigure below.
+  arr?: string | null;
   // When a Loop 2 contact was resumed into Loop 1 outbound: raw ISO timestamp
   // plus a precomputed "Jul 20"-style label (null when never resumed).
   resumedToLoop1At?: string | null;
@@ -43,6 +51,37 @@ export type Contact = {
   deadReason?: string | null;
   opts: ContactOpts;
 };
+
+/**
+ * Longest `arr` value treated as a figure rather than a note. The two
+ * populations in scripts/brand-directory.csv do not overlap and are not close:
+ * every figure fits in 35 characters and every note runs to at least 109, so
+ * this threshold sits in a 74-character gap where no real value lands.
+ */
+export const ARR_FIGURE_MAX = 60;
+
+/**
+ * True when `arr` holds the figure the column is named for ("$5M - $20M"),
+ * false when it holds the enrichment model's prose about why it could not pin
+ * one down ("Revenue is estimated based on secondary sources...").
+ *
+ * Length, not a currency pattern, because the notes are full of figures too
+ * ("almost a million", "likely exceeds $5M annual revenue") — matching on "$"
+ * or a digit would wave most of them straight through. Callers use this to keep
+ * a paragraph out of a table cell; both kinds are still stored in full and both
+ * are still shown somewhere.
+ */
+export function isArrFigure(arr: string | null | undefined): boolean {
+  const v = (arr ?? "").trim();
+  if (!v || v.length > ARR_FIGURE_MAX) return false;
+  // Third shape, short enough to slip through on length alone: the screening
+  // flags the directory carries for brands it never priced
+  // ("under_100m=yes; over_5m=yes"). That is the answer to a qualifying
+  // question, not a revenue figure, and rendering it beside a company name in
+  // the contacts table reads as leaked internal plumbing. It is still shown in
+  // full on the detail panel, where notes belong.
+  return !/=\s*(yes|no)\b/i.test(v);
+}
 
 export type Channel = { label: string; bg: string; fg: string; icon: string };
 export type StatusMeta = { id: string; dot: string; bg: string; fg: string };
