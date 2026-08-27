@@ -25,6 +25,13 @@
 --                   usableSlots in the /smartlead loader counts a variant on body
 --                   content alone, so a blank subject does not block selection.
 --
+-- The sign-off is %sender-firstname%, not a name. Smartlead resolves it per
+-- sending mailbox, so one template signed off once goes out from ten mailboxes
+-- and names the right person each time; the literal "Tom" that was here
+-- originally signed every send as Tom no matter who it came from. Note the
+-- syntax: %...% is a fact about the sending mailbox, where {{...}} is lead data
+-- merged from the contact row. There is no {{sender}}.
+--
 -- Slot A is is_default = 1 and slot B is 0, matching createTemplate/addVariant:
 -- the incumbent keeps serving until someone promotes the challenger.
 --
@@ -51,7 +58,7 @@ Between lowering CAC or getting more sales velocity, what''s the priority for yo
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('7ff04527-e271-4f50-afd0-0903fd97e15d', 'a8106d65-ac7b-420b-a8ac-a2c8a3da211a', 'B', '', 'Hey [First Name],
 
@@ -70,7 +77,7 @@ Between lowering CAC or getting more sales velocity, what''s the priority for yo
 
 here to help,
 
-Tom', 0);
+%sender-firstname%', 0);
 
 -- 2. Primary ICP — Short & Clear (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -84,7 +91,7 @@ We can help. We run a (incoming buzzwords alert) geo-fenced, digital-to-retail, 
 
 Let''s jam?
 
-Tom', 1);
+%sender-firstname%', 1);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('40070962-c5ad-492e-81c9-e4f8a932243c', 'fcecbefb-0fda-471c-bae6-3acca4e126ff', 'B', '', 'Hi [First Name],
 
@@ -96,7 +103,7 @@ Between lowering CAC or getting more velocity at retail, what''s the priority fo
 
 here to help,
 
-Tom', 0);
+%sender-firstname%', 0);
 
 -- 3. Primary ICP — Personal/Coworker (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -106,7 +113,7 @@ VALUES ('c3b4821e-3b1a-4d38-9650-fb9e52229a2e', '7a9ecb9b-2dca-4af6-87b4-208fb0a
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 
 -- 4. Consumer SaaS — Resume/Credibility (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -122,7 +129,7 @@ Between expanding awareness or driving down-funnel conversion, what''s your prio
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('411fa1f9-347f-406b-b311-165e3b58d8c9', 'a9023eb8-4798-48d9-9364-1490f2e12d39', 'B', '', 'Hey [First Name],
 
@@ -139,7 +146,7 @@ If expanding awareness or driving down-funnel conversion are a priority for [Bra
 
 here to help,
 
-Tom', 0);
+%sender-firstname%', 0);
 
 -- 5. Consumer SaaS — Personal/Coworker (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -153,7 +160,7 @@ Between building brand awareness or systematizing a way to capture it, which one
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 
 -- 6. Consumer SaaS — Short & Clear (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -169,7 +176,7 @@ Between expanding awareness or driving down-funnel conversion, what''s the prior
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 
 -- 7. Micro CPG — Resume/Credibility (vs B) (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -185,7 +192,7 @@ We know [Brand] is in that stage where every dollar has to move the business, an
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('eeede797-082a-45ca-b639-a31143aca7ea', '6e120582-ffb8-4587-abcc-1cc2e235dd62', 'B', '', 'Hey [First Name],
 
@@ -203,7 +210,7 @@ Between lowering CAC or more sales in general, what''s the priority for you righ
 
 here to help,
 
-Tom', 0);
+%sender-firstname%', 0);
 
 -- 8. Micro CPG — Resume/Credibility (vs B-alt) (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -219,7 +226,7 @@ We know [Brand] is in that stage where every dollar has to move the business, an
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('b87190df-8497-480c-ba48-2951a971000a', 'c347a939-83db-4742-8e1d-83baa88189a1', 'B', '', 'Hey [First Name],
 
@@ -233,7 +240,7 @@ we (Matchbook) work with / have worked with companies like:
 
 That said, we built you a starter package specifically for brands your size, inclusive of the full suite of what we do, sized and priced for where you''re actually at. Frankly, the reason we want to work with you is because we know you''re in the stage where every dollar matters and needs to move the needle. We know our programming works. Let''s jam.
 
-Tom', 0);
+%sender-firstname%', 0);
 
 -- 9. Micro CPG — Personal/Coworker (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -247,7 +254,7 @@ How are you thinking about the next 6 months on the growth side, is it "we need 
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 
 -- 10. Micro CPG — Short & Clear (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -261,7 +268,7 @@ We can help. We built a starter package specifically for brands your size. It''s
 
 I''m sure you''ll have questions. Let''s find some time to talk through them?
 
-Tom', 1);
+%sender-firstname%', 1);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('9c1f4769-b1f6-48d9-9ac7-b7008d689739', 'cd8124fe-2b46-49d0-b5b1-549bc9f238e4', 'B', '', 'Hi [First Name],
 
@@ -271,7 +278,7 @@ Between lowering CAC or getting more sales velocity, what''s the priority for yo
 
 here to help,
 
-Tom', 0);
+%sender-firstname%', 0);
 
 -- 11. Bigger DTC — Resume/Credibility (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -287,7 +294,7 @@ At [Brand]''s stage, high-level execution in this layer is usually a missing pie
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 
 -- 12. Bigger DTC — Personal/Coworker (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -301,7 +308,7 @@ Are you actively looking to compress CAC, nail a specific launch or LTO landing,
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
 
 -- 13. Bigger DTC — Short & Clear (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
@@ -315,4 +322,4 @@ Is lowering CAC on your radar right now, or is it more like nailing an upcoming 
 
 here to help,
 
-Tom', 1);
+%sender-firstname%', 1);
