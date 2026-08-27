@@ -83,6 +83,111 @@ export function isArrFigure(arr: string | null | undefined): boolean {
   return !/=\s*(yes|no)\b/i.test(v);
 }
 
+/**
+ * The category groups a contact can be filtered by, in the order the dropdown
+ * shows them.
+ *
+ * These exist because the brand directory spells roughly ten categories
+ * thirty-six ways: "Food & Beverage", "Food & Bev", "Food/Bev", "Food/Beverage"
+ * and "food/bev" are all in there, on brands that are the same kind of business.
+ * A view built on the raw string would quietly match one spelling and miss the
+ * other four, which is the worst possible failure for a filter — it looks like
+ * it worked.
+ *
+ * The raw value stays on the contact untouched (it is what the directory said,
+ * and the tag on the row shows it verbatim). This is a grouping applied at
+ * filter time only, so re-grouping later is a code change and never a data
+ * migration.
+ */
+export const CATEGORY_GROUPS = [
+  "Food & Beverage",
+  "Beauty & Personal Care",
+  "Health & Wellness",
+  "Household",
+  "Pet",
+  "Apparel & Accessories",
+  "Toys & Games",
+  "Alcohol",
+  "Stationery & Office",
+] as const;
+
+export type CategoryGroup = (typeof CATEGORY_GROUPS)[number];
+
+/**
+ * Every raw category string the directory uses, mapped to its group. Keyed
+ * lowercase because the same value appears cased both ways ("Food/Bev" and
+ * "food/bev").
+ *
+ * Written out in full rather than inferred from substrings. "Beauty" contains
+ * neither "personal" nor "care", "Snacks" contains neither "food" nor
+ * "beverage", and a substring rule that stretched to cover those would also
+ * fold "Household & Personal Care" into Beauty. An explicit table is longer and
+ * says exactly what it does.
+ *
+ * Two judgement calls worth disagreeing with:
+ *   - Alcohol is its own group, not a Food & Beverage. Different buyers,
+ *     different rules about what you can say in an ad.
+ *   - "Household & Personal Care" is filed under Household. It genuinely
+ *     straddles two groups and there is one contact in it.
+ */
+const CATEGORY_GROUP_BY_RAW: ReadonlyMap<string, CategoryGroup> = new Map(
+  (
+    [
+      ["Food & Beverage", "Food & Beverage"],
+      ["Food & Bev", "Food & Beverage"],
+      ["Food/Beverage", "Food & Beverage"],
+      ["Food/Bev", "Food & Beverage"],
+      ["Food", "Food & Beverage"],
+      ["Food/Snacks", "Food & Beverage"],
+      ["Snacks", "Food & Beverage"],
+      ["Beverage", "Food & Beverage"],
+      ["Beverages", "Food & Beverage"],
+      ["Beauty", "Beauty & Personal Care"],
+      ["Beauty & Personal Care", "Beauty & Personal Care"],
+      ["Beauty Accessories", "Beauty & Personal Care"],
+      ["Beauty/Skincare", "Beauty & Personal Care"],
+      ["Personal Care", "Beauty & Personal Care"],
+      ["Wellness", "Health & Wellness"],
+      ["Wellness Products", "Health & Wellness"],
+      ["Wellness/Supplements", "Health & Wellness"],
+      ["Health", "Health & Wellness"],
+      ["Health & Wellness", "Health & Wellness"],
+      ["Supplements", "Health & Wellness"],
+      ["Vitamins & Supplements", "Health & Wellness"],
+      ["Fitness Supplements", "Health & Wellness"],
+      ["Household", "Household"],
+      ["Household Goods", "Household"],
+      ["Household & Personal Care", "Household"],
+      ["Pet", "Pet"],
+      ["Pet Care", "Pet"],
+      ["Pet Food", "Pet"],
+      ["Apparel", "Apparel & Accessories"],
+      ["Apparel & Accessories", "Apparel & Accessories"],
+      ["Toys", "Toys & Games"],
+      ["Toys & Games", "Toys & Games"],
+      ["Toys & Hobbies", "Toys & Games"],
+      ["Alcohol", "Alcohol"],
+      ["Stationery & Office", "Stationery & Office"],
+    ] as [string, CategoryGroup][]
+  ).map(([raw, group]) => [raw.toLowerCase(), group]),
+);
+
+/**
+ * The group a contact's raw category belongs to, or "" for no category and for
+ * a spelling the table above has never seen.
+ *
+ * "" rather than an "Other" bucket on purpose: an Other option in the dropdown
+ * would mix "this brand is in a vertical we have no group for" with "a new
+ * spelling arrived and nobody has filed it yet", and the second is a thing to
+ * fix in the table, not a category to prospect into. An unmapped value still
+ * shows verbatim on the contact row; it just is not filterable until it is
+ * mapped.
+ */
+export function categoryGroup(category: string | null | undefined): string {
+  const v = (category ?? "").trim().toLowerCase();
+  return v ? CATEGORY_GROUP_BY_RAW.get(v) ?? "" : "";
+}
+
 export type Channel = { label: string; bg: string; fg: string; icon: string };
 export type StatusMeta = { id: string; dot: string; bg: string; fg: string };
 export type Owner = { initial: string; color: string };
