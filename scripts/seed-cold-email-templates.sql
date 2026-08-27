@@ -35,9 +35,9 @@
 -- "(vs B-alt)" reusing Version A's copy verbatim rather than displacing it.
 
 
--- 1. Primary ICP — Resume/Credibility (A/B)
+-- 1. Primary ICP: Resume/Credibility (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('a8106d65-ac7b-420b-a8ac-a2c8a3da211a', 'Primary ICP — Resume/Credibility', 1, 'draft', 0);
+VALUES ('a8106d65-ac7b-420b-a8ac-a2c8a3da211a', 'Primary ICP: Resume/Credibility', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('28c0e762-88b6-4ccf-8d5b-67e5d19f3d2c', 'a8106d65-ac7b-420b-a8ac-a2c8a3da211a', 'A', '', 'Hey [First Name],
 
@@ -72,9 +72,9 @@ here to help,
 
 Tom', 0);
 
--- 2. Primary ICP — Short & Clear (A/B)
+-- 2. Primary ICP: Short & Clear (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('fcecbefb-0fda-471c-bae6-3acca4e126ff', 'Primary ICP — Short & Clear', 1, 'draft', 0);
+VALUES ('fcecbefb-0fda-471c-bae6-3acca4e126ff', 'Primary ICP: Short & Clear', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('e75c239e-b6d8-43d0-a17c-eb756de2c5b2', 'fcecbefb-0fda-471c-bae6-3acca4e126ff', 'A', '', 'Hey [First Name],
 
@@ -98,9 +98,9 @@ here to help,
 
 Tom', 0);
 
--- 3. Primary ICP — Personal/Coworker (A only)
+-- 3. Primary ICP: Personal/Coworker (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('7a9ecb9b-2dca-4af6-87b4-208fb0a7a4b4', 'Primary ICP — Personal/Coworker', 1, 'draft', 0);
+VALUES ('7a9ecb9b-2dca-4af6-87b4-208fb0a7a4b4', 'Primary ICP: Personal/Coworker', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('c3b4821e-3b1a-4d38-9650-fb9e52229a2e', '7a9ecb9b-2dca-4af6-87b4-208fb0a7a4b4', 'A', '', 'Hey [First Name], I''ll spare you the whole "hope this finds you well" thing lol, but I saw [Brand] next to my go-to [bigger, competing brand] on shelf at [retailer/store] and got curious. Are you running anything to convert the digital audience into people actually walking in and buying? That''s something we specialize in (did it for Jack Link''s, Ridge, beast brands, and more).
 
@@ -108,9 +108,9 @@ here to help,
 
 Tom', 1);
 
--- 4. Consumer SaaS — Resume/Credibility (A/B)
+-- 4. Consumer SaaS: Resume/Credibility (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('a9023eb8-4798-48d9-9364-1490f2e12d39', 'Consumer SaaS — Resume/Credibility', 1, 'draft', 0);
+VALUES ('a9023eb8-4798-48d9-9364-1490f2e12d39', 'Consumer SaaS: Resume/Credibility', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('954c6f28-89d0-474e-a6eb-e8b1ff3e0033', 'a9023eb8-4798-48d9-9364-1490f2e12d39', 'A', '', 'Hey [First Name],
 
@@ -141,9 +141,9 @@ here to help,
 
 Tom', 0);
 
--- 5. Consumer SaaS — Personal/Coworker (A only)
+-- 5. Consumer SaaS: Personal/Coworker (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('59fb71e9-d51b-4d0e-b46e-294e2f3af746', 'Consumer SaaS — Personal/Coworker', 1, 'draft', 0);
+VALUES ('59fb71e9-d51b-4d0e-b46e-294e2f3af746', 'Consumer SaaS: Personal/Coworker', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('ee672e89-d85a-4984-9817-4cfc8bb5850e', '59fb71e9-d51b-4d0e-b46e-294e2f3af746', 'A', '', 'Hey [First Name],
 
@@ -155,9 +155,9 @@ here to help,
 
 Tom', 1);
 
--- 6. Consumer SaaS — Short & Clear (A only)
+-- 6. Consumer SaaS: Short & Clear (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('f59fc59b-aabb-4f57-a15b-ee065f201b9c', 'Consumer SaaS — Short & Clear', 1, 'draft', 0);
+VALUES ('f59fc59b-aabb-4f57-a15b-ee065f201b9c', 'Consumer SaaS: Short & Clear', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('f06d2b73-64f7-4e6d-8524-e13c19cc7055', 'f59fc59b-aabb-4f57-a15b-ee065f201b9c', 'A', '', 'Hey [First Name],
 
@@ -171,9 +171,9 @@ here to help,
 
 Tom', 1);
 
--- 7. Micro CPG — Resume/Credibility (vs B) (A/B)
+-- 7. Micro CPG: Resume/Credibility (vs B) (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('6e120582-ffb8-4587-abcc-1cc2e235dd62', 'Micro CPG — Resume/Credibility (vs B)', 1, 'draft', 0);
+VALUES ('6e120582-ffb8-4587-abcc-1cc2e235dd62', 'Micro CPG: Resume/Credibility (vs B)', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('f261dab5-1a2c-42ac-a744-4583743aad93', '6e120582-ffb8-4587-abcc-1cc2e235dd62', 'A', '', 'Hey [First Name],
 
@@ -205,9 +205,9 @@ here to help,
 
 Tom', 0);
 
--- 8. Micro CPG — Resume/Credibility (vs B-alt) (A/B)
+-- 8. Micro CPG: Resume/Credibility (vs B-alt) (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('c347a939-83db-4742-8e1d-83baa88189a1', 'Micro CPG — Resume/Credibility (vs B-alt)', 1, 'draft', 0);
+VALUES ('c347a939-83db-4742-8e1d-83baa88189a1', 'Micro CPG: Resume/Credibility (vs B-alt)', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('ccb36e07-108b-4771-9612-f4298d756058', 'c347a939-83db-4742-8e1d-83baa88189a1', 'A', '', 'Hey [First Name],
 
@@ -235,9 +235,9 @@ That said, we built you a starter package specifically for brands your size, inc
 
 Tom', 0);
 
--- 9. Micro CPG — Personal/Coworker (A only)
+-- 9. Micro CPG: Personal/Coworker (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('a3b753ab-936c-4302-a98a-1e0691d00d23', 'Micro CPG — Personal/Coworker', 1, 'draft', 0);
+VALUES ('a3b753ab-936c-4302-a98a-1e0691d00d23', 'Micro CPG: Personal/Coworker', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('f67d75b9-c429-45ac-bd5f-e152a23ecf8b', 'a3b753ab-936c-4302-a98a-1e0691d00d23', 'A', '', 'Hey [First Name], sending you this email because [Brand] caught my attention.
 
@@ -249,9 +249,9 @@ here to help,
 
 Tom', 1);
 
--- 10. Micro CPG — Short & Clear (A/B)
+-- 10. Micro CPG: Short & Clear (A/B)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('cd8124fe-2b46-49d0-b5b1-549bc9f238e4', 'Micro CPG — Short & Clear', 1, 'draft', 0);
+VALUES ('cd8124fe-2b46-49d0-b5b1-549bc9f238e4', 'Micro CPG: Short & Clear', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('8cfde54f-1244-4c1a-81e4-1d4ff3f40b5e', 'cd8124fe-2b46-49d0-b5b1-549bc9f238e4', 'A', '', 'Hey [First Name],
 
@@ -273,9 +273,9 @@ here to help,
 
 Tom', 0);
 
--- 11. Bigger DTC — Resume/Credibility (A only)
+-- 11. Bigger DTC: Resume/Credibility (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('87203255-de6a-4803-855d-a14a5481d7fb', 'Bigger DTC — Resume/Credibility', 1, 'draft', 0);
+VALUES ('87203255-de6a-4803-855d-a14a5481d7fb', 'Bigger DTC: Resume/Credibility', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('a47f05b5-443b-48a8-ad5f-e1994303e05f', '87203255-de6a-4803-855d-a14a5481d7fb', 'A', '', 'Hey [First Name],
 
@@ -289,9 +289,9 @@ here to help,
 
 Tom', 1);
 
--- 12. Bigger DTC — Personal/Coworker (A only)
+-- 12. Bigger DTC: Personal/Coworker (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('56732aa9-833d-4749-8d41-39a5f471b09e', 'Bigger DTC — Personal/Coworker', 1, 'draft', 0);
+VALUES ('56732aa9-833d-4749-8d41-39a5f471b09e', 'Bigger DTC: Personal/Coworker', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('bd4db396-03bf-43bb-bdab-6e8da46b942c', '56732aa9-833d-4749-8d41-39a5f471b09e', 'A', '', 'Hey [First Name], sending you this email because [Brand] caught my attention.
 
@@ -303,9 +303,9 @@ here to help,
 
 Tom', 1);
 
--- 13. Bigger DTC — Short & Clear (A only)
+-- 13. Bigger DTC: Short & Clear (A only)
 INSERT INTO email_templates (id, name, loop, status, send_day)
-VALUES ('74f5defc-939d-47b5-9907-7fc30ecc0f46', 'Bigger DTC — Short & Clear', 1, 'draft', 0);
+VALUES ('74f5defc-939d-47b5-9907-7fc30ecc0f46', 'Bigger DTC: Short & Clear', 1, 'draft', 0);
 INSERT INTO template_variants (id, template_id, slot, subject, body, is_default)
 VALUES ('ab755dbd-0610-456a-9efd-c244adfd2064', '74f5defc-939d-47b5-9907-7fc30ecc0f46', 'A', '', 'Hey [First Name],
 
