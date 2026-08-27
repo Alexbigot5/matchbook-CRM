@@ -471,6 +471,163 @@ function duplicateWarnings(rows: SequencePlanRow[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Senders (Smartlead email accounts -> the mailboxes a campaign sends from)
+// ---------------------------------------------------------------------------
+//
+// A campaign sends from one or more of the account's connected mailboxes, and
+// rotates between them. Nothing about them is stored in D1: unlike the sequence,
+// which this CRM authors, the mailbox list is Smartlead's own state — read on
+// demand, changed by assigning or unassigning, and never mirrored here, so there
+// is nothing that can drift out of date while nobody is looking.
+
+/**
+ * One email account as Smartlead returns it, from either
+ * `/email-accounts/` or `/campaigns/{id}/email-accounts`.
+ *
+ * Every field is optional because both endpoints have shipped rows missing one:
+ * the two warmup fields in particular arrive flat on some accounts and nested
+ * under `warmup_details` on others, so both spellings are read below rather than
+ * assumed. Nothing else on the row is mapped — a mailbox's password, SMTP host
+ * and port are on it too, and none of that belongs anywhere near this CRM.
+ */
+export type SmartleadEmailAccount = {
+  id?: number | string | null;
+  from_email?: string | null;
+  from_name?: string | null;
+  type?: string | null;
+  warmup_enabled?: boolean | null;
+  warmup_reputation?: number | string | null;
+  warmup_details?: {
+    status?: string | null;
+    warmup_reputation?: number | string | null;
+  } | null;
+};
+
+/** One mailbox, as the page renders it. */
+export type SmartleadSender = {
+  accountId: string;
+  fromEmail: string;
+  fromName: string;
+  /** Smartlead's `type` — GMAIL, OUTLOOK, SMTP. Shown verbatim, or "" when absent. */
+  provider: string;
+  warmupEnabled: boolean;
+  /**
+   * Warmup reputation exactly as Smartlead reports it ("100%", "94"), or null
+   * when the row carries none. Deliberately kept as text and rendered verbatim:
+   * this CRM measures nothing about deliverability, so translating the number
+   * into a word of our own would be putting our label on their figure.
+   */
+  warmupReputation: string | null;
+  /** The same value read as a percentage, or null when it isn't one. Colours the dot. */
+  warmupPercent: number | null;
+};
+
+function accountText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function reputationText(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return null;
+}
+
+/** Shape one row, or null when it carries no id — there is nothing to assign or remove. */
+export function mapEmailAccount(row: SmartleadEmailAccount): SmartleadSender | null {
+  const accountId = row?.id === undefined || row?.id === null ? "" : String(row.id).trim();
+  if (!accountId) return null;
+
+  const details = row.warmup_details ?? null;
+  const warmupReputation =
+    reputationText(row.warmup_reputation) ?? reputationText(details?.warmup_reputation);
+  // Flat flag first, then a warmup_details block reporting ACTIVE. A row with
+  // neither reads as false, which is an absence and not a statement — so the page
+  // only says "off" where there is a reputation figure for it to contradict,
+  // rather than announcing a setting the response never mentioned.
+  const warmupEnabled =
+    typeof row.warmup_enabled === "boolean"
+      ? row.warmup_enabled
+      : accountText(details?.status).toUpperCase() === "ACTIVE";
+
+  const percent = warmupReputation === null ? NaN : Number(warmupReputation.replace("%", "").trim());
+
+  return {
+    accountId,
+    fromEmail: accountText(row.from_email),
+    fromName: accountText(row.from_name),
+    provider: accountText(row.type),
+    warmupEnabled,
+    warmupReputation,
+    warmupPercent: Number.isFinite(percent) && percent >= 0 && percent <= 100 ? percent : null,
+  };
+}
+
+/** How healthy a mailbox's warmup looks. See warmupTone(). */
+export type WarmupTone = "strong" | "fair" | "weak" | "unknown";
+
+/**
+ * Which band the dot beside a mailbox falls in.
+ *
+ * The thresholds are OURS. Smartlead publishes a percentage and no grades, so
+ * there is no scale to copy — which is exactly why the percentage itself is
+ * always rendered next to the dot, and why an unparseable value is "unknown"
+ * rather than assumed bad. Read the number, not the colour.
+ */
+export function warmupTone(sender: SmartleadSender): WarmupTone {
+  if (sender.warmupPercent === null) return "unknown";
+  if (sender.warmupPercent >= 90) return "strong";
+  if (sender.warmupPercent >= 75) return "fair";
+  return "weak";
+}
+
+export type SenderPlan = {
+  /** Mailboxes this campaign currently sends from. */
+  assigned: SmartleadSender[];
+  /** On the account but not on this campaign — the ones "Assign" can add. */
+  available: SmartleadSender[];
+};
+
+/**
+ * Split the account's mailboxes into the campaign's and the rest.
+ *
+ * Membership is decided by the campaign's OWN list, never by re-deriving it from
+ * a flag on the account-wide rows: a mailbox can serve several campaigns at once,
+ * so nothing on the account row says which ones. Assigned entries are taken from
+ * the campaign response, so a mailbox the account-wide read didn't reach (it is
+ * paged, and the cap is a real one) still appears as assigned rather than
+ * silently dropping out of the rotation the page is describing.
+ */
+export function planSenders(
+  assignedRows: SmartleadEmailAccount[],
+  accountRows: SmartleadEmailAccount[],
+): SenderPlan {
+  const assigned = new Map<string, SmartleadSender>();
+  for (const row of assignedRows) {
+    const sender = mapEmailAccount(row);
+    if (sender) assigned.set(sender.accountId, sender);
+  }
+
+  const available = new Map<string, SmartleadSender>();
+  for (const row of accountRows) {
+    const sender = mapEmailAccount(row);
+    if (!sender || assigned.has(sender.accountId)) continue;
+    available.set(sender.accountId, sender);
+  }
+
+  return {
+    assigned: [...assigned.values()].sort(byAddress),
+    available: [...available.values()].sort(byAddress),
+  };
+}
+
+/** Address order, so the two lists don't reshuffle between reads. */
+function byAddress(a: SmartleadSender, b: SmartleadSender): number {
+  return (
+    a.fromEmail.localeCompare(b.fromEmail) || a.accountId.localeCompare(b.accountId)
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Leads (CRM contacts <-> Smartlead leads)
 // ---------------------------------------------------------------------------
 

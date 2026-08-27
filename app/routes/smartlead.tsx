@@ -8,11 +8,14 @@ import {
   planContactSends,
   planImport,
   planLeads,
+  planSenders,
   sendsByLead,
   statKey,
   totalStatsBySequence,
   type SequencePlan,
+  type SmartleadEmailAccount,
   type SmartleadLead,
+  type SmartleadSender,
   type SmartleadStatRow,
   type StoredSequenceStep,
 } from "../crm/smartlead-map";
@@ -50,6 +53,7 @@ import {
   createSmartleadClient,
   isCampaignLive,
   type SmartleadCampaignRow,
+  type SmartleadClient,
 } from "../lib/smartlead.server";
 import {
   isValidSmartleadStatus,
@@ -57,10 +61,13 @@ import {
   MAX_LEAD_PUSH,
   MAX_STEP_DELAY_DAYS,
   SMARTLEAD_LEAD_CHUNK,
+  SMARTLEAD_SENDER_MAX_PAGES,
+  SMARTLEAD_SENDER_PAGE,
   SMARTLEAD_STATS_MAX_PAGES,
   SMARTLEAD_STATS_PAGE,
   validateCampaignId,
   validateCampaignName,
+  validateEmailAccountId,
   validateImportRows,
   validateSchedule,
   validateStepDelay,
@@ -238,6 +245,26 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 export type CampaignChoice = { id: string; name: string; status: string };
 
 /**
+ * One loop's mailboxes, as the three sender intents hand them back.
+ *
+ * It carries its `loop` because — unlike `campaigns`, which is the same account-
+ * wide list for both cards — this is the answer for one campaign, and folding it
+ * into the other card's state would show mailboxes that campaign doesn't have.
+ */
+export type SenderView = {
+  loop: number;
+  /**
+   * The campaign these mailboxes were read from. The page compares it with the
+   * loop's current binding before rendering the list — re-linking a loop to a
+   * different campaign would otherwise leave the previous campaign's rotation on
+   * screen, described as this one's, until someone pressed Fetch again.
+   */
+  campaignId: string;
+  assigned: SmartleadSender[];
+  available: SmartleadSender[];
+};
+
+/**
  * Intents that reach nothing but D1 — the sequence builder and its copy editor.
  *
  * Named as a set rather than tested case by case because the rate limiter has to
@@ -289,6 +316,8 @@ type ActionResult =
        * reorder pressed on another row — and take the half-typed body with it.
        */
       closed?: "editor";
+      /** Set only by the sender intents. See SenderView. */
+      senders?: SenderView;
     }
   | { ok: false; error: string };
 
@@ -296,7 +325,7 @@ type ActionResult =
 function rowsOf(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
   const obj = (payload ?? {}) as Record<string, unknown>;
-  for (const key of ["data", "leads", "rows", "result"]) {
+  for (const key of ["data", "leads", "email_accounts", "rows", "result"]) {
     if (Array.isArray(obj[key])) return obj[key] as unknown[];
   }
   return [];
@@ -320,6 +349,55 @@ function unwrapLead(row: unknown): SmartleadLead {
   const obj = (row ?? {}) as Record<string, unknown>;
   const lead = (obj.lead ?? obj) as Record<string, unknown>;
   return lead as SmartleadLead;
+}
+
+/**
+ * Read this campaign's mailboxes and the account's, and split them.
+ *
+ * Both sender intents that change something re-read through this afterwards
+ * rather than patching the list client-side. The rotation is Smartlead's state,
+ * not ours — nothing about it is stored in D1 — so the only honest way to say
+ * what a campaign sends from after a write is to ask again.
+ *
+ * The campaign's own list is read whole; only the account-wide list is paged,
+ * and running out of pages under-offers mailboxes to assign rather than
+ * misreporting the ones already assigned. `truncated` says so out loud.
+ */
+async function readSenders(
+  client: SmartleadClient,
+  campaignId: string,
+  loop: number,
+): Promise<
+  { ok: true; view: SenderView; truncated: boolean } | { ok: false; error: string }
+> {
+  const mine = await client.listCampaignEmailAccounts(campaignId);
+  if (!mine.ok) return { ok: false, error: mine.error };
+
+  const account: SmartleadEmailAccount[] = [];
+  let truncated = false;
+  for (let page = 0; page < SMARTLEAD_SENDER_MAX_PAGES; page++) {
+    const res = await client.listEmailAccounts(
+      page * SMARTLEAD_SENDER_PAGE,
+      SMARTLEAD_SENDER_PAGE,
+    );
+    if (!res.ok) return { ok: false, error: res.error };
+    const rows = rowsOf(res.data) as SmartleadEmailAccount[];
+    account.push(...rows);
+    if (rows.length < SMARTLEAD_SENDER_PAGE) break;
+    if (page === SMARTLEAD_SENDER_MAX_PAGES - 1) truncated = true;
+  }
+
+  const plan = planSenders(rowsOf(mine.data) as SmartleadEmailAccount[], account);
+  return {
+    ok: true,
+    view: { loop, campaignId, assigned: plan.assigned, available: plan.available },
+    truncated,
+  };
+}
+
+/** How a mailbox is named in a result message: its address, or its id. */
+function senderLabel(senders: SmartleadSender[], accountId: string): string {
+  return senders.find((s) => s.accountId === accountId)?.fromEmail || `mailbox #${accountId}`;
 }
 
 function campaignChoices(rows: SmartleadCampaignRow[]): CampaignChoice[] {
@@ -435,6 +513,96 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         const res = await client.setCampaignStatus(binding.campaignId, status);
         if (!res.ok) return { ok: false, error: res.error };
         return { ok: true, message: `Campaign set to ${status}.` };
+      }
+
+      /* --- Senders (the mailboxes the campaign sends from) -------------- *
+       *
+       * Read-and-assign only. Buying or connecting a mailbox is Smartlead's job,
+       * the same way the campaign, the leads and the templates are things this
+       * page points at rather than creates — these three intents only decide
+       * which of the account's existing mailboxes this loop's campaign rotates
+       * between.
+       *
+       * Nothing is written to D1, so nothing is stamped: there is no local copy
+       * of the rotation that could go stale, and every answer below is a fresh
+       * read handed straight back to the card.
+       */
+
+      case "fetchSenders": {
+        if (!binding) return { ok: false, error: "Link a campaign first." };
+        const senders = await readSenders(client, binding.campaignId, loop);
+        if (!senders.ok) return { ok: false, error: senders.error };
+        const { assigned, available } = senders.view;
+        return {
+          ok: true,
+          senders: senders.view,
+          message: assigned.length
+            ? undefined
+            : "This campaign has no mailboxes assigned, so Smartlead can't send it. Assign one below." +
+              (available.length ? "" : " There are none connected to this Smartlead account yet."),
+        };
+      }
+
+      case "assignSender": {
+        if (!binding) return { ok: false, error: "Link a campaign first." };
+        const account = validateEmailAccountId(form.get("accountId"));
+        if (!account.ok) return { ok: false, error: account.error };
+
+        const res = await client.assignEmailAccountToCampaign(binding.campaignId, account.id);
+        if (!res.ok) return { ok: false, error: res.error };
+
+        // Re-read rather than moving the row across two client-side lists: the
+        // write may have landed differently than it reads (a mailbox already on
+        // the campaign, one disconnected since the fetch), and the list on
+        // screen is a claim about what will send the next email.
+        const senders = await readSenders(client, binding.campaignId, loop);
+        if (!senders.ok) {
+          return {
+            ok: true,
+            message: `Assigned the mailbox, but couldn't re-read the list: ${senders.error}`,
+          };
+        }
+        const name = senderLabel(senders.view.assigned, account.id);
+        return {
+          ok: true,
+          senders: senders.view,
+          message: `${name} now sends Loop ${loop}'s campaign. ${senders.view.assigned.length} mailbox${
+            senders.view.assigned.length === 1 ? "" : "es"
+          } in the rotation.`,
+        };
+      }
+
+      case "removeSender": {
+        if (!binding) return { ok: false, error: "Link a campaign first." };
+        const account = validateEmailAccountId(form.get("accountId"));
+        if (!account.ok) return { ok: false, error: account.error };
+
+        const res = await client.removeEmailAccountFromCampaign(binding.campaignId, account.id);
+        if (!res.ok) return { ok: false, error: res.error };
+
+        const senders = await readSenders(client, binding.campaignId, loop);
+        if (!senders.ok) {
+          return {
+            ok: true,
+            message: `Removed the mailbox, but couldn't re-read the list: ${senders.error}`,
+          };
+        }
+        // Named from the list it landed in — it is unassigned now, so it is on
+        // the available side.
+        const name = senderLabel(senders.view.available, account.id);
+        const left = senders.view.assigned.length;
+        return {
+          ok: true,
+          senders: senders.view,
+          // Emptying the rotation is allowed — swapping every mailbox has to
+          // pass through zero — but a campaign with no sender cannot send, and
+          // Smartlead reports that as nothing happening rather than as an error.
+          message:
+            `${name} no longer sends Loop ${loop}'s campaign. The mailbox itself is untouched.` +
+            (left
+              ? ` ${left} mailbox${left === 1 ? "" : "es"} still in the rotation.`
+              : " Nothing is left in the rotation, so this campaign can't send until you assign one."),
+        };
       }
 
       case "saveSchedule": {

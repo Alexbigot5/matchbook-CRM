@@ -114,7 +114,7 @@ export function createSmartleadClient(apiKey: string) {
   }
 
   async function call<T>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "DELETE",
     path: string,
     opts: { body?: unknown; query?: Record<string, string | number> } = {},
   ): Promise<SmartleadResult<T>> {
@@ -200,6 +200,22 @@ export function createSmartleadClient(apiKey: string) {
     return { ok: false, error: "That campaign id isn’t valid." };
   }
 
+  /**
+   * Email account ids travel in the request BODY, not the path, so they cannot
+   * re-point the URL the way safeId() guards against. They are checked anyway:
+   * `email_account_ids` is the field that decides which mailboxes a campaign
+   * sends from, and a value this module can’t recognise as an id is one it has
+   * no business posting under a live key. Smartlead wants numbers there, so the
+   * check and the coercion are the same step.
+   */
+  function safeAccountId(id: string): number | null {
+    return /^\d{1,19}$/.test(id) ? Number(id) : null;
+  }
+
+  function badAccountId<T>(): SmartleadResult<T> {
+    return { ok: false, error: "That mailbox id isn’t valid." };
+  }
+
   return {
     listCampaigns() {
       return call<SmartleadCampaignRow[]>("GET", "/campaigns/");
@@ -267,6 +283,63 @@ export function createSmartleadClient(apiKey: string) {
       if (!safe) return Promise.resolve(badId<Record<string, unknown>>());
       return call<Record<string, unknown>>("GET", `/campaigns/${safe}/statistics`, {
         query: { offset, limit },
+      });
+    },
+
+    /* --- Email accounts (the mailboxes a campaign sends from) ------------ *
+     *
+     * Read-and-assign only. Nothing here buys, creates or reconnects a mailbox:
+     * the same rule the rest of this page follows, where the campaign, the leads
+     * and the templates all exist upstream and the CRM only points at them.
+     *
+     * The responses are typed `unknown` rather than a row shape, for the reason
+     * listLeads is: Smartlead answers with a bare array on some accounts and an
+     * envelope on others, so the caller unwraps through rowsOf() and maps
+     * through planSenders() instead of indexing what came back.
+     */
+
+    /** The mailboxes currently assigned to one campaign. */
+    listCampaignEmailAccounts(id: string) {
+      const safe = safeId(id);
+      if (!safe) return Promise.resolve(badId<unknown>());
+      return call<unknown>("GET", `/campaigns/${safe}/email-accounts`);
+    },
+
+    /** One page of every mailbox on the Smartlead account. */
+    listEmailAccounts(offset: number, limit: number) {
+      return call<unknown>("GET", "/email-accounts/", { query: { offset, limit } });
+    },
+
+    /**
+     * Add one existing mailbox to the campaign’s sending rotation.
+     *
+     * Smartlead takes a list here; this sends one id at a time deliberately, so
+     * a rejected mailbox is reported as that mailbox rather than as a partial
+     * batch nobody can tell the shape of.
+     */
+    assignEmailAccountToCampaign(id: string, accountId: string) {
+      const safe = safeId(id);
+      if (!safe) return Promise.resolve(badId<unknown>());
+      const account = safeAccountId(accountId);
+      if (account === null) return Promise.resolve(badAccountId<unknown>());
+      return call<unknown>("POST", `/campaigns/${safe}/email-accounts`, {
+        body: { email_account_ids: [account] },
+      });
+    },
+
+    /**
+     * Take one mailbox out of the campaign’s rotation.
+     *
+     * This unassigns; it does not delete the mailbox or touch its warmup. The
+     * account keeps it, and any other campaign using it is unaffected.
+     */
+    removeEmailAccountFromCampaign(id: string, accountId: string) {
+      const safe = safeId(id);
+      if (!safe) return Promise.resolve(badId<unknown>());
+      const account = safeAccountId(accountId);
+      if (account === null) return Promise.resolve(badAccountId<unknown>());
+      return call<unknown>("DELETE", `/campaigns/${safe}/email-accounts`, {
+        body: { email_account_ids: [account] },
       });
     },
   };

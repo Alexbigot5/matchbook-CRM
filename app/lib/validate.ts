@@ -767,6 +767,39 @@ export const SMARTLEAD_STATS_PAGE = 100;
  */
 export const SMARTLEAD_STATS_MAX_PAGES = 20;
 
+/** Mailboxes read per page when listing the Smartlead account's email accounts. */
+export const SMARTLEAD_SENDER_PAGE = 100;
+
+/**
+ * Pages of email accounts one "Fetch senders" will read.
+ *
+ * A soft stop, unlike SMARTLEAD_STATS_MAX_PAGES above: this list is only offered
+ * as things to assign, so reading part of it under-offers rather than
+ * misreporting anything. The page says how many it found, and the mailboxes
+ * already on the campaign come from a separate call that is never truncated.
+ */
+export const SMARTLEAD_SENDER_MAX_PAGES = 5;
+
+/**
+ * Validate a Smartlead email account (mailbox) id.
+ *
+ * Digits only, for the same reason validateCampaignId is: the value is posted
+ * back to Smartlead under a live key, in the field that decides which mailboxes
+ * a campaign sends from. It never reaches a URL path — smartlead.server.ts puts
+ * it in the request body — but the client re-checks it there anyway, exactly as
+ * it re-checks campaign ids.
+ */
+export function validateEmailAccountId(raw: unknown):
+  | { ok: true; id: string }
+  | { ok: false; error: string } {
+  const id = asString(raw);
+  if (!id) return { ok: false, error: "Missing mailbox id." };
+  if (!/^\d{1,19}$/.test(id)) {
+    return { ok: false, error: `"${truncateForMessage(id)}" is not a valid mailbox id.` };
+  }
+  return { ok: true, id };
+}
+
 /**
  * Validate a Smartlead campaign id.
  *
