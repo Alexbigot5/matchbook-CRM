@@ -631,7 +631,7 @@ function Row({
         )}
         title={prospect.email ?? undefined}
       >
-        {prospect.email ?? "-"}
+        {prospect.email ?? "—"}
       </div>
       <div style={css("text-align:right;")}>
         <span

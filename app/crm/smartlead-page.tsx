@@ -772,7 +772,7 @@ function LoopCard({
             ? `Last synced ${binding.statsSyncedLabel}.`
             : "Never synced."}{" "}
           Numbers land on each template’s variant counters over on Templates, and every
-          send is logged as an email touchpoint on the contact it went to, moving anyone
+          send is logged as an email touchpoint on the contact it went to — moving anyone
           still marked New to Contacted.
         </div>
         {binding?.lastResult && (
@@ -909,7 +909,7 @@ function Senders({
         {!senders ? (
           <>
             Not loaded. Press “Fetch senders” to read this campaign’s mailboxes from
-            Smartlead. None of it is stored here, so nothing is asked for until you ask.
+            Smartlead — none of it is stored here, so nothing is asked for until you ask.
           </>
         ) : (
           <>
