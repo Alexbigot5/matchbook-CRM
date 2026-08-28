@@ -786,7 +786,9 @@ export function SalesLoopCRM({
     const first = rows[0].toLowerCase();
     if (
       /name/.test(first) &&
-      /company|loop|owner|source|community|event|email|phone|linkedin/.test(first)
+      /company|loop|owner|source|community|event|email|phone|linkedin|category|arr|revenue/.test(
+        first,
+      )
     )
       start = 1;
     const made = [];
@@ -804,12 +806,16 @@ export function SalesLoopCRM({
         email: cols[6] || "",
         phone: cols[7] || "",
         linkedin: cols[8] || "",
+        // Optional trailing columns: a nine-column file predating them imports
+        // exactly as before, with both left empty rather than guessed at.
+        category: cols[9] || "",
+        arr: cols[10] || "",
       });
     }
     if (!made.length) {
       patch({
         csvError:
-          "Couldn’t read any contacts. Use: Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn",
+          "Couldn’t read any contacts. Use: Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn, Category, ARR",
       });
       return;
     }

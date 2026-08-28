@@ -346,6 +346,8 @@ export type ContactFields = {
   owner: string | null;
   status: string;
   source: string | null;
+  category: string | null;
+  arr: string | null;
 };
 
 export type ValidationResult =
@@ -397,6 +399,16 @@ export function validateContact(raw: unknown): ValidationResult {
     return { ok: false, error: `Source must be ${LIMITS.source} characters or fewer.` };
   }
 
+  const category = asString(r.category);
+  if (category.length > LIMITS.category) {
+    return { ok: false, error: `Category must be ${LIMITS.category} characters or fewer.` };
+  }
+
+  const arr = asString(r.arr);
+  if (arr.length > LIMITS.arr) {
+    return { ok: false, error: `ARR must be ${LIMITS.arr} characters or fewer.` };
+  }
+
   // Empty/absent status means "use the default", which matches the previous
   // `form.get("status") || "New"` behaviour.
   const rawStatus = asString(r.status);
@@ -436,6 +448,8 @@ export function validateContact(raw: unknown): ValidationResult {
       owner: ownerGiven ? rawOwner : null,
       status,
       source: source || null,
+      category: category || null,
+      arr: arr || null,
     },
   };
 }
