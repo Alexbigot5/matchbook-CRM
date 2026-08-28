@@ -80,12 +80,13 @@ const INFO_TEXT =
 
 export function LifecyclePage({
   contacts,
-  deals,
+  deals = [],
   viewer,
 }: {
   contacts: Contact[];
-  /** Only feeds the shared detail panel's "Also at [Company]" block. */
-  deals: Deal[];
+  /** Only feeds the shared detail panel's "Also at [Company]" block. Optional
+   *  and defaulted — see the note on SalesLoopCRM's identical prop. */
+  deals?: Deal[];
   viewer: Viewer;
 }) {
   const fetcher = useFetcher();
