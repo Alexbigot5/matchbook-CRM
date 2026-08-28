@@ -4,7 +4,9 @@ import {
   ago,
   buildNameIndex,
   CH,
+  companyContextFor,
   type Contact,
+  type Deal,
   hasNameConflict,
   isArrFigure,
   loopBadge,
@@ -219,10 +221,13 @@ export type { Viewer } from "./data";
 export function SalesLoopCRM({
   contacts,
   savedViews,
+  deals,
   viewer,
 }: {
   contacts: Contact[];
   savedViews: SavedView[];
+  /** Only feeds the detail panel's "Also at [Company]" block. */
+  deals: Deal[];
   viewer: Viewer;
 }) {
   const fetcher = useFetcher();
@@ -1098,6 +1103,9 @@ export function SalesLoopCRM({
 
   // The selected contact; the detail panel derives everything else itself.
   const sel = contacts.find((c) => c.id === S.selectedId) || null;
+  // Empty lists for a contact with no company_id, which is what keeps the panel
+  // byte-identical to what it rendered before deals existed.
+  const companyCtx = sel ? companyContextFor(sel, contacts, deals) : { peers: [], deals: [] };
 
   // Same three-way shape as byView, and for the same reason.
   const headerTitle = activeSavedView
@@ -1589,6 +1597,9 @@ export function SalesLoopCRM({
           onResumeLoop1={resumeLoop1}
           onDraftOutreach={draftOutreach}
           onDelete={askDelete}
+          companyPeers={companyCtx.peers}
+          companyDeals={companyCtx.deals}
+          onOpenContact={open}
         />
       )}
 

@@ -4,8 +4,8 @@
 // calculation here (against a single `now` captured in the loader) is what keeps
 // SSR and client hydration deterministic — no `Date` runs in the render path.
 
-import { buildNameIndex, normalizeName } from "../crm/data";
-import type { Contact, Note, Touch } from "../crm/data";
+import { buildNameIndex, DEAL_STAGES, isClosedDealStage, normalizeName } from "../crm/data";
+import type { Company, Contact, Deal, DealRole, DealStakeholder, Note, Touch } from "../crm/data";
 import {
   TEMPLATE_STATUSES,
   type EmailTemplate,
@@ -104,6 +104,7 @@ type ContactRow = {
   id: string;
   name: string;
   company: string | null;
+  company_id: string | null;
   email: string | null;
   phone: string | null;
   linkedin: string | null;
@@ -160,11 +161,11 @@ export async function listContacts(
   const [contactsRes, notesRes, touchesRes] = await Promise.all([
     (limit === null
       ? db.prepare(
-          "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
+          "SELECT id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
         )
       : db
           .prepare(
-            "SELECT id, name, company, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
           )
           .bind(limit, offset)
     ).all<ContactRow>(),
@@ -222,6 +223,7 @@ export async function listContacts(
       id: row.id,
       name: row.name,
       company: row.company ?? "",
+      companyId: row.company_id ?? null,
       email: row.email ?? null,
       phone: row.phone ?? null,
       linkedin: row.linkedin ?? null,
@@ -264,7 +266,82 @@ function str(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function insertContactStmt(db: D1Database, input: NewContactInput) {
+/**
+ * Resolve a batch of free-text company names to company ids in a fixed number of
+ * round trips, regardless of how many rows the import has.
+ *
+ * The per-row alternative is findOrCreateCompanyByName inside the loop, which on
+ * a 2,000-row CSV is up to 4,000 sequential D1 calls. Distinct companies in a
+ * real import are a small fraction of its rows, so this reads what already
+ * exists, INSERTs only what is missing, and re-reads to pick up ids — three
+ * passes of chunked statements.
+ *
+ * INSERT OR IGNORE rather than a pre-check, because the UNIQUE index on
+ * normalized_name is the arbiter (same reasoning as findOrCreateCompanyByName's
+ * retry): a concurrent import inserting the same company is ignored rather than
+ * throwing, and the re-read below picks up whichever row won.
+ *
+ * Keyed by NORMALIZED name so it matches what findOrCreateCompanyByName and
+ * migrations/0019 both produce. The display spelling stored for a new company is
+ * the first one seen in the file.
+ */
+async function resolveCompanyIdsByName(
+  db: D1Database,
+  rawNames: (string | undefined)[],
+): Promise<Map<string, string>> {
+  const display = new Map<string, string>();
+  for (const raw of rawNames) {
+    const shown = str(raw);
+    const key = normalizeName(shown);
+    if (key && !display.has(key)) display.set(key, shown);
+  }
+  const found = new Map<string, string>();
+  if (!display.size) return found;
+
+  const CHUNK = 100;
+  const readInto = async (keys: string[]) => {
+    for (let i = 0; i < keys.length; i += CHUNK) {
+      const slice = keys.slice(i, i + CHUNK);
+      const res = await db
+        .prepare(
+          `SELECT id, normalized_name FROM companies
+            WHERE normalized_name IN (${slice.map(() => "?").join(", ")})`,
+        )
+        .bind(...slice)
+        .all<{ id: string; normalized_name: string }>();
+      for (const r of res.results ?? []) found.set(r.normalized_name, r.id);
+    }
+  };
+
+  const keys = [...display.keys()];
+  await readInto(keys);
+
+  const missing = keys.filter((k) => !found.has(k));
+  for (let i = 0; i < missing.length; i += CHUNK) {
+    const slice = missing.slice(i, i + CHUNK);
+    await db.batch(
+      slice.map((k) =>
+        db
+          .prepare(
+            "INSERT OR IGNORE INTO companies (id, name, normalized_name) VALUES (?, ?, ?)",
+          )
+          .bind(crypto.randomUUID(), display.get(k) ?? k, k),
+      ),
+    );
+  }
+  if (missing.length) await readInto(missing);
+  return found;
+}
+
+/**
+ * `companyId` is passed in rather than resolved here because this builds a
+ * statement synchronously (db.batch needs them all up front) and resolving a
+ * company is a read. Callers resolve first — see resolveCompanyIdsByName.
+ *
+ * Null is a legitimate value: a contact with no company string has no company
+ * row, and must keep rendering exactly as it does today (migrations/0017).
+ */
+function insertContactStmt(db: D1Database, input: NewContactInput, companyId: string | null) {
   const name = str(input.name);
   const followUpAt = new Date().toISOString(); // new contacts are "due today"
   const source = str(input.source) || null;
@@ -273,12 +350,13 @@ function insertContactStmt(db: D1Database, input: NewContactInput) {
   const linkedin = str(input.linkedin) || null;
   return db
     .prepare(
-      "INSERT INTO contacts (id, name, company, email, phone, linkedin, owner, status, loops, source, follow_up_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO contacts (id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, follow_up_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       crypto.randomUUID(),
       name,
       str(input.company),
+      companyId,
       email,
       phone,
       linkedin,
@@ -291,7 +369,11 @@ function insertContactStmt(db: D1Database, input: NewContactInput) {
 }
 
 export async function createContact(db: D1Database, input: NewContactInput): Promise<void> {
-  await insertContactStmt(db, input).run();
+  // Resolve the company on the way in so company_id is set going forward, not
+  // only on the historical backfill in migrations/0019. A blank company yields
+  // null and the contact is written exactly as it always was.
+  const company = await findOrCreateCompanyByName(db, str(input.company));
+  await insertContactStmt(db, input, company?.id ?? null).run();
 }
 
 /** How many rows a bulk insert actually wrote, and what it turned away. */
@@ -380,9 +462,17 @@ export async function createManyContacts(
     }
   }
 
+  // Companies for the whole surviving batch, in a fixed number of round trips.
+  // Resolved AFTER dedupe so a file full of rows that are all about to be
+  // skipped does not mint companies for them. Nothing about the dedupe rules
+  // above changes — this only fills in company_id for the rows that survive.
+  const companyIds = await resolveCompanyIdsByName(db, toInsert.map((r) => r.company));
+
   const CHUNK = 50;
   for (let i = 0; i < toInsert.length; i += CHUNK) {
-    const chunk = toInsert.slice(i, i + CHUNK).map((r) => insertContactStmt(db, r));
+    const chunk = toInsert
+      .slice(i, i + CHUNK)
+      .map((r) => insertContactStmt(db, r, companyIds.get(normalizeName(str(r.company))) ?? null));
     if (chunk.length) await db.batch(chunk);
   }
   return { inserted: toInsert.length, skipped };
@@ -2211,4 +2301,453 @@ export async function markProspectsPromoted(
         .bind(now, id, runId),
     ),
   );
+}
+
+// --- Companies and deals ---------------------------------------------------
+// See migrations/0017 and 0018. The short version: `contacts.company` is a
+// string somebody typed, so it cannot be an identity, and a deal needs one.
+
+type CompanyRow = { id: string; name: string; normalized_name: string };
+
+const COMPANY_COLS = "id, name, normalized_name";
+
+function toCompany(row: CompanyRow): Company {
+  return { id: row.id, name: row.name, normalizedName: row.normalized_name };
+}
+
+/**
+ * The company row for `name`, creating it only if no row already matches.
+ *
+ * Look-up-then-insert rather than an unconditional insert, because the whole
+ * point of the table is that "Halcyon Labs", "halcyon labs" and "Halcyon  Labs"
+ * are one company. Matching is on `normalizeName` from app/crm/data.ts — the
+ * SAME function migrations/0019 reproduces in SQL for the historical backfill,
+ * which is what makes a contact imported today land on the company its
+ * colleagues were backfilled onto rather than minting a near-duplicate.
+ *
+ * NOT fuzzy, deliberately. "Halcyon Labs" and "Halcyon Labs Inc" stay two
+ * companies. Collapsing those needs a similarity threshold, and a threshold that
+ * is wrong merges two real customers' pipelines into one — an error nobody can
+ * see and nothing can undo. Case and whitespace are typos; a different legal
+ * suffix may not be.
+ *
+ * Returns null for a blank name: a contact with no company is an ordinary row
+ * (see migrations/0017), not an error, and must not produce an empty company.
+ *
+ * The UNIQUE violation retry is not defensive noise — two people importing
+ * overlapping CSVs at once is exactly how this table gets its first duplicate,
+ * and the constraint is the only thing that can arbitrate. Losing the race means
+ * the winner's row is the one everybody gets, which is the correct outcome.
+ */
+export async function findOrCreateCompanyByName(
+  db: D1Database,
+  name: string,
+): Promise<Company | null> {
+  const display = str(name);
+  const normalized = normalizeName(display);
+  if (!normalized) return null;
+
+  const existing = await db
+    .prepare(`SELECT ${COMPANY_COLS} FROM companies WHERE normalized_name = ?`)
+    .bind(normalized)
+    .first<CompanyRow>();
+  if (existing) return toCompany(existing);
+
+  const row: CompanyRow = {
+    id: crypto.randomUUID(),
+    name: display,
+    normalized_name: normalized,
+  };
+  try {
+    await db
+      .prepare("INSERT INTO companies (id, name, normalized_name) VALUES (?, ?, ?)")
+      .bind(row.id, row.name, row.normalized_name)
+      .run();
+    return toCompany(row);
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    // Somebody else inserted the same company between our SELECT and INSERT.
+    const winner = await db
+      .prepare(`SELECT ${COMPANY_COLS} FROM companies WHERE normalized_name = ?`)
+      .bind(normalized)
+      .first<CompanyRow>();
+    if (!winner) throw err;
+    return toCompany(winner);
+  }
+}
+
+/**
+ * Everyone whose company_id is this company — the "Also at [Company]" block, and
+ * the stakeholder picker on the deals board.
+ *
+ * Keyed on company_id, NOT on the free-text `contacts.company` string. Matching
+ * on the string would miss the colleague who typed "halcyon labs" and would
+ * quietly include anyone at a different company that happens to share a spelling.
+ *
+ * Returns the light row shape (no notes, no touchpoints) for the same reason
+ * loadDedupeIndex does: this runs to fill a side panel, and pulling every note in
+ * the database to render four names would be absurd.
+ */
+export type CompanyContact = {
+  id: string;
+  name: string;
+  company: string;
+  owner: string | null;
+  status: string;
+  email: string | null;
+};
+
+export async function listContactsAtCompany(
+  db: D1Database,
+  companyId: string,
+): Promise<CompanyContact[]> {
+  if (!companyId) return [];
+  const res = await db
+    .prepare(
+      `SELECT id, name, company, owner, status, email FROM contacts
+        WHERE company_id = ? ORDER BY created_at DESC`,
+    )
+    .bind(companyId)
+    .all<{
+      id: string;
+      name: string;
+      company: string | null;
+      owner: string | null;
+      status: string;
+      email: string | null;
+    }>();
+  return (res.results ?? []).map((r) => ({
+    id: r.id,
+    name: r.name,
+    company: r.company ?? "",
+    owner: r.owner ?? null,
+    status: r.status,
+    email: r.email ?? null,
+  }));
+}
+
+type DealRow = {
+  id: string;
+  company_id: string;
+  company_name: string;
+  stage: string;
+  value: number | null;
+  expected_close_date: string | null;
+  created_at: string;
+  closed_at: string | null;
+};
+
+type DealContactRow = {
+  deal_id: string;
+  contact_id: string;
+  role: string;
+  name: string;
+  owner: string | null;
+  status: string;
+  email: string | null;
+};
+
+// The company name is joined in rather than stored on the deal: every deal view
+// renders it, and a company renamed in one place must not leave stale copies.
+const DEAL_SELECT = `SELECT d.id, d.company_id, co.name AS company_name, d.stage, d.value,
+         d.expected_close_date, d.created_at, d.closed_at
+    FROM deals d JOIN companies co ON co.id = d.company_id`;
+
+const DEAL_CONTACT_SELECT = `SELECT dc.deal_id, dc.contact_id, dc.role,
+         c.name, c.owner, c.status, c.email
+    FROM deal_contacts dc JOIN contacts c ON c.id = dc.contact_id`;
+
+function toStakeholder(row: DealContactRow): DealStakeholder {
+  return {
+    contactId: row.contact_id,
+    role: row.role === "secondary" ? "secondary" : "primary",
+    name: row.name,
+    owner: row.owner ?? null,
+    status: row.status,
+    email: row.email ?? null,
+  };
+}
+
+/**
+ * Shape a deal row plus whichever of its two stakeholder slots are filled.
+ *
+ * `expectedCloseLabel` is computed HERE, server-side, for the same reason
+ * listContacts precomputes followUpDateLabel: no `Date` may run in the render
+ * path or SSR and hydration can disagree.
+ */
+function toDeal(row: DealRow, stakeholders: DealContactRow[]): Deal {
+  const filled = stakeholders.map(toStakeholder);
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    companyName: row.company_name,
+    stage: row.stage,
+    value: row.value === null || row.value === undefined ? null : Number(row.value),
+    expectedCloseDate: row.expected_close_date ?? null,
+    expectedCloseLabel: row.expected_close_date
+      ? dateLabel(Date.parse(row.expected_close_date))
+      : null,
+    createdAt: row.created_at,
+    closedAt: row.closed_at ?? null,
+    primary: filled.find((s) => s.role === "primary") ?? null,
+    secondary: filled.find((s) => s.role === "secondary") ?? null,
+  };
+}
+
+/** Stitch stakeholder rows onto their deals in one pass. */
+function assembleDeals(dealRows: DealRow[], contactRows: DealContactRow[]): Deal[] {
+  const byDeal = new Map<string, DealContactRow[]>();
+  for (const r of contactRows) {
+    const list = byDeal.get(r.deal_id) ?? [];
+    list.push(r);
+    byDeal.set(r.deal_id, list);
+  }
+  return dealRows.map((d) => toDeal(d, byDeal.get(d.id) ?? []));
+}
+
+/**
+ * Every deal, newest first, with both stakeholder slots resolved.
+ *
+ * Two queries and a stitch rather than one join with duplicated deal columns —
+ * the same shape listContacts uses for notes and touchpoints. The stakeholder
+ * table is bounded at two rows per deal by construction (migrations/0018), so
+ * the second read is small by definition.
+ */
+export async function listDeals(db: D1Database): Promise<Deal[]> {
+  const [dealsRes, contactsRes] = await Promise.all([
+    db.prepare(`${DEAL_SELECT} ORDER BY d.created_at DESC`).all<DealRow>(),
+    db.prepare(DEAL_CONTACT_SELECT).all<DealContactRow>(),
+  ]);
+  return assembleDeals(dealsRes.results ?? [], contactsRes.results ?? []);
+}
+
+/** The deals at one company — the "Also at [Company]" block's other half. */
+export async function listDealsForCompany(db: D1Database, companyId: string): Promise<Deal[]> {
+  if (!companyId) return [];
+  const dealsRes = await db
+    .prepare(`${DEAL_SELECT} WHERE d.company_id = ? ORDER BY d.created_at DESC`)
+    .bind(companyId)
+    .all<DealRow>();
+  const rows = dealsRes.results ?? [];
+  if (!rows.length) return [];
+  const contactsRes = await db
+    .prepare(`${DEAL_CONTACT_SELECT} WHERE dc.deal_id IN (${rows.map(() => "?").join(", ")})`)
+    .bind(...rows.map((r) => r.id))
+    .all<DealContactRow>();
+  return assembleDeals(rows, contactsRes.results ?? []);
+}
+
+/** One deal with both stakeholder slots resolved, or null if the id is unknown. */
+export async function getDealWithContacts(db: D1Database, dealId: string): Promise<Deal | null> {
+  if (!dealId) return null;
+  const row = await db.prepare(`${DEAL_SELECT} WHERE d.id = ?`).bind(dealId).first<DealRow>();
+  if (!row) return null;
+  const contactsRes = await db
+    .prepare(`${DEAL_CONTACT_SELECT} WHERE dc.deal_id = ?`)
+    .bind(dealId)
+    .all<DealContactRow>();
+  return toDeal(row, contactsRes.results ?? []);
+}
+
+export type NewDealInput = {
+  /** Free text as typed. Resolved through findOrCreateCompanyByName. */
+  companyName: string;
+  stage?: string;
+  value?: number | null;
+  expectedCloseDate?: string | null;
+  /** Optional — a deal may be created before anyone knows who the champion is. */
+  primaryContactId?: string | null;
+};
+
+export type CreateDealResult = { ok: true; dealId: string } | { ok: false; error: string };
+
+/** Whether adding/removing a stakeholder succeeded, with a sentence if it did not. */
+export type StakeholderResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Create a deal, resolving (or creating) its company on the way in.
+ *
+ * The company is resolved rather than passed as an id because the form the user
+ * fills in has a company NAME on it. Routing that through
+ * findOrCreateCompanyByName is what makes a second deal typed as "halcyon labs"
+ * land on the same company as the first one typed as "Halcyon Labs" — which is
+ * the entire reason the table exists.
+ *
+ * The optional primary stakeholder is written in the SAME batch as the deal, so
+ * a failure to attach the contact cannot leave a company with a stakeholder-less
+ * deal nobody meant to create.
+ */
+export async function createDeal(db: D1Database, input: NewDealInput): Promise<CreateDealResult> {
+  const company = await findOrCreateCompanyByName(db, input.companyName);
+  if (!company) return { ok: false, error: "A deal needs a company name." };
+
+  const dealId = crypto.randomUUID();
+  const stage = str(input.stage) || DEAL_STAGES[0].id;
+  const value =
+    input.value === null || input.value === undefined || !Number.isFinite(input.value)
+      ? null
+      : Math.round(input.value);
+  const expectedClose = str(input.expectedCloseDate) || null;
+  // A deal created directly into Won/Lost is closed the moment it exists.
+  const closedAt = isClosedDealStage(stage) ? new Date().toISOString() : null;
+
+  const statements = [
+    db
+      .prepare(
+        `INSERT INTO deals (id, company_id, stage, value, expected_close_date, closed_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(dealId, company.id, stage, value, expectedClose, closedAt),
+  ];
+
+  const primaryId = str(input.primaryContactId);
+  if (primaryId) {
+    statements.push(
+      db
+        .prepare("INSERT INTO deal_contacts (deal_id, contact_id, role) VALUES (?, ?, 'primary')")
+        .bind(dealId, primaryId),
+    );
+  }
+
+  await db.batch(statements);
+  return { ok: true, dealId };
+}
+
+/**
+ * Move a deal to a stage, maintaining `closed_at` on the way.
+ *
+ * Entering Won/Lost stamps the close date; LEAVING one clears it again, so a
+ * deal reopened after a premature "Lost" does not keep a close date that is no
+ * longer true. Same instinct as updateContactStatus clearing `dead_reason` when
+ * a contact moves off Dead.
+ *
+ * `closed_at` is written as a full ISO string from JS rather than via
+ * datetime('now'), because unlike `created_at` it is read back — SQLite's
+ * default emits no timezone designator and would be parsed as local time. This
+ * is the rule migrations/0009 states.
+ *
+ * Nothing here touches any contact's `status`. A deal reaching Won does NOT walk
+ * its stakeholders to Won: the two axes are independent (see migrations/0018),
+ * and a person's engagement marker is theirs.
+ */
+export async function updateDealStage(
+  db: D1Database,
+  dealId: string,
+  stage: string,
+): Promise<void> {
+  const closing = isClosedDealStage(stage);
+  await db
+    .prepare(
+      // All placeholders are bare `?`. Mixing them with numbered `?1`/`?2`
+      // silently renumbers the rest — the `?1` that was meant to be the closing
+      // flag resolves to `stage` instead.
+      `UPDATE deals
+          SET stage = ?,
+              closed_at = CASE
+                WHEN ? = 0 THEN NULL
+                WHEN closed_at IS NULL THEN ?
+                ELSE closed_at
+              END
+        WHERE id = ?`,
+    )
+    .bind(stage, closing ? 1 : 0, new Date().toISOString(), dealId)
+    .run();
+}
+
+/**
+ * Attach a contact to a deal in one of its two slots.
+ *
+ * REFUSES rather than overwrites when the slot is taken. Silently replacing the
+ * primary would mean the person who has been running the relationship vanishes
+ * from the deal because somebody picked the wrong dropdown — an edit with no
+ * undo and no trace. The caller gets a sentence naming who is already there.
+ *
+ * This is the code-level backstop, not the guarantee. UNIQUE(deal_id, role) in
+ * migrations/0018 is the guarantee: these checks and the INSERT are separate
+ * statements, so two writers racing can both pass the check, and the constraint
+ * is what arbitrates. The unique-violation branch below turns that loss back
+ * into the same sentence, so a race and a plain double-click read identically.
+ */
+export async function addContactToDeal(
+  db: D1Database,
+  dealId: string,
+  contactId: string,
+  role: DealRole,
+): Promise<StakeholderResult> {
+  if (!dealId || !contactId) return { ok: false, error: "Pick a contact to add." };
+
+  const [deal, contact, occupants] = await Promise.all([
+    db.prepare("SELECT id FROM deals WHERE id = ?").bind(dealId).first<{ id: string }>(),
+    db
+      .prepare("SELECT id, name FROM contacts WHERE id = ?")
+      .bind(contactId)
+      .first<{ id: string; name: string }>(),
+    db
+      .prepare(
+        `SELECT dc.contact_id, dc.role, c.name FROM deal_contacts dc
+          JOIN contacts c ON c.id = dc.contact_id WHERE dc.deal_id = ?`,
+      )
+      .bind(dealId)
+      .all<{ contact_id: string; role: string; name: string }>(),
+  ]);
+
+  if (!deal) return { ok: false, error: "That deal no longer exists." };
+  if (!contact) return { ok: false, error: "That contact no longer exists." };
+
+  const filled = occupants.results ?? [];
+  const inRole = filled.find((r) => r.role === role);
+  if (inRole) {
+    return {
+      ok: false,
+      error: `This deal already has a ${role} stakeholder (${inRole.name}). Remove them first, or add ${contact.name} to the other slot.`,
+    };
+  }
+  const already = filled.find((r) => r.contact_id === contactId);
+  if (already) {
+    return {
+      ok: false,
+      error: `${contact.name} is already the ${already.role} stakeholder on this deal.`,
+    };
+  }
+
+  try {
+    await db
+      .prepare("INSERT INTO deal_contacts (deal_id, contact_id, role) VALUES (?, ?, ?)")
+      .bind(dealId, contactId, role)
+      .run();
+  } catch (err) {
+    // Lost a race against another writer filling the same slot. The constraint
+    // held, which is the point; report it the way the pre-check would have.
+    if (isUniqueViolation(err)) {
+      return {
+        ok: false,
+        error: `This deal already has a ${role} stakeholder. Reload to see who.`,
+      };
+    }
+    throw err;
+  }
+  return { ok: true };
+}
+
+/**
+ * Detach a contact from a deal.
+ *
+ * Deletes only the link. The CONTACT is untouched — not deleted, not restatused,
+ * not stripped of its company. Someone removed from a deal is still a contact in
+ * the book, and still at the same company.
+ */
+export async function removeContactFromDeal(
+  db: D1Database,
+  dealId: string,
+  contactId: string,
+): Promise<StakeholderResult> {
+  if (!dealId || !contactId) return { ok: false, error: "Pick a stakeholder to remove." };
+  await db
+    .prepare("DELETE FROM deal_contacts WHERE deal_id = ? AND contact_id = ?")
+    .bind(dealId, contactId)
+    .run();
+  // Deliberately not reporting "no such stakeholder" when the delete matched
+  // nothing: the row already being gone — someone else's removal, or a double
+  // submit — is the state the caller asked for, so it is a success.
+  return { ok: true };
 }
