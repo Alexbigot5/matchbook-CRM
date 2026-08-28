@@ -556,6 +556,12 @@ export function toContactRow(
     owner: opts.owner,
     status: "New",
     source: opts.source,
+    // Null for the same reason the job title is dropped above: the agent
+    // reports neither, and a prospecting row must not invent a segment or a
+    // revenue figure for a company nobody has looked at yet. Both stay
+    // settable later by the directory backfill or a CSV re-import.
+    category: null,
+    arr: null,
   };
 }
 

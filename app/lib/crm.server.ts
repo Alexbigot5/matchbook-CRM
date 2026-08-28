@@ -255,6 +255,8 @@ export type NewContactInput = {
   owner?: string | null;
   status?: string;
   source?: string | null;
+  category?: string | null;
+  arr?: string | null;
 };
 
 /**
@@ -348,9 +350,11 @@ function insertContactStmt(db: D1Database, input: NewContactInput, companyId: st
   const email = str(input.email) || null;
   const phone = str(input.phone) || null;
   const linkedin = str(input.linkedin) || null;
+  const category = str(input.category) || null;
+  const arr = str(input.arr) || null;
   return db
     .prepare(
-      "INSERT INTO contacts (id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, follow_up_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO contacts (id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, follow_up_at, category, arr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       crypto.randomUUID(),
@@ -365,6 +369,8 @@ function insertContactStmt(db: D1Database, input: NewContactInput, companyId: st
       JSON.stringify(normalizeLoops(input.loops)),
       source,
       followUpAt,
+      category,
+      arr,
     );
 }
 
