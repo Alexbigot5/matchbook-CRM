@@ -268,6 +268,25 @@ export function IconBoard({ style }: { style?: CSSProperties }) {
   );
 }
 
+// Briefcase for the Deals nav item. Deliberately not another column glyph:
+// IconBoard (Lifecycle) is already a board, and the two pages ARE both boards, so
+// the icons have to carry what separates them — Lifecycle is people moving
+// through stages, Deals is the commercial object.
+export function IconDeal({ style }: { style?: CSSProperties }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={style}>
+      <rect x="2.5" y="7" width="19" height="13" rx="2.5" stroke="currentColor" strokeWidth="2" />
+      <path
+        d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path d="M2.5 12.5h19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 // Paper plane for the Smartlead nav item. An envelope would collide with
 // IconMail (Templates) — both pages are about email, so the glyphs have to carry
 // the distinction: Templates is the message, Smartlead is the sending of it.

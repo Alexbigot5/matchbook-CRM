@@ -8,6 +8,7 @@ import {
   createSavedView,
   deleteSavedView,
   listContacts,
+  listDeals,
   listSavedViews,
 } from "../lib/crm.server";
 import { handleContactIntent } from "../lib/contact-intents.server";
@@ -34,13 +35,19 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   const avatar = ownerAvatar(user.name);
   try {
     // Saved views are read per-viewer: shared ones plus this user's private ones.
-    const [contacts, savedViews] = await Promise.all([
+    // Deals are read here purely to power the detail panel's "Also at [Company]"
+    // block. It is a small table and the panel needs whichever company the user
+    // happens to click, which the loader cannot know — so the whole set comes
+    // down once rather than a round trip per panel open.
+    const [contacts, savedViews, deals] = await Promise.all([
       listContacts(DB, Date.now()),
       listSavedViews(DB, user.email),
+      listDeals(DB),
     ]);
     return {
       contacts,
       savedViews,
+      deals,
       viewer: { name: user.name, initial: avatar.initial, color: avatar.color },
     };
   } catch (err) {
@@ -141,6 +148,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     <SalesLoopCRM
       contacts={loaderData.contacts}
       savedViews={loaderData.savedViews}
+      deals={loaderData.deals}
       viewer={loaderData.viewer}
     />
   );

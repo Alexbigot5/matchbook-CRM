@@ -4,7 +4,7 @@ import { appContext } from "../../load-context";
 import { ownerAvatar } from "../crm/data";
 import { crmFontLinks } from "../crm/ui";
 import { requireUser } from "../lib/session.server";
-import { listContacts } from "../lib/crm.server";
+import { listContacts, listDeals } from "../lib/crm.server";
 import { handleContactIntent, type ContactActionResult } from "../lib/contact-intents.server";
 
 export function meta({}: Route.MetaArgs) {
@@ -28,8 +28,12 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   const user = await requireUser(request, ctx);
   const avatar = ownerAvatar(user.name);
   try {
+    // `deals` feeds the shared detail panel's "Also at [Company]" block — see
+    // the note in home.tsx's loader for why the whole (small) set comes down.
+    const [contacts, deals] = await Promise.all([listContacts(DB, Date.now()), listDeals(DB)]);
     return {
-      contacts: await listContacts(DB, Date.now()),
+      contacts,
+      deals,
       viewer: { name: user.name, initial: avatar.initial, color: avatar.color },
     };
   } catch (err) {
@@ -59,5 +63,11 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Co
 }
 
 export default function Lifecycle({ loaderData }: Route.ComponentProps) {
-  return <LifecyclePage contacts={loaderData.contacts} viewer={loaderData.viewer} />;
+  return (
+    <LifecyclePage
+      contacts={loaderData.contacts}
+      deals={loaderData.deals}
+      viewer={loaderData.viewer}
+    />
+  );
 }

@@ -10,7 +10,8 @@
 // for `maxLength` attributes and the CSV import preview, so the browser and the
 // server agree on what will be rejected.
 
-import { CH, OWNERS, STATUSES } from "../crm/data";
+import { CH, DEAL_ROLES, DEAL_STAGES, OWNERS, STATUSES } from "../crm/data";
+import type { DealRole } from "../crm/data";
 import { MAX_SEQUENCE_STEPS } from "../crm/smartlead-map";
 import {
   TEMPLATE_STATUSES,
@@ -38,6 +39,12 @@ export const LIMITS = {
   linkedin: 500,
   source: 200,
   status: 60,
+  // A deal's stage id, and the company name typed on the new-deal form. The
+  // company limit is deliberately the SAME constant the contact form uses
+  // (LIMITS.company above) rather than a second number — the two write the same
+  // company through findOrCreateCompanyByName, so a name accepted on one form
+  // and rejected on the other would split a company in half.
+  dealStage: 60,
   // Brand facts from the directory backfill. `category` sits with the other
   // labels; `arr` needs an order more room because it is not always a figure —
   // the source data runs to 684 characters of enrichment prose on the rows
@@ -91,6 +98,16 @@ export const MAX_STAT_COUNT = 10_000_000;
 
 /** Furthest day of a sequence a template may be scheduled on. */
 export const MAX_SEND_DAY = 365;
+
+/**
+ * Largest figure a single deal may carry, in whole currency units.
+ *
+ * Bounded for the reason MAX_STAT_COUNT is: the deals board sums open deals into
+ * a pipeline total, and one fat-fingered row with fifteen digits makes that
+ * total meaningless while looking like a real number. A trillion is far above
+ * any deal this CRM will see and far below where float precision starts to slip.
+ */
+export const MAX_DEAL_VALUE = 1_000_000_000_000;
 
 /** Clauses one saved view may AND together. */
 export const MAX_VIEW_CONDITIONS = 10;
@@ -200,6 +217,12 @@ export const DEAD_REASONS = [
 ] as const;
 
 const STATUS_IDS: ReadonlySet<string> = new Set(STATUSES.map((s) => s.id));
+// Derived from DEAL_STAGES rather than restated, the same rule STATUS_IDS
+// follows: a stage added to the constant in data.ts is accepted here with no
+// second edit, and one removed stops validating immediately. deals.stage carries
+// no CHECK (migrations/0018 says why), so this set is the only gate on it.
+const DEAL_STAGE_IDS: ReadonlySet<string> = new Set(DEAL_STAGES.map((s) => s.id));
+const DEAL_ROLE_SET: ReadonlySet<string> = new Set<string>(DEAL_ROLES);
 const TOUCH_TYPES: ReadonlySet<string> = new Set(Object.keys(CH));
 const DEAD_REASON_SET: ReadonlySet<string> = new Set(DEAD_REASONS);
 const TEMPLATE_STATUS_SET: ReadonlySet<string> = new Set(TEMPLATE_STATUSES);
@@ -223,6 +246,24 @@ const VIEW_VALUE_SETS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
 
 export function isValidStatus(value: unknown): value is string {
   return typeof value === "string" && STATUS_IDS.has(value);
+}
+
+/**
+ * A deal stage, checked against DEAL_STAGES — NOT against STATUSES. The two are
+ * separate vocabularies that are allowed to diverge (see migrations/0018), so
+ * "Meeting booked" is not a deal stage and "Negotiation" is not a contact status.
+ */
+export function isValidDealStage(value: unknown): value is string {
+  return typeof value === "string" && DEAL_STAGE_IDS.has(value);
+}
+
+/**
+ * A stakeholder role. Exactly 'primary' or 'secondary' — the closed two-value set
+ * CHECKed in migrations/0018. Anything else is a bug or an attack, the same
+ * standing isValidLoop takes on loop numbers.
+ */
+export function isValidDealRole(value: unknown): value is DealRole {
+  return typeof value === "string" && DEAL_ROLE_SET.has(value);
 }
 
 export function isValidTouchType(value: unknown): value is string {
@@ -396,6 +437,84 @@ export function validateContact(raw: unknown): ValidationResult {
       status,
       source: source || null,
     },
+  };
+}
+
+export type DealFields = {
+  companyName: string;
+  stage: string;
+  value: number | null;
+  expectedCloseDate: string | null;
+  primaryContactId: string | null;
+};
+
+/** ISO calendar date, "2026-09-30". Not a timestamp — a close date is a day. */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Validate one new deal from the /deals form.
+ *
+ * Same shape and standing as validateContact: `unknown` in, a normalized value
+ * or a sentence out, and unknown enum values rejected rather than dropped.
+ *
+ * `value` is optional AND distinguishes absent from zero, the rule
+ * validateStats already establishes for pushed counters: a deal nobody has
+ * priced is null, and a deal priced at 0 is a real (bad) deal. Coercing "" to 0
+ * would make those two indistinguishable in the pipeline total.
+ */
+export function validateDeal(raw: unknown):
+  | { ok: true; value: DealFields }
+  | { ok: false; error: string } {
+  const r = (raw ?? {}) as Record<string, unknown>;
+
+  const companyName = asString(r.companyName);
+  if (!companyName) return { ok: false, error: "Company is required." };
+  // The SAME limit the contact form applies — both write a company through
+  // findOrCreateCompanyByName, so they must agree on what fits.
+  if (companyName.length > LIMITS.company) {
+    return { ok: false, error: `Company must be ${LIMITS.company} characters or fewer.` };
+  }
+
+  const rawStage = asString(r.stage);
+  const stage = rawStage || DEAL_STAGES[0].id;
+  if (!isValidDealStage(stage)) {
+    return { ok: false, error: `Unknown deal stage "${truncateForMessage(rawStage)}".` };
+  }
+
+  let value: number | null = null;
+  const rawValue = r.value;
+  if (rawValue !== undefined && rawValue !== null && asString(rawValue) !== "") {
+    const n = Number(rawValue);
+    if (!Number.isFinite(n)) return { ok: false, error: "Deal value must be a number." };
+    if (n < 0) return { ok: false, error: "Deal value can't be negative." };
+    // Same bounding discipline as MAX_STAT_COUNT: nothing unbounded reaches a
+    // render path, and a pipeline total is summed across every open deal.
+    if (n > MAX_DEAL_VALUE) {
+      return { ok: false, error: "Deal value is larger than this CRM will track." };
+    }
+    value = Math.round(n);
+  }
+
+  let expectedCloseDate: string | null = null;
+  const rawDate = asString(r.expectedCloseDate);
+  if (rawDate) {
+    if (!ISO_DATE_RE.test(rawDate)) {
+      return { ok: false, error: "Expected close date must be YYYY-MM-DD." };
+    }
+    // Shape alone accepts "2026-02-31". Round-tripping through Date is what
+    // rejects a day that does not exist.
+    const parsed = new Date(rawDate + "T00:00:00.000Z");
+    if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== rawDate) {
+      return { ok: false, error: `"${truncateForMessage(rawDate)}" is not a real date.` };
+    }
+    expectedCloseDate = rawDate;
+  }
+
+  const primaryContactId = asString(r.primaryContactId) || null;
+
+  return {
+    ok: true,
+    value: { companyName, stage, value, expectedCloseDate, primaryContactId },
   };
 }
 

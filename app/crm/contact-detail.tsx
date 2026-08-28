@@ -33,8 +33,13 @@ import {
   statusMeta,
   statusPill,
   STATUSES,
+  type Deal,
+  dealStageMeta,
+  dealValueLabel,
+  ownerAvatar,
   type Viewer,
 } from "./data";
+import { Link } from "react-router";
 import {
   Box,
   css,
@@ -43,6 +48,7 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconClose,
+  IconDeal,
   IconTrash,
   IconWarn,
   MONO,
@@ -219,6 +225,20 @@ export type ContactDetailProps = {
   onDraftOutreach: () => void;
   /** Opens the page's confirm modal — this does not delete on its own. */
   onDelete: (ids: string[]) => void;
+  /**
+   * The OTHER contacts at this contact's company, and the deals that company
+   * has. Both resolved by `company_id`, never by the free-text `company` string
+   * — matching on the string misses the colleague who typed "halcyon labs" and
+   * silently includes anyone at a company that merely shares a spelling.
+   *
+   * Both default to empty, which is what a contact with no company_id gets. That
+   * default is load-bearing: the whole block is skipped for a solo contact, so
+   * their panel renders exactly as it did before deals existed.
+   */
+  companyPeers?: Contact[];
+  companyDeals?: Deal[];
+  /** Opens another contact's panel. Omitted means the peer names are inert text. */
+  onOpenContact?: (id: string) => void;
 };
 
 export function ContactDetail({
@@ -241,6 +261,9 @@ export function ContactDetail({
   onResumeLoop1,
   onDraftOutreach,
   onDelete,
+  companyPeers = [],
+  companyDeals = [],
+  onOpenContact,
 }: ContactDetailProps) {
   const o = ownerMeta(contact.owner);
   const m = statusMeta(contact.status);
@@ -359,6 +382,12 @@ export function ContactDetail({
   const arrFigure = isArrFigure(arrRaw) ? arrRaw : "";
   const arrNote = arrRaw && !arrFigure ? arrRaw : "";
 
+  // The heading for the "Also at" block. Prefers the company name carried by a
+  // peer or a deal — both come from the normalized `companies` row — and falls
+  // back to this contact's own free-text spelling.
+  const companyLabel =
+    companyDeals[0]?.companyName || (contact.company ?? "").trim() || companyPeers[0]?.company || "";
+
   const hasSource = !!(contact.source && contact.source.trim());
   const canResume = contact.loops.includes(2) && !contact.resumedToLoop1At;
   const conflictText = conflict
@@ -467,6 +496,97 @@ export function ContactDetail({
                     {ci.external && <IconChevronRight />}
                   </Box>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* ALSO AT [COMPANY] — rendered only when this contact resolves to a
+              company row AND that company has something else on it. A contact
+              with no company_id, or the only person at theirs, gets no block at
+              all and a panel identical to the one they had before deals existed. */}
+          {companyLabel && (companyPeers.length > 0 || companyDeals.length > 0) && (
+            <div style={css("margin-top:16px;")}>
+              <div style={css("font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px;")}>
+                Also at {companyLabel}
+              </div>
+              <div style={css("border:1px solid #ededea; border-radius:11px; overflow:hidden; background:#fff;")}>
+                {companyDeals.map((deal, j) => {
+                  const sm = dealStageMeta(deal.stage);
+                  const value = dealValueLabel(deal.value);
+                  return (
+                    /* Links to the board rather than opening anything inline: the
+                       deal's own surface is /deals, and a second place to edit a
+                       stage is a second place for the two to disagree. */
+                    <Box
+                      as={Link}
+                      key={deal.id}
+                      to="/deals"
+                      style={css(`display:flex; align-items:center; gap:10px; padding:11px 13px; text-decoration:none; color:#2a2a28; ${j > 0 ? "border-top:1px solid #f2f2f0;" : ""}`)}
+                      hover={css("background:#faf9f6;")}
+                    >
+                      <span style={css("width:30px; height:30px; border-radius:8px; background:#f2f2ef; color:#6b6b66; display:flex; align-items:center; justify-content:center; flex:0 0 auto;")}>
+                        <IconDeal />
+                      </span>
+                      <span style={css("flex:1; min-width:0;")}>
+                        <span style={css("display:block; font-size:13px; font-weight:500; color:#2a2a28;")}>
+                          Deal{value ? ` · ${value}` : ""}
+                        </span>
+                        <span style={css("display:block; font-size:11.5px; color:#9a9a95; margin-top:1px;")}>
+                          {deal.expectedCloseLabel ? `Closes ${deal.expectedCloseLabel}` : "No close date"}
+                        </span>
+                      </span>
+                      {/* The DEAL's stage, not this contact's status — the two are
+                          separate axes and the panel already shows the status pill
+                          up in the header. */}
+                      <span style={css(`display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:500; background:${sm.bg}; color:${sm.fg}; white-space:nowrap; flex:0 0 auto;`)}>
+                        <span style={css(`width:5px; height:5px; border-radius:3px; background:${sm.dot};`)} />
+                        {deal.stage}
+                      </span>
+                      <IconChevronRight />
+                    </Box>
+                  );
+                })}
+                {companyPeers.map((peer, j) => {
+                  const pa = ownerAvatar(peer.owner);
+                  const ps = statusMeta(peer.status);
+                  const rowStyle = `display:flex; align-items:center; gap:10px; width:100%; padding:11px 13px; text-align:left; color:#2a2a28; ${j > 0 || companyDeals.length ? "border-top:1px solid #f2f2f0;" : ""}`;
+                  const body = (
+                    <>
+                      <span style={css(`width:30px; height:30px; border-radius:8px; background:${pa.color}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; flex:0 0 auto;`)}>
+                        {pa.initial}
+                      </span>
+                      <span style={css("flex:1; min-width:0;")}>
+                        <span style={css("display:block; font-size:13px; font-weight:500; color:#2a2a28; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}>
+                          {peer.name}
+                        </span>
+                        <span style={css("display:block; font-size:11.5px; color:#9a9a95; margin-top:1px;")}>
+                          {peer.owner ? `Owned by ${peer.owner}` : "Unassigned"}
+                        </span>
+                      </span>
+                      <span style={css(`display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:500; background:${ps.bg}; color:${ps.fg}; white-space:nowrap; flex:0 0 auto;`)}>
+                        <span style={css(`width:5px; height:5px; border-radius:3px; background:${ps.dot};`)} />
+                        {peer.status}
+                      </span>
+                    </>
+                  );
+                  // A button only when the page gave us somewhere to go. Rendering
+                  // an inert <button> would be an affordance that does nothing.
+                  return onOpenContact ? (
+                    <Box
+                      as="button"
+                      key={peer.id}
+                      onClick={() => onOpenContact(peer.id)}
+                      style={css(rowStyle + "border:none; background:none; cursor:pointer; font-family:inherit;")}
+                      hover={css("background:#faf9f6;")}
+                    >
+                      {body}
+                    </Box>
+                  ) : (
+                    <div key={peer.id} style={css(rowStyle)}>
+                      {body}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

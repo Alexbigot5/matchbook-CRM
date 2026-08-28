@@ -25,7 +25,9 @@ import { useFetcher } from "react-router";
 import {
   buildNameIndex,
   CH,
+  companyContextFor,
   type Contact,
+  type Deal,
   hasNameConflict,
   loopBadge,
   type Viewer,
@@ -76,7 +78,16 @@ const INFO_ROW = "display:flex; align-items:center; gap:8px; min-width:0;";
 const INFO_TEXT =
   "font-size:12px; color:#575753; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;";
 
-export function LifecyclePage({ contacts, viewer }: { contacts: Contact[]; viewer: Viewer }) {
+export function LifecyclePage({
+  contacts,
+  deals,
+  viewer,
+}: {
+  contacts: Contact[];
+  /** Only feeds the shared detail panel's "Also at [Company]" block. */
+  deals: Deal[];
+  viewer: Viewer;
+}) {
   const fetcher = useFetcher();
   const [state, setState] = useState<State>(() => ({
     view: "all",
@@ -269,6 +280,11 @@ export function LifecyclePage({ contacts, viewer }: { contacts: Contact[]; viewe
   const board = computeLifecycleBoard(scoped);
 
   const sel = contacts.find((c) => c.id === S.selectedId) || null;
+  // Empty lists for a contact with no company_id, which is what keeps the panel
+  // byte-identical to what it rendered before deals existed.
+  const companyCtx = sel
+    ? companyContextFor(sel, contacts, deals)
+    : { peers: [], deals: [] };
   const deleteTargets = contacts.filter((c) => S.deleteIds.includes(c.id));
   const deletePending = fetcher.state !== "idle";
   const deadTargetName = contacts.find((c) => c.id === S.pendingDeadId)?.name ?? "";
@@ -417,6 +433,9 @@ export function LifecyclePage({ contacts, viewer }: { contacts: Contact[]; viewe
           onResumeLoop1={resumeLoop1}
           onDraftOutreach={draftOutreach}
           onDelete={askDelete}
+          companyPeers={companyCtx.peers}
+          companyDeals={companyCtx.deals}
+          onOpenContact={open}
         />
       )}
 

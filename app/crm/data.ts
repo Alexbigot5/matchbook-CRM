@@ -18,6 +18,11 @@ export type Contact = {
   id: string;
   name: string;
   company: string;
+  // The normalized `companies` row this contact's free-text `company` resolves
+  // to (migrations/0017). Null for the contacts with no company string at all —
+  // influencer handles and test rows — which is why nothing may make a contact's
+  // rendering depend on it being set. `company` above stays the display column.
+  companyId?: string | null;
   // Contact-info channels (nullable - populated via the Add form / CSV import).
   email?: string | null;
   phone?: string | null;
@@ -241,6 +246,198 @@ export const STATUSES: StatusMeta[] = [
   { id: "Won", dot: "#059669", bg: "#d5efdf", fg: "#146c3a" },
   { id: "Dead", dot: "#ef4444", bg: "#f4ecec", fg: "#9a5b5b" },
 ];
+
+
+// --- Deals -----------------------------------------------------------------
+// A company normalized out of the free-text `contacts.company` column, and the
+// deal that hangs off it. See migrations/0017 and 0018 for why these are tables
+// rather than more columns on `contacts`.
+
+export type Company = {
+  id: string;
+  /** Display spelling — what someone actually typed. */
+  name: string;
+  /** trim + lower + collapsed whitespace, i.e. normalizeName(name). Identity. */
+  normalizedName: string;
+};
+
+/** A deal has at most one of each. See migrations/0018 for why it is not a list. */
+export type DealRole = "primary" | "secondary";
+
+export const DEAL_ROLES: DealRole[] = ["primary", "secondary"];
+
+/**
+ * One of a deal's (at most two) stakeholder contacts, joined in by
+ * getDealWithContacts / listDeals.
+ *
+ * Carries the contact's own `status` because the deal board shows it: a card at
+ * "Negotiation" whose champion is still "Contacted" is exactly the mismatch
+ * somebody needs to see, and it is only visible because the two live on
+ * different axes.
+ */
+export type DealStakeholder = {
+  contactId: string;
+  role: DealRole;
+  name: string;
+  owner: string | null;
+  /** The contact's OWN engagement status, not the deal's stage. */
+  status: string;
+  email?: string | null;
+};
+
+export type Deal = {
+  id: string;
+  companyId: string;
+  /** Denormalized for render — every deal view shows the company name. */
+  companyName: string;
+  stage: string;
+  /** Whole currency units. Null until somebody has quoted a number. */
+  value: number | null;
+  /** ISO date ("2026-09-30"), or null. */
+  expectedCloseDate: string | null;
+  /**
+   * "Sep 30"-style label for expectedCloseDate, precomputed server-side. Same
+   * rule as Contact.followUpDateLabel: no `Date` runs in the render path, so SSR
+   * and hydration cannot disagree.
+   */
+  expectedCloseLabel: string | null;
+  createdAt: string;
+  closedAt: string | null;
+  primary: DealStakeholder | null;
+  secondary: DealStakeholder | null;
+};
+
+/**
+ * The deal pipeline, in order. Same {id, dot, bg, fg} shape as STATUSES.
+ *
+ * A SEPARATE CONSTANT FROM STATUSES, deliberately. A deal's stage and a
+ * contact's status answer different questions — "where is this company in the
+ * pipeline" versus "how warm is this one person" — and they are allowed to
+ * disagree. Aliasing them would mean either losing per-person state or moving
+ * six people's statuses every time one deal advanced. See migrations/0018.
+ *
+ * `New` is first because it is the DB default (deals.stage DEFAULT 'New'); a
+ * deal created with no stage lands in the first column, not off the board.
+ */
+export const DEAL_STAGES: StatusMeta[] = [
+  { id: "New", dot: "#a1a1aa", bg: "#f2f2f0", fg: "#57575a" },
+  { id: "Qualified", dot: "#3b82f6", bg: "#e9f1fb", fg: "#1e5aa8" },
+  { id: "Proposal", dot: "#e0930a", bg: "#fdf0d9", fg: "#b45309" },
+  { id: "Negotiation", dot: "#8b5cf6", bg: "#f1ecfb", fg: "#6b3fb5" },
+  { id: "Won", dot: "#059669", bg: "#d5efdf", fg: "#146c3a" },
+  { id: "Lost", dot: "#ef4444", bg: "#f4ecec", fg: "#9a5b5b" },
+];
+
+/**
+ * Stages a deal is finished in. Reaching one stamps `closed_at`; leaving one
+ * clears it again, so a deal reopened after a premature "Lost" does not keep a
+ * close date it no longer has.
+ */
+export const CLOSED_DEAL_STAGES: string[] = ["Won", "Lost"];
+
+export function isClosedDealStage(stage: string): boolean {
+  return CLOSED_DEAL_STAGES.includes(stage);
+}
+
+/** Falls back to the first stage, mirroring statusMeta. Never undefined. */
+export function dealStageMeta(id: string): StatusMeta {
+  return DEAL_STAGES.find((s) => s.id === id) || DEAL_STAGES[0];
+}
+
+/**
+ * "$12,000" / "$1.2M" for a deal card, or "" when the deal has no number on it.
+ *
+ * Compact above six figures because these sit in a 304px column beside a company
+ * name — "$1,250,000" is what pushes that row to a second line. Explicitly NOT
+ * Intl.NumberFormat: it is locale-sensitive, so the server (UTC, en-US) and a
+ * browser in another locale render different strings for the same deal, which is
+ * a hydration mismatch of exactly the kind TODAY and the precomputed date labels
+ * exist to prevent.
+ */
+export function dealValueLabel(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "";
+  const n = Math.round(value);
+  // 999_500, not 1_000_000: the K branch below rounds to the nearest thousand, so
+  // anything from 999,500 up would render as "$1000K" — four digits and the wrong
+  // unit. Handing those to the M branch prints "$1M".
+  if (Math.abs(n) >= 999_500) {
+    const m = n / 1_000_000;
+    // One decimal, but "$2M" rather than "$2.0M".
+    return "$" + (Math.abs(m) >= 10 ? Math.round(m).toString() : m.toFixed(1).replace(/\.0$/, "")) + "M";
+  }
+  if (Math.abs(n) >= 100_000) return "$" + Math.round(n / 1_000) + "K";
+  return "$" + n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+export type DealColumn = { stage: StatusMeta; deals: Deal[]; count: number; value: number };
+
+export type DealBoard = {
+  columns: DealColumn[];
+  /** Deals placed across all columns — i.e. the filtered list's length. */
+  total: number;
+  /** Summed `value` of every placed deal that has one. */
+  value: number;
+};
+
+/**
+ * Group deals into one column per stage.
+ *
+ * Unlike computeLifecycleBoard, whose columns are a projection of a contact's
+ * status, these columns are the stored `deals.stage` itself — so the fallback
+ * matters for a different reason: a stage removed from DEAL_STAGES leaves rows
+ * in the database still carrying it, and those deals must not vanish from the
+ * board. They fold into the first column, keeping the columns a complete
+ * partition of the list, which is what the header count depends on.
+ */
+export function computeDealBoard(deals: Deal[]): DealBoard {
+  const byStage = new Map<string, Deal[]>();
+  for (const stage of DEAL_STAGES) byStage.set(stage.id, []);
+
+  for (const d of deals) {
+    const key = byStage.has(d.stage) ? d.stage : DEAL_STAGES[0].id;
+    byStage.get(key)!.push(d);
+  }
+
+  let total = 0;
+  let value = 0;
+  const columns = DEAL_STAGES.map((stage) => {
+    const list = byStage.get(stage.id)!;
+    const colValue = list.reduce((sum, d) => sum + (d.value ?? 0), 0);
+    total += list.length;
+    value += colValue;
+    return { stage, deals: list, count: list.length, value: colValue };
+  });
+
+  return { columns, total, value };
+}
+
+/**
+ * What the detail panel's "Also at [Company]" block shows for one contact: the
+ * OTHER people at their company, and that company's deals.
+ *
+ * Keyed on `companyId`, never on the free-text `company` string. That is the
+ * whole point of migrations/0017 — the string match misses the colleague who
+ * typed "halcyon labs" and wrongly includes anyone at a company that merely
+ * shares a spelling.
+ *
+ * A contact with no `companyId` gets two empty lists, and the panel renders no
+ * block at all. That is what keeps a solo contact — and every contact in a book
+ * where nobody has made a deal yet — looking exactly as they did before any of
+ * this existed.
+ */
+export function companyContextFor(
+  contact: Contact,
+  contacts: Contact[],
+  deals: Deal[],
+): { peers: Contact[]; deals: Deal[] } {
+  const companyId = contact.companyId;
+  if (!companyId) return { peers: [], deals: [] };
+  return {
+    peers: contacts.filter((c) => c.companyId === companyId && c.id !== contact.id),
+    deals: deals.filter((d) => d.companyId === companyId),
+  };
+}
+
 
 // Avatar colours/initials, keyed by display name. Tom and Britton are the only
 // owners contacts get *assigned* to, but Alex and Mike can sign in and author
