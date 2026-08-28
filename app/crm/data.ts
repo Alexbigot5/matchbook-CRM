@@ -427,11 +427,17 @@ export function computeDealBoard(deals: Deal[]): DealBoard {
  */
 export function companyContextFor(
   contact: Contact,
-  contacts: Contact[],
-  deals: Deal[],
+  contacts: Contact[] | undefined,
+  deals: Deal[] | undefined,
 ): { peers: Contact[]; deals: Deal[] } {
   const companyId = contact.companyId;
-  if (!companyId) return { peers: [], deals: [] };
+  // Tolerates a missing list rather than throwing on `.filter`. This block is an
+  // enrichment hanging off the side of the contact panel, so the cost of a
+  // loader payload without `deals` — a client holding pre-deploy router state,
+  // a future route that renders the panel and forgets the prop — must be "no
+  // block", never a TypeError that takes the whole contacts view down with it.
+  // Solo contacts behaving exactly as they always did is the rule this defends.
+  if (!companyId || !contacts || !deals) return { peers: [], deals: [] };
   return {
     peers: contacts.filter((c) => c.companyId === companyId && c.id !== contact.id),
     deals: deals.filter((d) => d.companyId === companyId),

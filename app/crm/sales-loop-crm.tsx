@@ -221,13 +221,17 @@ export type { Viewer } from "./data";
 export function SalesLoopCRM({
   contacts,
   savedViews,
-  deals,
+  deals = [],
   viewer,
 }: {
   contacts: Contact[];
   savedViews: SavedView[];
-  /** Only feeds the detail panel's "Also at [Company]" block. */
-  deals: Deal[];
+  /**
+   * Only feeds the detail panel's "Also at [Company]" block. Optional, and
+   * defaulted, so a client holding a loader payload from before deals existed
+   * renders the contacts page without the block instead of crashing on it.
+   */
+  deals?: Deal[];
   viewer: Viewer;
 }) {
   const fetcher = useFetcher();
