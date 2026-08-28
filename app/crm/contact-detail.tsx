@@ -148,6 +148,25 @@ export function CategoryTag({ label }: { label: string }) {
   );
 }
 
+// One industry tag, for contacts created after migration 0020 split their
+// category into tags. Same family as CategoryTag and deliberately the same
+// palette: this IS the category, just resolved into its parts, so making it a
+// different colour would imply a different kind of fact. Smaller and without the
+// tag glyph, because a contact can carry several and three icons in a row reads
+// as clutter.
+export function TagPill({ label }: { label: string }) {
+  return (
+    <span
+      title={"Industry: " + label}
+      style={css(
+        "display:inline-flex; align-items:center; max-width:150px; padding:1px 7px; border-radius:6px; font-size:11px; font-weight:500; background:#eff1f6; color:#586277; border:1px solid #e2e6ef; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:0 0 auto;",
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
 // The ARR figure as a plain muted label, not a pill. A pill is for a taxonomy —
 // something you would filter or group by — and "$5M - $20M" is a reading off a
 // dial. Giving it a border and a background would claim a significance the
@@ -378,6 +397,10 @@ export function ContactDetail({
   // enrichment model's prose about why it could not find one for the rest, so it
   // splits into two very different things to render (see isArrFigure).
   const category = (contact.category ?? "").trim();
+  // Populated only for contacts created after tags shipped. Empty for every
+  // older one, which is what keeps their header rendering byte-for-byte
+  // identical to what it is today.
+  const tags = contact.tags ?? [];
   const arrRaw = (contact.arr ?? "").trim();
   const arrFigure = isArrFigure(arrRaw) ? arrRaw : "";
   const arrNote = arrRaw && !arrFigure ? arrRaw : "";
@@ -406,9 +429,17 @@ export function ContactDetail({
             <div style={css("flex:1; min-width:0;")}>
               <div style={css("font-size:18px; font-weight:600; letter-spacing:-0.015em; line-height:1.2;")}>{contact.name}</div>
               <div style={css("font-size:13px; color:#9a9a95; margin-top:2px;")}>{contact.company} · owned by {ownerName}</div>
-              {(category || arrFigure) && (
+              {(category || tags.length > 0 || arrFigure) && (
                 <div style={css("display:flex; align-items:center; gap:7px; margin-top:6px; flex-wrap:wrap;")}>
-                  {category && <CategoryTag label={category} />}
+                  {/* Tags supersede the single CategoryTag rather than joining
+                      it: they are the same value split into its parts, so
+                      rendering both would print "Beauty;Wellness" beside
+                      "Beauty" and "Wellness". A contact with no tag rows — every
+                      contact predating migration 0020 — falls through to exactly
+                      the CategoryTag it shows today. */}
+                  {tags.length > 0
+                    ? tags.map((t) => <TagPill key={t.id} label={t.name} />)
+                    : category && <CategoryTag label={category} />}
                   {arrFigure && <ArrLabel value={arrFigure} />}
                 </div>
               )}

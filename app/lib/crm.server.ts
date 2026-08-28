@@ -4,8 +4,23 @@
 // calculation here (against a single `now` captured in the loader) is what keeps
 // SSR and client hydration deterministic — no `Date` runs in the render path.
 
-import { buildNameIndex, DEAL_STAGES, isClosedDealStage, normalizeName } from "../crm/data";
-import type { Company, Contact, Deal, DealRole, DealStakeholder, Note, Touch } from "../crm/data";
+import {
+  buildNameIndex,
+  DEAL_STAGES,
+  isClosedDealStage,
+  normalizeName,
+  splitCategoryTags,
+} from "../crm/data";
+import type {
+  Company,
+  Contact,
+  Deal,
+  DealRole,
+  DealStakeholder,
+  Note,
+  Tag,
+  Touch,
+} from "../crm/data";
 import {
   TEMPLATE_STATUSES,
   type EmailTemplate,
@@ -158,7 +173,7 @@ export async function listContacts(
   const limit = page?.limit !== undefined ? Math.max(0, Math.floor(page.limit)) : null;
   const offset = page?.offset !== undefined ? Math.max(0, Math.floor(page.offset)) : 0;
 
-  const [contactsRes, notesRes, touchesRes] = await Promise.all([
+  const [contactsRes, notesRes, touchesRes, tagsRes] = await Promise.all([
     (limit === null
       ? db.prepare(
           "SELECT id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
@@ -179,6 +194,17 @@ export async function listContacts(
         "SELECT id, contact_id, type, loop, owner, note, created_at FROM touchpoints ORDER BY created_at DESC",
       )
       .all<TouchpointRow>(),
+    // Read in the same Promise.all as the others rather than per contact. Both
+    // tables are empty until something new is created (migrations/0020), so on
+    // today's book this returns nothing and costs one round trip.
+    db
+      .prepare(
+        `SELECT ct.contact_id, t.id, t.name
+           FROM contact_tags ct
+           JOIN tags t ON t.id = ct.tag_id
+          ORDER BY t.name`,
+      )
+      .all<{ contact_id: string; id: string; name: string }>(),
   ]);
 
   const notesByContact = new Map<string, Note[]>();
@@ -206,6 +232,15 @@ export async function listContacts(
       note: t.note ?? "",
     });
     touchesByContact.set(t.contact_id, list);
+  }
+
+  // Empty for every contact created before tags existed. That is the expected
+  // steady state for most of the book for a while, not a gap to be filled.
+  const tagsByContact = new Map<string, Tag[]>();
+  for (const t of tagsRes.results ?? []) {
+    const list = tagsByContact.get(t.contact_id) ?? [];
+    list.push({ id: t.id, name: t.name });
+    tagsByContact.set(t.contact_id, list);
   }
 
   return (contactsRes.results ?? []).map((row): Contact => {
@@ -237,6 +272,7 @@ export async function listContacts(
       source: row.source ?? null,
       category: row.category ?? null,
       arr: row.arr ?? null,
+      tags: tagsByContact.get(row.id) ?? [],
       resumedToLoop1At: row.resumed_to_loop1_at ?? null,
       resumedLabel,
       deadReason: row.dead_reason ?? null,
@@ -336,14 +372,178 @@ async function resolveCompanyIdsByName(
 }
 
 /**
+ * Find an industry tag by its normalized name, creating it only on a genuine
+ * miss. Same shape, and the same race handling, as findOrCreateCompanyByName:
+ * the UNIQUE index on normalized_name is the arbiter, so a concurrent writer
+ * that inserted the same tag between our SELECT and INSERT wins and we re-read
+ * whichever row won rather than failing the whole create.
+ *
+ * Returns null for a blank name, which is how splitCategoryTags' dropped empty
+ * segments stay dropped instead of minting a nameless tag.
+ */
+export async function findOrCreateTag(db: D1Database, name: string): Promise<Tag | null> {
+  const display = str(name);
+  const normalized = normalizeName(display);
+  if (!normalized) return null;
+
+  const existing = await db
+    .prepare("SELECT id, name FROM tags WHERE normalized_name = ?")
+    .bind(normalized)
+    .first<{ id: string; name: string }>();
+  if (existing) return { id: existing.id, name: existing.name };
+
+  const row = { id: crypto.randomUUID(), name: display };
+  try {
+    await db
+      .prepare("INSERT INTO tags (id, name, normalized_name) VALUES (?, ?, ?)")
+      .bind(row.id, row.name, normalized)
+      .run();
+    return row;
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const winner = await db
+      .prepare("SELECT id, name FROM tags WHERE normalized_name = ?")
+      .bind(normalized)
+      .first<{ id: string; name: string }>();
+    if (!winner) throw err;
+    return { id: winner.id, name: winner.name };
+  }
+}
+
+/**
+ * Derive one NEW contact's industry tags from its raw category and attach them.
+ *
+ * Called only from the paths that create a brand-new contact row. It is
+ * deliberately not reachable from any update path: nothing re-derives tags when
+ * a category is edited later, and nothing walks the contacts that predate
+ * migration 0020. See that migration's header for why.
+ *
+ * INSERT OR IGNORE against the composite primary key, so calling this twice for
+ * the same contact cannot double-tag it.
+ */
+export async function syncTagsFromCategory(
+  db: D1Database,
+  contactId: string,
+  rawCategory: string | null,
+): Promise<void> {
+  const names = splitCategoryTags(rawCategory);
+  if (!names.length) return;
+
+  const ids: string[] = [];
+  for (const name of names) {
+    const tag = await findOrCreateTag(db, name);
+    if (tag && !ids.includes(tag.id)) ids.push(tag.id);
+  }
+  if (!ids.length) return;
+
+  await db.batch(
+    ids.map((tagId) =>
+      db
+        .prepare("INSERT OR IGNORE INTO contact_tags (contact_id, tag_id) VALUES (?, ?)")
+        .bind(contactId, tagId),
+    ),
+  );
+}
+
+/**
+ * The bulk form, for a whole import at once.
+ *
+ * findOrCreateTag in a loop is right for one contact and wrong for two thousand:
+ * it is up to two sequential D1 round trips per segment, which on a full CSV is
+ * thousands of calls before a single tag row is written. This is the same
+ * read / INSERT OR IGNORE / re-read shape resolveCompanyIdsByName uses, and for
+ * the same reason — distinct industries in a real import are a tiny fraction of
+ * its rows.
+ *
+ * Keyed by NORMALIZED name so it agrees with findOrCreateTag about identity. The
+ * display spelling stored for a new tag is the first one seen in the file.
+ */
+async function syncTagsForNewContacts(
+  db: D1Database,
+  rows: { contactId: string; category: string | null }[],
+): Promise<void> {
+  const display = new Map<string, string>();
+  const perContact: { contactId: string; keys: string[] }[] = [];
+  for (const row of rows) {
+    const keys: string[] = [];
+    for (const seg of splitCategoryTags(row.category)) {
+      const key = normalizeName(seg);
+      if (!key) continue;
+      if (!display.has(key)) display.set(key, seg);
+      if (!keys.includes(key)) keys.push(key);
+    }
+    if (keys.length) perContact.push({ contactId: row.contactId, keys });
+  }
+  if (!display.size) return;
+
+  const found = new Map<string, string>();
+  const CHUNK = 100;
+  const readInto = async (keys: string[]) => {
+    for (let i = 0; i < keys.length; i += CHUNK) {
+      const slice = keys.slice(i, i + CHUNK);
+      const res = await db
+        .prepare(
+          `SELECT id, normalized_name FROM tags
+            WHERE normalized_name IN (${slice.map(() => "?").join(", ")})`,
+        )
+        .bind(...slice)
+        .all<{ id: string; normalized_name: string }>();
+      for (const r of res.results ?? []) found.set(r.normalized_name, r.id);
+    }
+  };
+
+  const keys = [...display.keys()];
+  await readInto(keys);
+
+  const missing = keys.filter((k) => !found.has(k));
+  for (let i = 0; i < missing.length; i += CHUNK) {
+    const slice = missing.slice(i, i + CHUNK);
+    await db.batch(
+      slice.map((k) =>
+        db
+          .prepare("INSERT OR IGNORE INTO tags (id, name, normalized_name) VALUES (?, ?, ?)")
+          .bind(crypto.randomUUID(), display.get(k) ?? k, k),
+      ),
+    );
+  }
+  if (missing.length) await readInto(missing);
+
+  const links: D1PreparedStatement[] = [];
+  for (const { contactId, keys: tagKeys } of perContact) {
+    for (const key of tagKeys) {
+      const tagId = found.get(key);
+      if (!tagId) continue;
+      links.push(
+        db
+          .prepare("INSERT OR IGNORE INTO contact_tags (contact_id, tag_id) VALUES (?, ?)")
+          .bind(contactId, tagId),
+      );
+    }
+  }
+  const LINK_CHUNK = 50;
+  for (let i = 0; i < links.length; i += LINK_CHUNK) {
+    await db.batch(links.slice(i, i + LINK_CHUNK));
+  }
+}
+
+/**
  * `companyId` is passed in rather than resolved here because this builds a
  * statement synchronously (db.batch needs them all up front) and resolving a
  * company is a read. Callers resolve first — see resolveCompanyIdsByName.
  *
  * Null is a legitimate value: a contact with no company string has no company
  * row, and must keep rendering exactly as it does today (migrations/0017).
+ *
+ * `id` is a parameter for the same reason: the caller has to know the id it just
+ * wrote in order to attach contact_tags rows to it, and a uuid minted in here
+ * would be invisible to them.
  */
-function insertContactStmt(db: D1Database, input: NewContactInput, companyId: string | null) {
+function insertContactStmt(
+  db: D1Database,
+  input: NewContactInput,
+  companyId: string | null,
+  id: string,
+) {
   const name = str(input.name);
   const followUpAt = new Date().toISOString(); // new contacts are "due today"
   const source = str(input.source) || null;
@@ -357,7 +557,7 @@ function insertContactStmt(db: D1Database, input: NewContactInput, companyId: st
       "INSERT INTO contacts (id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, follow_up_at, category, arr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
-      crypto.randomUUID(),
+      id,
       name,
       str(input.company),
       companyId,
@@ -379,7 +579,12 @@ export async function createContact(db: D1Database, input: NewContactInput): Pro
   // only on the historical backfill in migrations/0019. A blank company yields
   // null and the contact is written exactly as it always was.
   const company = await findOrCreateCompanyByName(db, str(input.company));
-  await insertContactStmt(db, input, company?.id ?? null).run();
+  const id = crypto.randomUUID();
+  await insertContactStmt(db, input, company?.id ?? null, id).run();
+  // Tags are derived here, at creation, and nowhere else — see
+  // syncTagsFromCategory and migrations/0020. A contact whose category is blank
+  // simply gets none.
+  await syncTagsFromCategory(db, id, str(input.category) || null);
 }
 
 /** How many rows a bulk insert actually wrote, and what it turned away. */
@@ -474,13 +679,30 @@ export async function createManyContacts(
   // above changes — this only fills in company_id for the rows that survive.
   const companyIds = await resolveCompanyIdsByName(db, toInsert.map((r) => r.company));
 
+  // Ids up front rather than inside insertContactStmt: the tag pass below has to
+  // name the rows it is tagging, and a uuid minted inside the statement builder
+  // would not be visible out here.
+  const withIds = toInsert.map((r) => ({ row: r, id: crypto.randomUUID() }));
+
   const CHUNK = 50;
-  for (let i = 0; i < toInsert.length; i += CHUNK) {
-    const chunk = toInsert
+  for (let i = 0; i < withIds.length; i += CHUNK) {
+    const chunk = withIds
       .slice(i, i + CHUNK)
-      .map((r) => insertContactStmt(db, r, companyIds.get(normalizeName(str(r.company))) ?? null));
+      .map(({ row, id }) =>
+        insertContactStmt(db, row, companyIds.get(normalizeName(str(row.company))) ?? null, id),
+      );
     if (chunk.length) await db.batch(chunk);
   }
+
+  // After the contacts land, never before: a contact_tags row references
+  // contacts(id), so tagging first would point at rows that do not exist yet.
+  // Only these newly inserted ids are touched — the rows dedupe turned away, and
+  // every contact already in the book, are not read or written here.
+  await syncTagsForNewContacts(
+    db,
+    withIds.map(({ row, id }) => ({ contactId: id, category: str(row.category) || null })),
+  );
+
   return { inserted: toInsert.length, skipped };
 }
 

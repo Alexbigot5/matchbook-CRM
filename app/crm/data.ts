@@ -46,6 +46,11 @@ export type Contact = {
   // brands ("$5M - $20M") and an enrichment model's prose about why it could
   // not pin one down for the rest. See isArrFigure below.
   arr?: string | null;
+  // Industry tags split out of `category` when the contact was CREATED (see
+  // splitCategoryTags). Empty for every contact predating migration 0020, and
+  // for anything whose category was blank — expected, not a gap: nothing
+  // backfills these, and no update path writes them.
+  tags?: Tag[];
   // When a Loop 2 contact was resumed into Loop 1 outbound: raw ISO timestamp
   // plus a precomputed "Jul 20"-style label (null when never resumed).
   resumedToLoop1At?: string | null;
@@ -192,6 +197,38 @@ export function categoryGroup(category: string | null | undefined): string {
   const v = (category ?? "").trim().toLowerCase();
   return v ? CATEGORY_GROUP_BY_RAW.get(v) ?? "" : "";
 }
+
+/**
+ * Split a raw `category` into its industry segments.
+ *
+ * The directory writes most categories as one value ("Food and Bev") but some as
+ * a semicolon-delimited primary;sub pair ("Beauty;Wellness"). Both halves are
+ * real industries, so this returns one entry for the simple case and two for the
+ * compound one rather than treating the whole string as a single label.
+ *
+ * Only ";" splits. Ampersands and slashes are left alone on purpose: "Food &
+ * Beverage" and "Food/Bev" are single directory values that CATEGORY_GROUP_BY_RAW
+ * maps as written, and splitting on those would shatter them into halves that
+ * match nothing.
+ *
+ * Empty segments are dropped, so a trailing or doubled delimiter ("Beauty;",
+ * "A;;B") yields no blank tag.
+ */
+export function splitCategoryTags(raw: string | null): string[] {
+  return (raw ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * An industry tag, joined onto a contact by listContacts.
+ *
+ * Only contacts created after migration 0020 shipped carry any: tags are derived
+ * at creation time and nothing backfills them, so an empty array means "created
+ * before tags existed", not "no industry".
+ */
+export type Tag = { id: string; name: string };
 
 export type Channel = { label: string; bg: string; fg: string; icon: string };
 export type StatusMeta = { id: string; dot: string; bg: string; fg: string };
