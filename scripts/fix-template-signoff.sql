@@ -1,0 +1,41 @@
+-- One-time content fix: swap the literal "Tom" sign-off for Smartlead's real
+-- sender-name token.
+--
+-- The 13 templates in scripts/seed-cold-email-templates.sql were written with
+-- Tom's name typed into the body as plain text, so a send from britton@ or
+-- jake@'s mailbox still signed off as Tom. %sender-firstname% resolves per
+-- sending mailbox, so the sign-off follows whoever the campaign actually sends
+-- from.
+--
+-- The token is %sender-firstname%, not {{sender}}. Smartlead uses two different
+-- syntaxes: {{...}} for lead data merged from the contact row ({{first_name}},
+-- {{company}}) and %...% for facts about the sending mailbox
+-- (%sender-firstname%, %sender-name%, %sender-domain%, %sender-mailbox%,
+-- %signature%). A sign-off is the second kind.
+--
+--   npx wrangler d1 execute crm-db --local  --file=scripts/fix-template-signoff.sql
+--   npx wrangler d1 execute crm-db --remote --file=scripts/fix-template-signoff.sql
+--
+-- Paired with the same edit in scripts/seed-cold-email-templates.sql, and the
+-- pair is the point: this file fixes the rows that are already live, the seed
+-- fixes what a fresh database would get. Either one alone leaves the literal
+-- name somewhere.
+--
+-- Anchored on char(10) || 'Tom' rather than on 'Tom' alone. The bodies contain
+-- "customized" and "bottom", and a bare replace of a three-letter string
+-- through 19 pieces of copy is how you end up mailing someone about
+-- "cus%sender-firstname%ized". The WHERE additionally requires the match at the
+-- very END of the body, which is where every one of the 19 sign-offs sits.
+--
+-- Verified before running: 19 variants matched in both databases, and the count
+-- of bodies CONTAINING "Tom" was also exactly 19 — so there is no other mention
+-- of the name for REPLACE to touch. If that ever stops being true, re-check it
+-- before applying, because REPLACE rewrites every occurrence in a matched body
+-- while the WHERE only tests the last one.
+--
+-- Idempotent: once a body ends in %sender-firstname% it no longer matches the
+-- WHERE, so a second run updates nothing.
+
+UPDATE template_variants
+SET body = REPLACE(body, char(10) || 'Tom', char(10) || '%sender-firstname%')
+WHERE body LIKE '%' || char(10) || 'Tom';

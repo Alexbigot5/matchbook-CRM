@@ -53,9 +53,11 @@ CREATE TABLE IF NOT EXISTS template_variants (
   -- 'A' | 'B'. Whitelisted in app/lib/validate.ts, not CHECKed, for the same
   -- table-rebuild reason as `status` above.
   slot TEXT NOT NULL,
-  -- Copy may contain {{first_name}}, {{company}} and {{sender}} merge tokens.
-  -- They are stored and rendered as literal text — nothing in this app
-  -- interpolates them, and nothing should start.
+  -- Copy may contain Smartlead merge tokens, in either of its two syntaxes:
+  -- {{first_name}} / {{company}} for lead data, and %sender-firstname% /
+  -- %signature% for the sending mailbox. (There is no {{sender}}; this comment
+  -- used to say there was.) They are stored and rendered as literal text —
+  -- nothing in this app interpolates them, and nothing should start.
   subject TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL DEFAULT '',
   -- The variant "Promote X to default" selected. Exactly one per template; the

@@ -155,10 +155,21 @@ export const MAX_SEQUENCE_STEPS = 30;
  * boundary where the text first becomes markup, and not in storage where it would
  * corrupt what the author sees in the editor.
  *
- * Merge tokens ({{first_name}}, {{company}}, {{sender}}) pass through untouched.
- * That is deliberate and safe: `{`, `}` and `_` have no meaning in HTML, and
- * Smartlead uses the very same {{token}} syntax — so copy written for the CRM
- * personalises correctly in Smartlead with no rewriting.
+ * Merge tokens pass through untouched. Smartlead has two kinds, in two
+ * different syntaxes, and both appear in this app's copy:
+ *
+ *   {{first_name}}, {{company}}        lead data, merged from the contact row
+ *   %sender-firstname%, %signature%    the mailbox the send goes out from
+ *
+ * There is no {{sender}} — an earlier version of this comment claimed one, and
+ * a template written against it would have mailed the literal text. A sign-off
+ * is the second kind: %sender-firstname% resolves per sending mailbox, which is
+ * what lets one template signed off once go out from ten mailboxes and name the
+ * right person each time.
+ *
+ * Passing both through is deliberate and safe: `{`, `}`, `_`, `%` and `-` have
+ * no meaning in HTML, so the escaping above cannot reach inside a token, and
+ * copy written in the CRM personalises in Smartlead with no rewriting.
  */
 export function toHtmlBody(text: string): string {
   const escaped = text
