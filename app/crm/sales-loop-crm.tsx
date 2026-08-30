@@ -11,6 +11,7 @@ import {
   isArrFigure,
   loopBadge,
   needsAttention,
+  normalizeName,
   statusMeta,
   statusPill,
   STATUSES,
@@ -51,7 +52,7 @@ import {
 } from "./views";
 import { ProspectingPanel } from "./prospecting-panel";
 import { buildRunView, type RunView } from "./prospecting";
-import { buildOwnerTabs, buildViewTabs, Sidebar } from "./sidebar";
+import { buildOwnerTabs, buildTagTabs, buildViewTabs, Sidebar } from "./sidebar";
 import {
   ArrLabel,
   CategoryTag,
@@ -135,6 +136,13 @@ type State = {
   view: string;
   owner: string;
   sourceFilter: string;
+  /**
+   * Selected industry tags, as normalized names. Multi-select — a contact
+   * matches if it carries ANY of them — because industries are not mutually
+   * exclusive the way a view or an owner is. Empty means no tag filter, which is
+   * what every page load starts at.
+   */
+  tagFilter: string[];
   stage: string;
   query: string;
   selectedIds: string[];
@@ -253,6 +261,7 @@ export function SalesLoopCRM({
     view: "all",
     owner: "all",
     sourceFilter: "all",
+    tagFilter: [],
     stage: "all",
     query: "",
     selectedIds: [],
@@ -500,6 +509,14 @@ export function SalesLoopCRM({
     patch(v === "loop2" ? { view: v, menuId: null } : { view: v, menuId: null, sourceFilter: "all" });
   const setOwner = (o: string) => patch({ owner: o, menuId: null });
   const setSourceFilter = (s: string) => patch({ sourceFilter: s, menuId: null });
+  const toggleTag = (key: string) =>
+    patch({
+      tagFilter: S.tagFilter.includes(key)
+        ? S.tagFilter.filter((t) => t !== key)
+        : [...S.tagFilter, key],
+      menuId: null,
+    });
+  const clearTags = () => patch({ tagFilter: [], menuId: null });
   const setStage = (s: string) => patch({ stage: s, menuId: null });
   const onSearch = (e: any) => patch({ query: e.target.value });
   const toggleSelect = (id: string, e?: any) => {
@@ -854,6 +871,14 @@ export function SalesLoopCRM({
     c.company.toLowerCase().includes(q);
   const bySource = (c: Contact) =>
     S.sourceFilter === "all" || (c.source || "") === S.sourceFilter;
+  // ANY, not ALL: picking Beauty and Pet asks for both industries, not for the
+  // few contacts that are somehow both. Contacts with no tag rows — every one
+  // predating migration 0020 — drop out as soon as a tag is picked, which is why
+  // the sidebar section says so and why the category-group condition in
+  // app/crm/views.ts is left in place beside it.
+  const byTag = (c: Contact) =>
+    S.tagFilter.length === 0 ||
+    (c.tags ?? []).some((t) => S.tagFilter.includes(normalizeName(t.name)));
   const byStage = (c: Contact) =>
     S.stage === "all"
       ? true
@@ -925,10 +950,35 @@ export function SalesLoopCRM({
       }))
     : [];
 
+  // Base set for the TAGS rows - everything except the tag filter itself, so a
+  // tag's count says how many it would add rather than how many are already
+  // showing. Contacts with no tags contribute nothing here and the group stays
+  // empty until new contacts exist, which is what keeps the section hidden today.
+  const tagBase = contacts.filter(
+    (c) => byView(c) && byOwner(c) && bySource(c) && byQuery(c),
+  );
+  const tagCounts = new Map<string, { label: string; count: number }>();
+  for (const c of tagBase) {
+    for (const t of c.tags ?? []) {
+      const key = normalizeName(t.name);
+      if (!key) continue;
+      const hit = tagCounts.get(key);
+      if (hit) hit.count++;
+      else tagCounts.set(key, { label: t.name, count: 1 });
+    }
+  }
+  const tagTabs = buildTagTabs(
+    [...tagCounts.entries()]
+      .map(([key, v]) => ({ key, label: v.label, count: v.count }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
+    S.tagFilter,
+    toggleTag,
+  );
+
   // Base set for the STAGE filter bar - everything except the stage filter, so
   // the per-stage counts reflect what's reachable under the current view.
   const stageBase = contacts.filter(
-    (c) => byView(c) && byOwner(c) && bySource(c) && byQuery(c),
+    (c) => byView(c) && byOwner(c) && bySource(c) && byTag(c) && byQuery(c),
   );
   const stageTabs = [
     { key: "all", label: "All stages", dot: "", count: stageBase.length },
@@ -1019,7 +1069,7 @@ export function SalesLoopCRM({
     return 3;
   };
   const queueSrc = contacts
-    .filter((c) => byView(c) && byOwner(c) && bySource(c))
+    .filter((c) => byView(c) && byOwner(c) && bySource(c) && byTag(c))
     .map((c) => ({ c, att: needsAttention(c) }))
     .filter((x) => x.att.flag)
     .sort(
@@ -1156,7 +1206,14 @@ export function SalesLoopCRM({
     <div className="slcrm" style={css("display:flex; height:100vh; width:100%; overflow:hidden; background:#ffffff;")}>
       <style dangerouslySetInnerHTML={{ __html: GLOBAL_CSS }} />
 
-      <Sidebar nav="contacts" viewTabs={viewTabs} ownerTabs={ownerTabs} viewer={viewer} />
+      <Sidebar
+        nav="contacts"
+        viewTabs={viewTabs}
+        ownerTabs={ownerTabs}
+        tagTabs={tagTabs}
+        onClearTags={clearTags}
+        viewer={viewer}
+      />
 
       {/* MAIN */}
       <main style={css("flex:1; display:flex; flex-direction:column; min-width:0; background:#ffffff;")}>

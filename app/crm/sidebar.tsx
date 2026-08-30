@@ -248,16 +248,55 @@ function NavLink({
   );
 }
 
+/**
+ * TAGS rows. Multi-select, unlike VIEWS and OWNER: industries are not mutually
+ * exclusive, and a contact carrying both halves of a "Beauty;Wellness" category
+ * belongs under either.
+ *
+ * `selected` holds normalized tag names, so the rows agree with findOrCreateTag
+ * about when two spellings are one tag. Counts come from the caller because only
+ * the page knows which contacts the other filters have already excluded.
+ *
+ * Returns [] when nothing is tagged, and the section then renders nothing at
+ * all. That is the common case until enough new contacts exist — an empty
+ * filter group would just be a dead heading on every page.
+ */
+export function buildTagTabs(
+  tags: { key: string; label: string; count: number }[],
+  selected: string[],
+  onToggle: (key: string) => void,
+): SidebarTab[] {
+  return tags.map((t) => ({
+    key: t.key,
+    label: t.label,
+    count: t.count,
+    active: selected.includes(t.key),
+    onClick: () => onToggle(t.key),
+    dot: selected.includes(t.key) ? "#586277" : "#d4d8e2",
+  }));
+}
+
 export function Sidebar({
   nav,
   viewTabs,
   ownerTabs,
+  tagTabs,
+  onClearTags,
   viewer,
   ownerNote,
 }: {
   nav: "contacts" | "lifecycle" | "deals" | "analytics" | "templates" | "smartlead";
   viewTabs: SidebarTab[];
   ownerTabs: SidebarTab[];
+  /**
+   * Optional TAGS group. Only the contacts page passes one — the other five
+   * pages either filter something that is not a contact or do not filter at all,
+   * and a rail full of controls that do nothing is what generates bug reports
+   * (same reasoning as ownerNote below).
+   */
+  tagTabs?: SidebarTab[];
+  /** Shown only while at least one tag is selected. */
+  onClearTags?: () => void;
   viewer: Viewer;
   /**
    * Optional caption under the OWNER group. /templates passes one because its
@@ -331,6 +370,43 @@ export function Sidebar({
         <div style={css("padding:6px 8px 0; font-size:11px; color:#a3a39d; line-height:1.45;")}>
           {ownerNote}
         </div>
+      )}
+
+      {tagTabs && tagTabs.length > 0 && (
+        <>
+          <div
+            style={css(
+              "display:flex; align-items:baseline; justify-content:space-between; gap:8px; padding:18px 8px 6px;",
+            )}
+          >
+            <span
+              style={css(
+                "font-size:11px; font-weight:500; color:#9a9a95; text-transform:uppercase; letter-spacing:0.05em;",
+              )}
+            >
+              Tags
+            </span>
+            {onClearTags && tagTabs.some((t) => t.active) && (
+              <Box
+                as="button"
+                onClick={onClearTags}
+                style={css(
+                  "background:none; border:none; padding:0; font-size:11px; font-family:inherit; color:#a3a39d; cursor:pointer;",
+                )}
+                hover={css("color:#575753;")}
+              >
+                Clear
+              </Box>
+            )}
+          </div>
+          {tagTabs.map((tab) => (
+            <SidebarRow key={tab.key} tab={tab} />
+          ))}
+          <div style={css("padding:6px 8px 0; font-size:11px; color:#a3a39d; line-height:1.45;")}>
+            Only contacts added since tags shipped carry them. Use a saved view's
+            Category condition to filter the rest.
+          </div>
+        </>
       )}
 
       {/* margin-top:auto pins the footer — nothing may be appended below it. */}
