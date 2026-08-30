@@ -29,12 +29,23 @@
 //     having it rediscovered as a bug report.
 //   * `category is Food & Beverage` matches on the GROUP, not the stored string.
 //     The directory spells ten categories thirty-six ways, so the raw value is
-//     mapped through categoryGroup() in ./data.ts first. A contact whose
-//     spelling that table has never seen is in no group and matches no category
-//     condition — deliberately, see the note on categoryGroup.
+//     mapped through categoryGroup() in ./data.ts first.
+//   * A category can be COMPOUND ("Food & Beverage;Grocery Retail"), so
+//     categoryGroup returns every group its segments map to and the clause holds
+//     if `value` is ANY of them. That contact satisfies `category is Food &
+//     Beverage` and `category is Grocery Retail` both — the same
+//     non-exclusivity `loop` has above, for the same reason: the stored value
+//     was always a set, not a single label.
+//   * Recognition is per segment, so it degrades partially rather than totally.
+//     A contact with one spelling the table knows and one it does not still
+//     matches on the half it knows. Only a contact where NO segment is mapped —
+//     or that has no category at all — is in no group and matches no category
+//     condition, deliberately; see the note on categoryGroup.
 //   * `category is not Food & Beverage` therefore MATCHES a contact with no
 //     category at all, which is most of the book. Same reading as `owner is
-//     not Tom` above, and the same trap: pair it with another condition.
+//     not Tom` above, and the same trap: pair it with another condition. Note
+//     it now also EXCLUDES a contact that is only partly Food & Beverage: one
+//     recognized segment is enough to fail an isNot on that group.
 //   * matchesConditions(c, []) is true (a vacuous AND). validateSavedView refuses
 //     to save an empty condition list, so that only happens for a corrupt or
 //     hand-edited row — and showing everything is the safer failure than showing
@@ -198,9 +209,11 @@ function satisfies(c: Contact, field: string, value: string): boolean {
     case "loop":
       return c.loops.includes(Number(value));
     case "category":
-      // Group, not raw string — see the header. A contact with no category, or
-      // one whose spelling is unmapped, groups to "" and matches nothing.
-      return categoryGroup(c.category) === value;
+      // Groups, not raw string — see the header. `includes`, not equality: a
+      // compound category resolves to one group per recognized segment and the
+      // clause holds on any of them. A contact with no category, or none whose
+      // spelling is mapped, resolves to [] and matches nothing.
+      return categoryGroup(c.category).includes(value);
     default:
       // An unknown field can only come from a corrupt row (parseConditions drops
       // them). Match nothing rather than everything, so a broken clause narrows

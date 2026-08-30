@@ -104,12 +104,29 @@ export function isArrFigure(arr: string | null | undefined): boolean {
  * other four, which is the worst possible failure for a filter — it looks like
  * it worked.
  *
+ * The list has two populations, and they are groups in different senses. The
+ * first nine collapse the directory's many spellings into one label each. The
+ * rest are the ZoomInfo import's sub-industries, which arrive already canonical
+ * — one spelling per value — so each is a group of exactly one raw string. To a
+ * saved view both are the same kind of thing: a label you pick, resolved through
+ * CATEGORY_GROUP_BY_RAW.
+ *
+ * Pairs across those two populations that look mergeable are deliberately NOT
+ * merged — "Pet" / "Pet Products", "Apparel & Accessories" / "Apparel &
+ * Accessories Retail", "Health & Wellness" / "Health & Nutrition Products". A
+ * ZoomInfo sub-industry is a narrower claim than the directory's vertical, and
+ * folding the two would discard that distinction at filter time with no way to
+ * recover it from the grouped value. They stay independently selectable until
+ * someone decides otherwise; that decision is a change to this table and the one
+ * below, never to any stored data.
+ *
  * The raw value stays on the contact untouched (it is what the directory said,
  * and the tag on the row shows it verbatim). This is a grouping applied at
  * filter time only, so re-grouping later is a code change and never a data
  * migration.
  */
 export const CATEGORY_GROUPS = [
+  // The brand directory's verticals. Each collapses several raw spellings.
   "Food & Beverage",
   "Beauty & Personal Care",
   "Health & Wellness",
@@ -119,6 +136,35 @@ export const CATEGORY_GROUPS = [
   "Toys & Games",
   "Alcohol",
   "Stationery & Office",
+  // The ZoomInfo import's sub-industries. Already canonical, one spelling each.
+  // Punctuation is verbatim from the import — the commas in "Vitamins,
+  // Supplements & Health Stores" are part of the value, not a list separator in
+  // this file. CATEGORY_GROUP_BY_RAW is keyed on exactly these strings
+  // lowercased, so a "tidy-up" to one side and not the other leaves an option in
+  // the dropdown that matches nothing.
+  "Grocery Retail",
+  "Vitamins, Supplements & Health Stores",
+  "Cosmetics, Beauty Supply & Personal Care Products",
+  "Flowers, Gifts & Specialty Stores",
+  "Health & Nutrition Products",
+  "Restaurants",
+  "Convenience Stores, Gas Stations & Liquor Stores",
+  "Apparel & Accessories Retail",
+  "Pet Products",
+  "Department Stores, Shopping Centers & Superstores",
+  "Sporting & Recreational Equipment Retail",
+  "Drug Stores & Pharmacies",
+  "Cleaning Products",
+  "Automotive Parts",
+  "Custom Software & IT Services",
+  "Pharmaceuticals",
+  "Research & Development",
+  "Industrial Machinery & Equipment",
+  "Advertising & Marketing",
+  "Plastic, Packaging & Containers",
+  "Household Goods",
+  "Furniture",
+  "Crops",
 ] as const;
 
 export type CategoryGroup = (typeof CATEGORY_GROUPS)[number];
@@ -134,11 +180,24 @@ export type CategoryGroup = (typeof CATEGORY_GROUPS)[number];
  * fold "Household & Personal Care" into Beauty. An explicit table is longer and
  * says exactly what it does.
  *
- * Two judgement calls worth disagreeing with:
+ * The ZoomInfo sub-industries map to themselves. They are already one spelling
+ * per industry, so unlike the nine directory groups above they need no variant
+ * list — the entry exists so the value is filterable at all, a group with no raw
+ * key being an option in the dropdown that matches nothing.
+ *
+ * Three judgement calls worth disagreeing with:
  *   - Alcohol is its own group, not a Food & Beverage. Different buyers,
  *     different rules about what you can say in an ad.
  *   - "Household & Personal Care" is filed under Household. It genuinely
  *     straddles two groups and there is one contact in it.
+ *   - "Household Goods" USED to be filed under Household and now self-maps to
+ *     the "Household Goods" group instead, because the ZoomInfo import spells a
+ *     sub-industry with that exact string and a Map holds one entry per key. The
+ *     seven directory contacts carrying it therefore leave the Household group.
+ *     Nothing in the stored value distinguishes their "Household Goods" from the
+ *     import's, so this is a choice between the two rather than a bug to fix:
+ *     filing it back under Household leaves the sub-industry unfilterable, and
+ *     there is no third option short of a migration respelling one population.
  */
 const CATEGORY_GROUP_BY_RAW: ReadonlyMap<string, CategoryGroup> = new Map(
   (
@@ -166,7 +225,8 @@ const CATEGORY_GROUP_BY_RAW: ReadonlyMap<string, CategoryGroup> = new Map(
       ["Vitamins & Supplements", "Health & Wellness"],
       ["Fitness Supplements", "Health & Wellness"],
       ["Household", "Household"],
-      ["Household Goods", "Household"],
+      // NB: "Household Goods" is NOT here — it self-maps to its own group below.
+      // See the third judgement call above.
       ["Household & Personal Care", "Household"],
       ["Pet", "Pet"],
       ["Pet Care", "Pet"],
@@ -178,33 +238,92 @@ const CATEGORY_GROUP_BY_RAW: ReadonlyMap<string, CategoryGroup> = new Map(
       ["Toys & Hobbies", "Toys & Games"],
       ["Alcohol", "Alcohol"],
       ["Stationery & Office", "Stationery & Office"],
+      // ZoomInfo sub-industries, each mapping to itself.
+      ["Grocery Retail", "Grocery Retail"],
+      ["Vitamins, Supplements & Health Stores", "Vitamins, Supplements & Health Stores"],
+      [
+        "Cosmetics, Beauty Supply & Personal Care Products",
+        "Cosmetics, Beauty Supply & Personal Care Products",
+      ],
+      ["Flowers, Gifts & Specialty Stores", "Flowers, Gifts & Specialty Stores"],
+      ["Health & Nutrition Products", "Health & Nutrition Products"],
+      ["Restaurants", "Restaurants"],
+      [
+        "Convenience Stores, Gas Stations & Liquor Stores",
+        "Convenience Stores, Gas Stations & Liquor Stores",
+      ],
+      ["Apparel & Accessories Retail", "Apparel & Accessories Retail"],
+      ["Pet Products", "Pet Products"],
+      [
+        "Department Stores, Shopping Centers & Superstores",
+        "Department Stores, Shopping Centers & Superstores",
+      ],
+      ["Sporting & Recreational Equipment Retail", "Sporting & Recreational Equipment Retail"],
+      ["Drug Stores & Pharmacies", "Drug Stores & Pharmacies"],
+      ["Cleaning Products", "Cleaning Products"],
+      ["Automotive Parts", "Automotive Parts"],
+      ["Custom Software & IT Services", "Custom Software & IT Services"],
+      ["Pharmaceuticals", "Pharmaceuticals"],
+      ["Research & Development", "Research & Development"],
+      ["Industrial Machinery & Equipment", "Industrial Machinery & Equipment"],
+      ["Advertising & Marketing", "Advertising & Marketing"],
+      ["Plastic, Packaging & Containers", "Plastic, Packaging & Containers"],
+      ["Household Goods", "Household Goods"],
+      ["Furniture", "Furniture"],
+      ["Crops", "Crops"],
     ] as [string, CategoryGroup][]
   ).map(([raw, group]) => [raw.toLowerCase(), group]),
 );
 
 /**
- * The group a contact's raw category belongs to, or "" for no category and for
- * a spelling the table above has never seen.
+ * Every group a contact's raw category belongs to: one entry per recognized
+ * segment, and [] for no category or for a value with no segment the table above
+ * has seen.
  *
- * "" rather than an "Other" bucket on purpose: an Other option in the dropdown
+ * A LIST, because a compound value is genuinely plural, and in the ZoomInfo
+ * import it is the normal case rather than the exception: of its 261 contacts,
+ * 200 carry two semicolon-delimited industries and 25 carry three
+ * ("Food & Beverage;Health & Nutrition Products;Vitamins, Supplements & Health
+ * Stores"). Every segment is a real industry the book gets prospected on, so a
+ * contact stored as "Food & Beverage;Grocery Retail" belongs to both and a
+ * filter on either has to find it. This used to look the whole raw string up as
+ * a single key, which found neither: 240 of those 261 contacts matched no
+ * category condition at all, silently — the exact failure the grouping table
+ * exists to prevent.
+ *
+ * Segments resolve independently, so recognition degrades one segment at a time:
+ * a value with one mapped segment and one unmapped one yields the mapped group
+ * rather than nothing. Groups are deduped, which is not hypothetical tidiness —
+ * the import ships three contacts stored as "Pet Products;Pet Products", and two
+ * segments that merely share a group ("Food;Snacks") would double it too.
+ *
+ * [] rather than an "Other" bucket on purpose: an Other option in the dropdown
  * would mix "this brand is in a vertical we have no group for" with "a new
  * spelling arrived and nobody has filed it yet", and the second is a thing to
  * fix in the table, not a category to prospect into. An unmapped value still
  * shows verbatim on the contact row; it just is not filterable until it is
  * mapped.
  */
-export function categoryGroup(category: string | null | undefined): string {
-  const v = (category ?? "").trim().toLowerCase();
-  return v ? CATEGORY_GROUP_BY_RAW.get(v) ?? "" : "";
+export function categoryGroup(category: string | null | undefined): string[] {
+  const groups: string[] = [];
+  // Segmented by splitCategoryTags, the same function the stored industry tags
+  // are derived from, so a contact's tags and the groups it filters into can
+  // never disagree about where one value ends and the next begins.
+  for (const segment of splitCategoryTags(category ?? null)) {
+    const group = CATEGORY_GROUP_BY_RAW.get(segment.toLowerCase());
+    if (group && !groups.includes(group)) groups.push(group);
+  }
+  return groups;
 }
 
 /**
  * Split a raw `category` into its industry segments.
  *
  * The directory writes most categories as one value ("Food and Bev") but some as
- * a semicolon-delimited primary;sub pair ("Beauty;Wellness"). Both halves are
- * real industries, so this returns one entry for the simple case and two for the
- * compound one rather than treating the whole string as a single label.
+ * a semicolon-delimited list ("Beauty;Wellness"). Every segment is a real
+ * industry, so this returns one entry per segment rather than treating the whole
+ * string as a single label. Usually that is two, but not always — the ZoomInfo
+ * import has 25 contacts carrying three — so nothing may assume a pair.
  *
  * Only ";" splits. Ampersands and slashes are left alone on purpose: "Food &
  * Beverage" and "Food/Bev" are single directory values that CATEGORY_GROUP_BY_RAW
