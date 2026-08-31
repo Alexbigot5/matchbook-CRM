@@ -21,6 +21,7 @@ import {
   IconDeal,
   IconMail,
   IconSend,
+  IconSettings,
   IconTrash,
   MONO,
   css,
@@ -199,8 +200,8 @@ function SidebarRow({ tab }: { tab: SidebarTab }) {
   );
 }
 
-// Stacked vertically rather than as a segmented control: with six destinations
-// a `flex:1` row compresses each to a sixth of 212px, which truncates
+// Stacked vertically rather than as a segmented control: with seven destinations
+// a `flex:1` row compresses each to a seventh of 212px, which truncates
 // "Analytics", "Lifecycle" and "Smartlead".
 //
 // The `border:1px solid transparent` is load-bearing — the active state adds a
@@ -285,7 +286,7 @@ export function Sidebar({
   viewer,
   ownerNote,
 }: {
-  nav: "contacts" | "lifecycle" | "deals" | "analytics" | "templates" | "smartlead";
+  nav: "contacts" | "lifecycle" | "deals" | "analytics" | "templates" | "smartlead" | "settings";
   viewTabs: SidebarTab[];
   ownerTabs: SidebarTab[];
   /**
@@ -342,6 +343,9 @@ export function Sidebar({
         </NavLink>
         <NavLink to="/smartlead" label="Smartlead" active={nav === "smartlead"}>
           <IconSend style={css("width:13px; height:13px;")} />
+        </NavLink>
+        <NavLink to="/settings" label="Settings" active={nav === "settings"}>
+          <IconSettings style={css("width:13px; height:13px;")} />
         </NavLink>
       </div>
 

@@ -29,6 +29,7 @@ import {
   IconFilter,
   IconPlus,
   IconProspect,
+  IconReply,
   IconSave,
   IconSearch,
   IconTrash,
@@ -50,6 +51,7 @@ import {
   type ViewCondition,
   type ViewOp,
 } from "./views";
+import type { ReplyCard } from "./unipile-map";
 import { ProspectingPanel } from "./prospecting-panel";
 import { buildRunView, type RunView } from "./prospecting";
 import { buildOwnerTabs, buildTagTabs, buildViewTabs, Sidebar } from "./sidebar";
@@ -160,6 +162,15 @@ type State = {
   csvFileName: string;
   deleteIds: string[];
   actionError: string;
+  /**
+   * The last reply sync's outcome sentence, shown in the New replies header.
+   *
+   * Kept out of `actionError` because it is usually good news, and out of the
+   * modal-holding `message` path because that one means "an import partly
+   * failed". Cleared when the next sync starts, so a stale sentence never sits
+   * over a fresh result.
+   */
+  syncNotice: string;
   /** The "New view" builder card, and the view being drafted in it. */
   viewBuilder: boolean;
   draftConditions: ViewCondition[];
@@ -206,7 +217,7 @@ type ProspectActionResult =
   | { ok: false; error: string; runId?: string };
 
 type ActionResult =
-  | { ok: true; message?: string; savedViewId?: string }
+  | { ok: true; message?: string; savedViewId?: string; syncMessage?: string }
   | { ok: false; error: string };
 
 const blankForm = (loops?: number[]): FormState => ({
@@ -230,6 +241,7 @@ export function SalesLoopCRM({
   contacts,
   savedViews,
   deals = [],
+  replies = [],
   viewer,
 }: {
   contacts: Contact[];
@@ -240,6 +252,19 @@ export function SalesLoopCRM({
    * renders the contacts page without the block instead of crashing on it.
    */
   deals?: Deal[];
+  /**
+   * Unread replies pulled from Unipile, newest first, already joined to their
+   * contact and already capped by the loader. Optional and defaulted for the
+   * same reason `deals` is.
+   *
+   * UNFILTERED BY THE SIDEBAR, deliberately, unlike the Needs attention queue
+   * below it. The two strips answer different questions: the queue is "what
+   * should I work through in the slice I am looking at", while this is "somebody
+   * answered". A reply hidden because the owner filter happens to be on Britton
+   * is a reply nobody answers, and it is the one thing on this page with a
+   * counterparty waiting on the other end.
+   */
+  replies?: ReplyCard[];
   viewer: Viewer;
 }) {
   const fetcher = useFetcher();
@@ -278,6 +303,7 @@ export function SalesLoopCRM({
     csvFileName: "",
     deleteIds: [],
     actionError: "",
+    syncNotice: "",
     viewBuilder: false,
     draftConditions: [],
     viewName: "",
@@ -322,6 +348,13 @@ export function SalesLoopCRM({
         sourceFilter: "all",
         view: savedViewKey(result.savedViewId),
       });
+      return;
+    }
+    if (result.ok && result.syncMessage) {
+      // Routed by its own field for the reason the saved-view branch above is:
+      // the generic `message` path below means "an import partly failed, hold
+      // the modal open", and a successful sync must not open the CSV modal.
+      patch({ syncNotice: result.syncMessage, actionError: "" });
       return;
     }
     if (result.ok) {
@@ -1076,6 +1109,41 @@ export function SalesLoopCRM({
       (a, b) => prio(a.c) - prio(b.c) || (a.c.followUp ?? 99) - (b.c.followUp ?? 99),
     )
     .slice(0, 8);
+  // The New replies strip.
+  //
+  // Built here alongside the queue, and precomputed the same way: the card
+  // renders from strings and style fragments only, never from a lookup it does
+  // itself. Unlike the queue it is NOT run through the sidebar filters — see the
+  // `replies` prop's docblock for why.
+  const replyCards = replies.map((r) => {
+    const ch = CH[r.channel] ?? NO_TOUCH;
+    const o = ownerMeta(r.owner);
+    return {
+      id: r.id,
+      name: r.contactName,
+      company: r.company,
+      channelLabel: ch.label,
+      channelIconHtml: { __html: ch.icon },
+      chipStyle: `display:inline-flex; align-items:center; gap:5px; padding:2px 7px; border-radius:6px; font-size:10.5px; font-weight:500; background:${ch.bg}; color:${ch.fg};`,
+      // The subject when there is one (email), the sender's own name when there
+      // is not (LinkedIn) — a card with neither reads as a quote from nobody.
+      snippet: r.snippet,
+      ownerColor: o ? o.color : "#b0b0aa",
+      ownerInitial: o ? o.initial : "?",
+      ago: ago(r.daysAgo),
+      onOpen: () => open(r.contactId),
+      onDismiss: () => submit({ intent: "markReplyRead", ids: JSON.stringify([r.id]) }),
+    };
+  });
+  const markAllRepliesRead = () => submit({ intent: "markAllRepliesRead" });
+  const syncReplies = () => {
+    // Cleared on the way out, not on the way back: leaving the previous run's
+    // sentence up while a new one is in flight reads as the result of the press
+    // that just happened.
+    patch({ syncNotice: "", actionError: "" });
+    submit({ intent: "syncReplies" });
+  };
+
   const queue = queueSrc.map(({ c, att }) => {
     const o = ownerMeta(c.owner);
     const last = c.touches[0];
@@ -1425,6 +1493,110 @@ export function SalesLoopCRM({
               </Box>
             ))}
           </div>
+          {/* New replies.
+              Above Needs attention deliberately: this is the only thing on the
+              page with someone waiting on the other end of it, and the queue
+              below is work we set ourselves. The header renders even at zero, so
+              Sync has a home on the page where a reply is actually noticed —
+              hiding it until a reply exists would leave no way to fetch the
+              first one. */}
+          <div style={css("padding:16px 24px 4px;")}>
+            <div style={css("display:flex; align-items:center; gap:8px; margin-bottom:10px; flex-wrap:wrap;")}>
+              <IconReply size={14} style={css("color:#4457c9;")} />
+              <span style={css("font-size:12.5px; font-weight:600; color:#3a3a38;")}>New replies</span>
+              {replyCards.length > 0 && (
+                <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{replyCards.length}</span>
+              )}
+              <span style={css("flex:1;")} />
+              {S.syncNotice && (
+                <span style={css("font-size:11.5px; color:#75756f;")}>{S.syncNotice}</span>
+              )}
+              <Box
+                as="button"
+                onClick={syncReplies}
+                disabled={submitPending}
+                title="Read new email and LinkedIn messages through Unipile"
+                style={css("background:none; border:none; padding:2px 6px; border-radius:6px; font-size:11.5px; font-family:inherit; color:#75756f; cursor:pointer;")}
+                hover={css("background:#f0f0ec; color:#3a3a38;")}
+              >
+                {submitPending ? "Syncing…" : "Sync"}
+              </Box>
+              {replyCards.length > 0 && (
+                <Box
+                  as="button"
+                  onClick={markAllRepliesRead}
+                  disabled={submitPending}
+                  style={css("background:none; border:none; padding:2px 6px; border-radius:6px; font-size:11.5px; font-family:inherit; color:#a3a39d; cursor:pointer;")}
+                  hover={css("background:#f0f0ec; color:#575753;")}
+                >
+                  Mark all read
+                </Box>
+              )}
+            </div>
+
+            {replyCards.length === 0 ? (
+              <div style={css("font-size:12px; color:#a3a39d; padding-bottom:4px;")}>
+                Nothing new. Sync checks the connected mailboxes and LinkedIn for replies.
+              </div>
+            ) : (
+              /* One horizontal row, not the wrapping grid the queue uses. Replies
+                 are ordered by recency and read left to right; a grid would reflow
+                 the newest card to a different place every time one arrives. The
+                 scroll lives on this container so no card is clipped. */
+              <div style={css("display:flex; gap:10px; overflow-x:auto; padding-bottom:6px;")}>
+                {replyCards.map((rc) => (
+                  <div
+                    key={rc.id}
+                    style={css("flex:0 0 300px; border:1px solid #dfe3f0; background:#fbfcff; border-radius:12px; display:flex; flex-direction:column;")}
+                  >
+                    <Box
+                      onClick={rc.onOpen}
+                      style={css("display:flex; flex-direction:column; gap:8px; padding:11px 13px 12px; cursor:pointer; border-radius:12px;")}
+                      hover={css("background:#f5f7ff;")}
+                    >
+                      <span style={css("display:flex; align-items:center; gap:8px; width:100%;")}>
+                        <span style={css(rc.chipStyle)}>
+                          <span dangerouslySetInnerHTML={rc.channelIconHtml} style={css("display:flex;")} />
+                          {rc.channelLabel}
+                        </span>
+                        <span style={css("font-size:13px; font-weight:600; color:#1a1a1a; min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}>
+                          {rc.name}
+                        </span>
+                        {/* Dismiss, not delete: the reply stays on the contact's
+                            timeline, this only takes the card off the strip. */}
+                        <Box
+                          as="button"
+                          title="Mark this reply read"
+                          onClick={(e: any) => {
+                            e.stopPropagation();
+                            rc.onDismiss();
+                          }}
+                          style={css("background:none; border:none; padding:2px; border-radius:5px; color:#b6bacb; cursor:pointer; display:flex; flex:0 0 auto;")}
+                          hover={css("background:#e8ecfa; color:#4457c9;")}
+                        >
+                          <IconCheck size={12} />
+                        </Box>
+                        <span style={css(`width:22px; height:22px; border-radius:6px; background:${rc.ownerColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; flex:0 0 auto;`)}>
+                          {rc.ownerInitial}
+                        </span>
+                      </span>
+                      {/* Two lines, clamped. The stored snippet is already cut to
+                          280 characters server-side; this is the visual bound. */}
+                      <span style={css("font-size:12.5px; color:#3a3a38; line-height:1.45; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;")}>
+                        {rc.snippet}
+                      </span>
+                      <span style={css("display:flex; align-items:center; gap:5px; font-size:11.5px; color:#9a9a95; min-width:0;")}>
+                        <span style={css("min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}>{rc.company}</span>
+                        {rc.company && <span>·</span>}
+                        <span style={css(MONO + "flex:0 0 auto;")}>{rc.ago}</span>
+                      </span>
+                    </Box>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {queue.length > 0 && (
             <div style={css("padding:16px 24px 4px;")}>
               <div style={css("display:flex; align-items:center; gap:8px; margin-bottom:10px;")}>

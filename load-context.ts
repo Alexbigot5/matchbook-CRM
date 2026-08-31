@@ -17,6 +17,8 @@ type IntegrationEnv = {
   SMARTLEAD_API_KEY?: string;
   ORIGAMI_API_KEY?: string;
   ORIGAMI_PROJECT_ID?: string;
+  UNIPILE_API_KEY?: string;
+  UNIPILE_DSN?: string;
 };
 
 export function getLoadContext(env: Env, request: Request) {
@@ -55,6 +57,19 @@ export function getLoadContext(env: Env, request: Request) {
     // child org via the x-origami-project header. Not a secret, so it can live
     // in wrangler.toml [vars] — empty means "act on the parent org".
     ORIGAMI_PROJECT_ID: e.ORIGAMI_PROJECT_ID ?? "",
+    // Unipile (app/lib/unipile.server.ts) — the inbound half: replies from the
+    // team's mailboxes and LinkedIn. Same "" = disabled convention as the three
+    // above: /settings renders and explains what is missing rather than
+    // erroring, and neither key may join REQUIRED_BINDINGS in workers/app.ts —
+    // a CRM that cannot see replies is still a CRM.
+    //
+    // TWO VALUES, DIFFERENT KINDS. The key is a secret (`wrangler secret put`).
+    // The DSN is the per-customer API host (https://apiN.unipile.com:PORT) and
+    // is not a credential, so it may live in wrangler.toml [vars] — exactly the
+    // split ORIGAMI_PROJECT_ID makes against ORIGAMI_API_KEY. Both are read
+    // through here so either source works.
+    UNIPILE_API_KEY: e.UNIPILE_API_KEY ?? "",
+    UNIPILE_DSN: e.UNIPILE_DSN ?? "",
   };
 }
 

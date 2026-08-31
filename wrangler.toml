@@ -10,7 +10,8 @@ directory = "./build/client"
 # kicking off an agent run (see app/lib/hyperagent.server.ts). Leave blank to
 # disable outbound triggering. The API keys are secrets, NOT set here — use
 # `wrangler secret put CRM_API_KEY`, `wrangler secret put HYPERAGENT_API_KEY`,
-# `wrangler secret put SMARTLEAD_API_KEY` and `wrangler secret put ORIGAMI_API_KEY`
+# `wrangler secret put SMARTLEAD_API_KEY`, `wrangler secret put ORIGAMI_API_KEY`
+# and `wrangler secret put UNIPILE_API_KEY`
 # (and mirror them all in a local .dev.vars; see .dev.vars.example).
 # SMARTLEAD_API_KEY in particular must never be a [vars] entry — it travels in
 # request URLs, so it is a secret twice over.
@@ -20,6 +21,13 @@ directory = "./build/client"
 # the parent org, which is what a single-tenant CRM wants.
 [vars]
 HYPERAGENT_TRIGGER_URL = ""
+# The Unipile API host issued to this account, e.g. "https://api8.unipile.com:13851".
+# NOT a credential — it is printed on every page of Unipile's dashboard and only
+# names which server the key is valid against — so it belongs here rather than in
+# a secret, the same call ORIGAMI_PROJECT_ID makes. The key itself is a secret:
+# `wrangler secret put UNIPILE_API_KEY`. Leave this blank to disable /settings'
+# reply sync; the page still renders and says what is missing.
+UNIPILE_DSN = ""
 # Sender for magic-link sign-in emails. The domain must be verified in Resend.
 AUTH_EMAIL_FROM = "Matchbook CRM <noreply@onmatchbook.com>"
 

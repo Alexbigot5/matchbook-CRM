@@ -35,6 +35,7 @@ import {
   type StoredLeadState,
   type StoredSequenceStep,
 } from "../crm/smartlead-map";
+import { REPLY_PROMOTES_FROM, REPLY_STATUS, type ReplyCard } from "../crm/unipile-map";
 import { parseConditions, type SavedView } from "../crm/views";
 import type { DedupedProspect, Prospect, RunCounts } from "../crm/prospecting";
 import {
@@ -755,6 +756,12 @@ export async function deleteContacts(
       db.prepare(`DELETE FROM notes WHERE contact_id IN (${placeholders})`).bind(...chunk),
       db.prepare(`DELETE FROM touchpoints WHERE contact_id IN (${placeholders})`).bind(...chunk),
       db.prepare(`DELETE FROM smartlead_leads WHERE contact_id IN (${placeholders})`).bind(...chunk),
+      // Replies go with the contact, like their notes and touchpoints: the row
+      // carries a snippet of what the person wrote, and keeping that after the
+      // contact is gone would leave orphaned message text nothing can surface or
+      // re-delete. The audit snapshot above is of the contact row only, which is
+      // the same bargain notes and touchpoints already make.
+      db.prepare(`DELETE FROM contact_replies WHERE contact_id IN (${placeholders})`).bind(...chunk),
       db.prepare(`DELETE FROM contacts WHERE id IN (${placeholders})`).bind(...chunk),
     ]);
     deleted += res[res.length - 1]?.meta?.changes ?? 0;
@@ -2978,4 +2985,394 @@ export async function removeContactFromDeal(
   // nothing: the row already being gone — someone else's removal, or a double
   // submit — is the state the caller asked for, so it is a success.
   return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Unipile replies
+// ---------------------------------------------------------------------------
+//
+// The inbound half of the CRM (migrations/0021). Two concerns live here and they
+// are deliberately separate: `unipile_accounts` is sync bookkeeping — a
+// watermark per connected account, so a re-press reads forward rather than
+// re-reading a mailbox — and `contact_replies` is history, which is why deleting
+// a watermark row never touches a reply.
+//
+// The account LIST is not stored at all. /settings reads it live from Unipile,
+// for the reason /smartlead's SENDERS section reads its mailboxes live: a
+// mirrored copy renders "connected" for a LinkedIn session that expired an hour
+// ago, and that is the single fact an operator needs told truthfully.
+
+/** One connected account's sync state, as /settings renders it. */
+export type UnipileSyncState = {
+  accountId: string;
+  provider: string;
+  displayName: string;
+  /** Raw ISO watermark. Also the `after` parameter for the next read. */
+  lastSyncedAt: string | null;
+  /** "Jul 20"-style label, precomputed so no Date runs during render. */
+  lastSyncedLabel: string | null;
+  lastResult: string | null;
+};
+
+type UnipileAccountRow = {
+  account_id: string;
+  provider: string;
+  display_name: string;
+  last_synced_at: string | null;
+  last_result: string | null;
+};
+
+/** Every account this CRM has synced, keyed by Unipile account id. */
+export async function getUnipileSyncState(
+  db: D1Database,
+): Promise<Record<string, UnipileSyncState>> {
+  const res = await db
+    .prepare(
+      "SELECT account_id, provider, display_name, last_synced_at, last_result FROM unipile_accounts",
+    )
+    .all<UnipileAccountRow>();
+
+  const out: Record<string, UnipileSyncState> = {};
+  for (const row of res.results ?? []) {
+    const ms = row.last_synced_at ? Date.parse(row.last_synced_at) : NaN;
+    out[row.account_id] = {
+      accountId: row.account_id,
+      provider: row.provider ?? "",
+      displayName: row.display_name ?? "",
+      lastSyncedAt: row.last_synced_at ?? null,
+      lastSyncedLabel: Number.isNaN(ms) ? null : dateLabel(ms),
+      lastResult: row.last_result ?? null,
+    };
+  }
+  return out;
+}
+
+/**
+ * Move one account's watermark forward and record what the sync did.
+ *
+ * NEVER BACKWARDS. `MAX(...)` on the stored value rather than a plain assignment,
+ * because two operators can press Sync at the same moment: the one that finishes
+ * second read an older page and would otherwise rewind the watermark, causing
+ * the next sync to re-read (and the unique index to silently discard) messages
+ * that were already handled. The comparison is textual, which is chronological
+ * for the one ISO-UTC format Unipile emits — the same argument planReplies()
+ * makes about ordering.
+ *
+ * `watermark` is null when a sync found nothing new, and the MAX then keeps
+ * whatever was there. That is not a no-op: `last_result` still updates, so the
+ * page can say "no new replies" and mean it.
+ */
+export async function stampUnipileSync(
+  db: D1Database,
+  accountId: string,
+  input: { provider: string; displayName: string; watermark: string | null; result: string },
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO unipile_accounts (account_id, provider, display_name, last_synced_at, last_result)
+       VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT(account_id) DO UPDATE SET
+         provider = ?2,
+         display_name = ?3,
+         last_synced_at = NULLIF(
+           MAX(
+             COALESCE(unipile_accounts.last_synced_at, ''),
+             COALESCE(?4, '')
+           ),
+           ''
+         ),
+         last_result = ?5`,
+    )
+    .bind(
+      accountId,
+      str(input.provider),
+      str(input.displayName),
+      input.watermark,
+      input.result.slice(0, 300),
+    )
+    .run();
+}
+
+/**
+ * Forget an account's watermark.
+ *
+ * Called when the account is disconnected at Unipile, and only then. The replies
+ * it observed are left alone — a reply that happened is a fact about the
+ * contact, not about the mailbox that saw it.
+ */
+export async function forgetUnipileAccount(db: D1Database, accountId: string): Promise<void> {
+  await db.prepare("DELETE FROM unipile_accounts WHERE account_id = ?").bind(accountId).run();
+}
+
+/**
+ * Clear one account's watermark so the next sync re-reads the recent window.
+ *
+ * The deliberate rewind that stampUnipileSync's MAX() refuses to do by accident,
+ * and the escape hatch for the one way a sync can get stuck: an account so far
+ * behind that every sync truncates, which (see AccountRead.truncated in
+ * unipile-sync.server.ts) leaves the watermark where it is so no message is
+ * stepped over. Pressing this says "skip the backlog, start from recent" — a
+ * decision an operator can make and the sync never can.
+ *
+ * Safe to press at any time: every reply it re-reads is refused by the unique
+ * index, so the cost is a wasted read rather than a duplicated timeline.
+ */
+export async function resetUnipileWatermark(db: D1Database, accountId: string): Promise<void> {
+  await db
+    .prepare(
+      "UPDATE unipile_accounts SET last_synced_at = NULL, last_result = ? WHERE account_id = ?",
+    )
+    .bind("Watermark reset — the next sync re-reads the recent window.", accountId)
+    .run();
+}
+
+type ReplyRow = {
+  id: string;
+  contact_id: string;
+  channel: string;
+  subject: string | null;
+  snippet: string;
+  sender_name: string;
+  received_at: string;
+  name: string;
+  company: string | null;
+  owner: string | null;
+};
+
+/**
+ * The unread replies the "New replies" strip shows, newest first.
+ *
+ * Capped, because the strip is a horizontal row and an inbox that has gone
+ * unattended for a month is not something a contacts page should try to render
+ * in full. The cap is applied in SQL rather than after the join, so a large
+ * backlog still costs one bounded read.
+ *
+ * Joined to `contacts` with an INNER join deliberately: a reply whose contact
+ * was deleted has nowhere to click through to. deleteContacts() removes them
+ * anyway, so this is a guard against a row predating that cascade rather than an
+ * expected case.
+ */
+export async function listUnreadReplies(
+  db: D1Database,
+  now: number,
+  limit = 40,
+): Promise<ReplyCard[]> {
+  const res = await db
+    .prepare(
+      `SELECT r.id, r.contact_id, r.channel, r.subject, r.snippet, r.sender_name, r.received_at,
+              c.name, c.company, c.owner
+         FROM contact_replies r
+         JOIN contacts c ON c.id = r.contact_id
+        WHERE r.read_at IS NULL
+        ORDER BY r.received_at DESC
+        LIMIT ?`,
+    )
+    .bind(Math.max(0, Math.floor(limit)))
+    .all<ReplyRow>();
+
+  return (res.results ?? []).map((row) => ({
+    id: row.id,
+    contactId: row.contact_id,
+    contactName: row.name,
+    company: row.company ?? "",
+    channel: row.channel,
+    subject: row.subject,
+    snippet: row.snippet ?? "",
+    senderName: row.sender_name ?? "",
+    owner: row.owner ?? null,
+    daysAgo: dayDiff(Date.parse(row.received_at), now),
+  }));
+}
+
+/**
+ * How many unread replies there are in total.
+ *
+ * Separate from listUnreadReplies' length because that read is capped: /settings
+ * reports the true backlog, and the strip's own count would under-report it the
+ * moment someone left the inbox alone for a week.
+ */
+export async function countUnreadReplies(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n FROM contact_replies WHERE read_at IS NULL")
+    .first<{ n: number }>();
+  return Number(row?.n) || 0;
+}
+
+/**
+ * Mark replies read. With no ids, marks every unread reply read.
+ *
+ * `read_at IS NULL` is carried on both forms so the count returned is the number
+ * that actually changed rather than the number addressed — two people clearing
+ * the strip at once should not both report clearing twelve.
+ */
+export async function markRepliesRead(db: D1Database, ids?: string[]): Promise<number> {
+  const stamp = new Date().toISOString();
+
+  if (!ids) {
+    const res = await db
+      .prepare("UPDATE contact_replies SET read_at = ? WHERE read_at IS NULL")
+      .bind(stamp)
+      .run();
+    return res.meta?.changes ?? 0;
+  }
+
+  const unique = [...new Set(ids.filter((id) => typeof id === "string" && id))];
+  if (!unique.length) return 0;
+
+  const CHUNK = 50;
+  let changed = 0;
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const chunk = unique.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const res = await db
+      .prepare(
+        `UPDATE contact_replies SET read_at = ?
+          WHERE read_at IS NULL AND id IN (${placeholders})`,
+      )
+      .bind(stamp, ...chunk)
+      .run();
+    changed += res.meta?.changes ?? 0;
+  }
+  return changed;
+}
+
+/** What one matched reply asks to be written. Mirrors MatchedReply, plus the loop. */
+export type ReplyWrite = {
+  contactId: string;
+  channel: string;
+  accountId: string;
+  providerMessageId: string;
+  threadId: string | null;
+  subject: string | null;
+  snippet: string;
+  senderName: string;
+  senderIdentifier: string;
+  /** Which rule matched it: see ReplyMatchRule in ../crm/unipile-map. */
+  matchedOn: string;
+  receivedAt: string;
+};
+
+/**
+ * Store matched replies, log each as a touchpoint, and promote the contact.
+ *
+ * THREE WRITES PER REPLY, AND ONLY THE FIRST IS THE GUARD. The INSERT OR IGNORE
+ * against the unique (account_id, provider_message_id) index is what makes
+ * pressing Sync twice a no-op — but an ignored insert is still a successful
+ * statement, so a blind follow-up would write the touchpoint and re-promote the
+ * contact anyway and a re-press would double the timeline. That is why this
+ * reads back the ids it actually inserted (`RETURNING id`) and writes the other
+ * two only for those. It is the only way to learn what an INSERT OR IGNORE
+ * really did.
+ *
+ * The status UPDATE carries its own `status IN (...)` guard rather than trusting
+ * the snapshot the plan was built from, exactly as recordContactSends() does: a
+ * sync is long enough for someone to move a contact in the CRM while it runs,
+ * and the WHERE clause is what makes this write lose that race instead of win
+ * it. The promoted count comes from `meta.changes`, so it reports what moved.
+ *
+ * Batches are fixed-size rather than per-reply for the reason recordContactSends
+ * gives — a reply contributes two batched statements, so chunking by reply sizes
+ * the batch on a number nobody controls. A batch is atomic, so a mid-sync
+ * failure leaves earlier batches applied; that is safe here because the reply
+ * rows written before them are what stop the work being repeated.
+ */
+export async function recordReplies(
+  db: D1Database,
+  writes: ReplyWrite[],
+  actor: string,
+  ownerByContact: Map<string, string | null>,
+  loopByContact: Map<string, number>,
+): Promise<{ stored: number; promoted: number }> {
+  if (!writes.length) return { stored: 0, promoted: 0 };
+
+  const CHUNK = 40;
+  let stored = 0;
+  let promoted = 0;
+
+  for (let i = 0; i < writes.length; i += CHUNK) {
+    const chunk = writes.slice(i, i + CHUNK);
+
+    // Inserted one at a time rather than as a batch, because the RETURNING row
+    // is the only signal that separates "stored" from "already had it", and it
+    // has to be attributed back to the specific reply that produced it.
+    const accepted: ReplyWrite[] = [];
+    for (const w of chunk) {
+      const row = await db
+        .prepare(
+          `INSERT OR IGNORE INTO contact_replies
+             (id, contact_id, channel, account_id, provider_message_id, thread_id,
+              subject, snippet, sender_name, sender_identifier, matched_on, received_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           RETURNING id`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          w.contactId,
+          w.channel,
+          w.accountId,
+          w.providerMessageId,
+          w.threadId,
+          w.subject,
+          w.snippet.slice(0, 400),
+          w.senderName.slice(0, 200),
+          w.senderIdentifier.slice(0, 320),
+          w.matchedOn,
+          w.receivedAt,
+        )
+        .first<{ id: string }>();
+      if (row?.id) accepted.push(w);
+    }
+
+    if (!accepted.length) continue;
+    stored += accepted.length;
+
+    const statements: D1PreparedStatement[] = [];
+    const statusSlots: number[] = [];
+
+    for (const w of accepted) {
+      // The reply joins the timeline as a touchpoint of its own channel, so the
+      // contacts table's "last touch" column and the analytics channel mix both
+      // pick it up with no special case. How it was matched is deliberately not
+      // in the note: that is diagnostic plumbing, and the timeline is read by
+      // people asking what happened, not how it was attributed.
+      const label = w.senderName ? ` from ${w.senderName.slice(0, 60)}` : "";
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO touchpoints (id, contact_id, type, loop, owner, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          )
+          .bind(
+            crypto.randomUUID(),
+            w.contactId,
+            // Only ever 'email' or 'linkedin'. The CHECK on contact_replies.channel
+            // and channelForProvider() are the two things that guarantee it.
+            w.channel,
+            loopByContact.get(w.contactId) ?? 1,
+            // The reply is the contact's owner's to answer; an unassigned contact
+            // falls back to whoever pressed Sync, exactly as recordContactSends()
+            // and markAdsSent() do.
+            ownerByContact.get(w.contactId) || actor,
+            `Replied${label}`,
+            sqliteUTC(w.receivedAt) ?? sqliteUTC(new Date().toISOString())!,
+          ),
+      );
+
+      statusSlots.push(statements.length);
+      statements.push(
+        db
+          .prepare(
+            `UPDATE contacts SET status = ?
+              WHERE id = ? AND status IN (${REPLY_PROMOTES_FROM.map(() => "?").join(", ")})`,
+          )
+          .bind(REPLY_STATUS, w.contactId, ...REPLY_PROMOTES_FROM),
+      );
+    }
+
+    const results = await db.batch(statements);
+    for (const slot of statusSlots) {
+      promoted += Number(results[slot]?.meta?.changes) || 0;
+    }
+  }
+
+  return { stored, promoted };
 }
