@@ -40,8 +40,8 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    `createContext` handle. It takes the `Request` as well as `env` so the auth base URL can be
    derived per request; `getAuth()` is lazy so non-auth requests don't construct better-auth.
 3. `app/routes.ts` — route table: index → `routes/home.tsx`, `/lifecycle`, `/analytics`,
-   `/templates`, `/smartlead`, plus `/login`, `/logout`, `/api/auth/*` (better-auth's handler) and
-   `/api/hyperagent`.
+   `/templates`, `/smartlead`, `/settings`, plus `/login`, `/logout`, `/api/auth/*`
+   (better-auth's handler) and `/api/hyperagent`.
 4. `app/root.tsx` — HTML document shell (`Layout`), root `Outlet`, and `ErrorBoundary`.
 5. `app/routes/home.tsx` — the index route's `loader` requires a session then reads contacts
    from D1 (`listContacts`), the `action` re-checks the session and delegates to
@@ -67,13 +67,22 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    the `BUILDER_INTENTS` set. Add a builder intent without adding it there and ordinary
    editing burns the push budget.
 
+9. `app/routes/settings.tsx` — the `/settings` loader reads contacts (sidebar counts only),
+   the stored Unipile sync state and the unread-reply count, and — like `/smartlead`'s —
+   **makes no Unipile calls**. Its `action` has six intents: `signOutEverywhere`,
+   `fetchAccounts`, `connect`, `disconnect`, `resetWatermark` and `syncReplies`, and it
+   layers the two shared reply intents from `contact-intents.server.ts` around them the same
+   way `/` layers its saved-view intents. Two rate-limit buckets again, and note which side
+   `signOutEverywhere` is on: it is metered as a *light* intent so ten impatient presses of
+   Sync cannot lock someone out of the control they reach for when a laptop goes missing.
+
 `app/entry.server.tsx` is the standard streaming SSR entry (`renderToReadableStream`,
 5s `streamTimeout`, bot-detection via `isbot`).
 
 ## The CRM (`app/crm/`)
 
-Five pages (contacts, lifecycle board, analytics, email templates, Smartlead) over a
-shared shell:
+Six pages (contacts, lifecycle board, analytics, email templates, Smartlead, settings)
+over a shared shell:
 
 - **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`, `Viewer`), constants
   (`CH` channels, `STATUSES`, `OWNERS`), and pure helpers:
@@ -90,8 +99,9 @@ shared shell:
   and the shell constants both pages share: `GLOBAL_CSS`, `MONO`, and `crmFontLinks` (the
   Geist webfonts — **every route rendering the CRM shell must re-export it as `links`**, or
   the page silently falls back to the root route's Inter).
-- **`sidebar.tsx`** — the shared left rail: the Contacts/Analytics/Lifecycle/Templates nav (a
-  **vertical** stack — four items don't fit a segmented control; every item carries
+- **`sidebar.tsx`** — the shared left rail: the
+  Contacts/Analytics/Lifecycle/Deals/Templates/Smartlead/Settings nav (a
+  **vertical** stack — seven items don't fit a segmented control; every item carries
   `border:1px solid transparent` so the active one's real border doesn't shift the others) plus
   the VIEWS and OWNER filter rows, built from `buildViewTabs`/`buildOwnerTabs` (counts are
   always over the **unfiltered** list). `buildViewTabs` takes optional `counts`/`allLabel`
@@ -103,8 +113,11 @@ shared shell:
 - **`analytics.ts`** — pure, isomorphic metric aggregation (`computeAnalytics`). No React, no
   server imports, and **no `Date`** — the absolute date labels arrive from the loader. It also
   precomputes colours and bar widths so the page component stays a plain mapper. Note the two
-  derived metrics: nothing records a reply or booking as an event, so "replied" and "meetings"
-  are read off the contact's *current* pipeline status.
+  derived metrics: "replied" and "meetings" are read off the contact's *current* pipeline
+  status rather than from an event log. A reply IS now an event (`contact_replies`, plus a
+  touchpoint — see "Replies" below), but this metric deliberately still reads the status:
+  it counts contacts *at* the replied stage, not replies received, and someone who answered
+  and then booked belongs in the later bucket only. Bookings still have no event at all.
 - **`analytics-page.tsx`** — the `/analytics` UI. Read-only (no fetcher, no action). Charts are
   plain divs with percentage widths/heights — there is no charting dependency, deliberately.
 - **`templates.ts`** — the email-template model, deliberately separate from `data.ts` (which is
@@ -121,6 +134,28 @@ shared shell:
   z-test on reply rate with a hand-rolled normal CDF. Read the module header before touching
   the verdict: the figure is `1 − p` for "the rates are equal", **not** the probability that
   the leader is better, and it's a fixed-horizon test read continuously.
+- **`unipile-map.ts`** — pure, isomorphic translation from Unipile's model, the same
+  contract as `smartlead-map.ts`: no React, no server imports, **no `Date`**. It holds the
+  whole answer to *whose reply is this* — `buildContactIndex` plus `matchEmail` /
+  `matchLinkedin` — and every rule in it errs toward NOT matching, because a wrong match
+  moves someone else's contact to `Replied` and puts a stranger's words on a card with their
+  name on it. Three rules in order: exact email address, exact LinkedIn profile slug
+  (`linkedinSlug` handles every shape the free-text `linkedin` column actually holds), then
+  name — and the name rule is guarded twice, refusing an ambiguous name (this book really
+  does hold the same name under two owners; see `hasNameConflict`) and refusing any contact
+  whose stored profile URL *disagrees* with the attendee's. **Ambiguity is resolved at index
+  build time, not at lookup**: a key held by two contacts is dropped from its table
+  entirely, so a lookup can only return a unique holder. Also `REPLY_PROMOTES_FROM` (the
+  mirror of `SENT_PROMOTES_FROM`), `toSnippet` (which cuts quoted history, or every card
+  would preview our own outbound copy back at us) and the `ReplyCard` loader/UI contract.
+- **`settings-page.tsx`** — the `/settings` UI, same one-client-component idiom. Account
+  info, "sign out everywhere", and the Unipile section. It renders **two different account
+  lists and always says which one**: before Load accounts it shows the sync's own
+  bookkeeping (last synced, last result, and no health at all), after it the live list with
+  Unipile's per-source status. Blurring them would print "Connected" over a LinkedIn session
+  that expired overnight. Destructive actions use an inline two-step rather than the modal
+  shells `/` and `/templates` use — those exist to summarise a bulk selection the row can't
+  show, and here the target *is* the row.
 - **`smartlead-map.ts`** — pure, isomorphic translation to Smartlead's model
   (`buildSequencePlan`, `toHtmlBody`, `planLeads`, `planImport`, `planSenders`,
   `totalStatsBySequence`). No React, no server imports, **no `Date`**. Three
@@ -225,10 +260,13 @@ scaffold a new numbered file in `migrations/`, add your `CREATE`/`ALTER` SQL, th
 recorded in `d1_migrations`, so files are applied once, in numeric order.
 
 **Every contact write lives in `app/lib/contact-intents.server.ts`** — one
-`handleContactIntent(form, {DB, user, ...})` switch over the twelve intents (`setStatus`,
+`handleContactIntent(form, {DB, user, ...})` switch over the fourteen intents (`setStatus`,
 `logTouch`, `addNote`, `logMeeting`, `snooze`, `clearFollow`, `addContact`, `resumeLoop1`,
-`markAdsSent`, `deleteContacts`, `importContacts`, `triggerAgent`), shared by `/` and
-`/lifecycle`. It returns `null` for an unknown intent so each route keeps its own default.
+`markAdsSent`, `deleteContacts`, `importContacts`, `triggerAgent`, `markReplyRead`,
+`markAllRepliesRead`), shared by `/`, `/lifecycle` and `/settings`. The two reply intents
+are in here rather than on the contacts route because they are pure D1 writes that any page
+rendering a reply card needs; the *sync* that produces those cards is not, and stays on the
+routes where its key and its rate limit live. It returns `null` for an unknown intent so each route keeps its own default.
 The try/catch is the reason it's one module and not two copies: D1 exception text carries
 table and column names and an action's return value is rendered straight into the UI, so it
 logs the real cause with a reference id and returns only `Something went wrong. Reference:
@@ -365,17 +403,89 @@ is the only one of the five that never leaves D1.
 - **Nothing was added to `/api/hyperagent`.** The same rule that keeps template copy off
   that bearer token applies harder to a token that could re-point or start a campaign.
 
+## Replies (Unipile)
+
+The inbound half. Everything this CRM *sent* was already visible; nothing told it when
+somebody answered. `/settings` connects the team's mailboxes and LinkedIn through
+**Unipile** (unipile.com — one key across every provider), and a **Sync replies** button
+reads what has arrived, matches it to contacts, and files it. There is deliberately **no
+cron and no inbound webhook** — the same rule Smartlead follows, and it is why there is no
+public unauthenticated endpoint to defend.
+
+Where a reply ends up: a card on the contacts page's **New replies** strip, a touchpoint on
+the contact's timeline, and a status move to `Replied` for anyone still at `New` or
+`Contacted`.
+
+- **Two settings, different kinds.** `UNIPILE_API_KEY` is a secret; `UNIPILE_DSN` is the
+  per-customer API host (`https://apiN.unipile.com:PORT`) and is not a credential, so it
+  lives in `wrangler.toml [vars]` — the same split `ORIGAMI_PROJECT_ID` makes. Requests to
+  the wrong DSN 404 rather than failing usefully, so both are required and the page reports
+  them as two separate failures. Unlike Smartlead the key is an **`X-API-KEY` header**, so
+  it is never in a URL and no `redact()` is needed.
+- **`app/lib/unipile.server.ts`** — the HTTP client, shaped like `smartlead.server.ts`:
+  never throws, returns a result, missing config = disabled, no retries. `normalizeDsn`
+  accepts the three shapes the dashboard shows and **refuses anything but https** — that
+  value is the host every keyed request is sent to, so a quietly wrong DSN is a key handed
+  to a stranger.
+- **`app/lib/unipile-sync.server.ts`** — one sync, called by both pages. Reads accounts
+  live, then per account reads forward from that account's watermark. **One account's
+  failure is not the sync's**: each is read, written and stamped independently, because a
+  LinkedIn session needing re-login is the likeliest thing to go wrong and must not stop the
+  mailboxes.
+- **`migrations/0021_unipile_replies.sql`** — `unipile_accounts` (a watermark per account,
+  bookkeeping only) and `contact_replies` (history). The **account list is not mirrored**,
+  for the reason /smartlead's SENDERS section isn't: a cached copy renders "connected" for a
+  session that expired an hour ago. The unique `(account_id, provider_message_id)` index is
+  the real idempotency guard.
+- **An ignored insert is still a successful statement**, which is the subtle part of
+  `recordReplies`. `INSERT OR IGNORE` stops a duplicate *row*, but a blind follow-up would
+  still write the touchpoint and re-promote the contact, so a second Sync would double the
+  timeline. It reads back `RETURNING id` and writes the other two only for rows that landed.
+- **The watermark never goes backwards** (`MAX()` in the upsert, not assignment) — two
+  people pressing Sync at once would otherwise let the slower one rewind it — **and it does
+  not advance on a truncated read**. Unipile returns newest-first, so a read that stopped at
+  its page budget covered the *recent* end and left the older end unexamined; advancing past
+  it would step over those messages permanently. Staying put costs a repeated read, which
+  the unique index makes free. The escape hatch for an account stuck that way is the
+  per-account **"Re-read last N days"**, which clears the watermark deliberately — an
+  operator's decision to skip a backlog, never the sync's.
+- **`role: "inbox"` and `is_sender` are the whole reply filter.** Without them the same
+  calls return our own outbound, which then matches the contact it was addressed to and is
+  logged as their reply. `ownAddresses` closes the third case: mail from one connected
+  mailbox to another.
+- **LinkedIn costs three calls, not one.** A message carries a `sender_attendee_id` and
+  nothing else about the person; only the chat's attendee list turns that into a name and a
+  profile URL. Hence `UNIPILE_MAX_CHATS`, and hence chats being resolved newest-first.
+- **Unmatched replies are counted, not stored.** The sync says "3 from people not in the
+  CRM", which is what distinguishes a quiet inbox from a matching rule that has stopped
+  working. `matched_on` records which rule fired, and is the only way to diagnose a wrong
+  match after the fact.
+- **The first sync of an account reads `UNIPILE_FIRST_SYNC_DAYS` back, not everything.**
+  That is a correctness bound, not a performance one: a mailbox holds years of
+  correspondence with people who are also contacts, and reading all of it would stamp
+  three-year-old "Replied" touchpoints across half the book.
+- **The connect link is returned, not redirected to.** `form-action 'self'` is enforced
+  across redirects, so a 302 out of the action to Unipile's domain is blocked with no
+  visible error; the client assigns `window.location` instead. Worth remembering before
+  "simplifying" it back into a `redirect()`.
+- **Nothing was added to `/api/hyperagent`**, for the reason Smartlead added nothing: a
+  bearer token that could read the team's inbox is not a thing to hang off a shared key.
+
 Security headers (CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS on https, etc.) are set in
 `workers/app.ts`, wrapping every dynamic response. They do **not** apply under
 `npm run dev` (the Vite dev server doesn't route through the Worker entry) — use
 `npm run start` to see them.
 
 Gotchas:
-- **Touchpoints are written by four paths**: the `logTouch` intent (the detail panel's "Log
-  touch" channel chips), `logMeeting`, the bulk `markAdsSent`, and `recordContactSends` from
-  the Smartlead sync. The first three only reflect activity logged in-app; the fourth is the
-  one that backfills, and only for campaigns this CRM pushed to — so the analytics channel
-  and activity panels still start sparse for anything sent elsewhere. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
+- **Touchpoints are written by five paths**: the `logTouch` intent (the detail panel's "Log
+  touch" channel chips), `logMeeting`, the bulk `markAdsSent`, `recordContactSends` from
+  the Smartlead sync, and `recordReplies` from the Unipile sync. The first three only
+  reflect activity logged in-app; the last two backfill, and only for campaigns this CRM
+  pushed to and mailboxes connected to Unipile — so the analytics channel and activity
+  panels still start sparse for anything sent or received elsewhere. The two sync writers
+  are the only ones that can move a contact's status as a side effect, and they move it in
+  opposite directions along the same guarded edge: `Contacted` on a send, `Replied` on a
+  reply, each with the promotable set spelled out in SQL. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
   live conflict flag remains the name-based `hasNameConflict`/`conflictOwners`.
 - **`contacts.dead_reason`** is captured by a prompt that intercepts the shared `setStatus`
   handler whenever a contact is set to Dead (covering both the row and detail status menus).
@@ -448,9 +558,11 @@ but access is restricted to four hardcoded addresses.
   `CRM_API_KEY` bearer token for machine callers.
 - **Secrets**: `BETTER_AUTH_SECRET` (required — better-auth *throws* on every request in a
   production build if unset), `RESEND_API_KEY` and `SMARTLEAD_API_KEY` (optional — empty
-  disables `/smartlead`; never a `[vars]` entry, since it travels in request URLs).
-  `AUTH_EMAIL_FROM` is a `[vars]` entry; its domain must be verified in Resend or nothing
-  sends.
+  disables `/smartlead`; never a `[vars]` entry, since it travels in request URLs),
+  `ORIGAMI_API_KEY` and `UNIPILE_API_KEY` (optional — empty disables the Prospect panel and
+  the reply sync respectively). `AUTH_EMAIL_FROM`, `ORIGAMI_PROJECT_ID` and `UNIPILE_DSN`
+  are `[vars]` entries, not secrets: the first must have a Resend-verified domain, and the
+  last two only *scope* a request rather than authorise one.
 - **`migrations/0004_auth_tables.sql` is generated, not hand-written** — produced by
   better-auth's own `getMigrations()` for the installed version. Regenerate it if better-auth
   is upgraded or a plugin with its own schema is added; don't hand-edit the columns.

@@ -10,9 +10,12 @@ import {
   listContacts,
   listDeals,
   listSavedViews,
+  listUnreadReplies,
 } from "../lib/crm.server";
 import { handleContactIntent } from "../lib/contact-intents.server";
-import { MAX_SAVED_VIEWS, validateSavedView } from "../lib/validate";
+import { rateLimit, UNIPILE_SYNC_RULE } from "../lib/ratelimit.server";
+import { syncReplies } from "../lib/unipile-sync.server";
+import { MAX_SAVED_VIEWS, UNIPILE_STRIP_LIMIT, validateSavedView } from "../lib/validate";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -33,21 +36,31 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   const user = await requireUser(request, ctx);
   // Resolve the avatar server-side so the UI renders purely from loader data.
   const avatar = ownerAvatar(user.name);
+  // One instant for every relative figure on the page, so the contact rows and
+  // the reply cards can't disagree about what "today" is.
+  const now = Date.now();
   try {
     // Saved views are read per-viewer: shared ones plus this user's private ones.
     // Deals are read here purely to power the detail panel's "Also at [Company]"
     // block. It is a small table and the panel needs whichever company the user
     // happens to click, which the loader cannot know — so the whole set comes
     // down once rather than a round trip per panel open.
-    const [contacts, savedViews, deals] = await Promise.all([
-      listContacts(DB, Date.now()),
+    const [contacts, savedViews, deals, replies] = await Promise.all([
+      listContacts(DB, now),
       listSavedViews(DB, user.email),
       listDeals(DB),
+      // The New replies strip. Read here rather than fetched by the client so it
+      // renders with the first paint like everything else on this page — and so
+      // the relative "2d ago" on a card comes from the same `now` the contact
+      // rows use. NO Unipile call: this is D1 only, and pulling new replies is
+      // the Sync button's job.
+      listUnreadReplies(DB, now, UNIPILE_STRIP_LIMIT),
     ]);
     return {
       contacts,
       savedViews,
       deals,
+      replies,
       viewer: { name: user.name, initial: avatar.initial, color: avatar.color },
     };
   } catch (err) {
@@ -65,9 +78,16 @@ export async function loader({ request, context }: Route.LoaderArgs) {
  * loader would race a concurrent save by one of the other users. It also acts as
  * the discriminator that tells the client's settle effect this success was a view
  * save and not some unrelated intent. Same device as /templates' `templateId`.
+ *
+ * `syncMessage` is the same device again, for the same reason. A sync's outcome
+ * is a sentence that has to be shown ("6 new replies, 2 moved to Replied, 3 from
+ * people not in the CRM"), and the client's settle effect routes results by
+ * which optional field is present — a plain `message` there already means
+ * "an import partially failed, hold the modal open", so reusing it would open
+ * the CSV modal on a successful sync.
  */
 type ActionResult =
-  | { ok: true; message?: string; savedViewId?: string }
+  | { ok: true; message?: string; savedViewId?: string; syncMessage?: string }
   | { ok: false; error: string };
 
 function parseJson(value: FormDataEntryValue | null): unknown {
@@ -117,6 +137,42 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         }
         return { ok: true, savedViewId: created.id };
       }
+      /**
+       * Pull new replies from Unipile.
+       *
+       * Layered here, around handleContactIntent, for the same reason the two
+       * saved-view intents are: this reaches a third party under a live key and
+       * needs its own rate limit, neither of which belongs in a helper whose
+       * whole contract is "contact writes against D1". The two reply intents
+       * that ARE pure D1 writes (marking a card read) do live in that helper,
+       * so /lifecycle gets them for free.
+       *
+       * /settings runs the identical operation through the same module. The
+       * button is on both pages because the strip is where a reply is noticed
+       * and settings is where the connection is managed.
+       */
+      case "syncReplies": {
+        const limit = await rateLimit(DB, UNIPILE_SYNC_RULE, user.email);
+        if (!limit.allowed) {
+          return {
+            ok: false,
+            error: `Too many syncs. Try again in ${limit.retryAfterSeconds}s.`,
+          };
+        }
+        const res = await syncReplies(DB, {
+          apiKey: ctx.UNIPILE_API_KEY,
+          dsn: ctx.UNIPILE_DSN,
+          actor: user.name,
+        });
+        if (!res.ok) return { ok: false, error: res.error };
+        // Per-account failures are appended rather than swallowed: one dead
+        // LinkedIn session among four healthy mailboxes would otherwise produce
+        // a cheerful banner about the mailboxes alone.
+        const failures = res.summary.failures.length
+          ? ` ${res.summary.failures.join(" ")}`
+          : "";
+        return { ok: true, syncMessage: res.summary.message + failures };
+      }
       case "deleteSavedView": {
         const id = form.get("id")?.toString();
         if (!id) return { ok: false, error: "Missing view id." };
@@ -149,6 +205,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       contacts={loaderData.contacts}
       savedViews={loaderData.savedViews}
       deals={loaderData.deals}
+      replies={loaderData.replies}
       viewer={loaderData.viewer}
     />
   );

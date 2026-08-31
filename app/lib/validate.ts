@@ -1130,6 +1130,90 @@ export function validateSchedule(raw: unknown):
 }
 
 // ---------------------------------------------------------------------------
+// Unipile (inbound replies)
+// ---------------------------------------------------------------------------
+//
+// The read side of the integration. Every bound here is a subrequest budget: a
+// Worker invocation has a finite number of outbound fetches, and one sync makes
+// one call per account page, plus one per message page per account, plus one per
+// LinkedIn chat it needs an attendee list for. These constants are what keep the
+// worst case inside that ceiling and the button responsive.
+
+/** Accounts read per page from `GET /accounts`. */
+export const UNIPILE_ACCOUNT_PAGE = 100;
+
+/**
+ * Pages of accounts one read will fetch.
+ *
+ * A soft stop. This list is what /settings shows and what a sync iterates, so
+ * reading part of it syncs fewer mailboxes rather than misreporting anything —
+ * and 300 connected accounts is far past what a four-person CRM will ever hold.
+ */
+export const UNIPILE_ACCOUNT_MAX_PAGES = 3;
+
+/** Messages (or emails) read per page during a sync. */
+export const UNIPILE_MESSAGE_PAGE = 100;
+
+/**
+ * Pages of messages one sync will read PER ACCOUNT.
+ *
+ * A soft stop, unlike SMARTLEAD_STATS_MAX_PAGES. Nothing here is an absolute
+ * total: a truncated read stores fewer replies, never a wrong one, and the
+ * watermark only advances as far as what was actually read — so the next press
+ * picks up the rest. That is the same argument migration 0015 makes about
+ * contact marking being ungated by the page budget.
+ */
+export const UNIPILE_MESSAGE_MAX_PAGES = 5;
+
+/**
+ * LinkedIn chats one sync will fetch an attendee list for.
+ *
+ * LinkedIn messages carry no addressable identity — only a `sender_attendee_id`
+ * — so every chat with a new inbound message costs one extra call to turn that
+ * into a name and a profile URL. Chats are resolved newest-message-first, so a
+ * sync that hits this ceiling drops the oldest conversations rather than an
+ * arbitrary slice, and the watermark stops at the oldest message it resolved so
+ * nothing is skipped permanently.
+ */
+export const UNIPILE_MAX_CHATS = 40;
+
+/**
+ * How far back the FIRST sync of an account reads, in days.
+ *
+ * Bounded rather than "everything", and this is a correctness bound rather than a
+ * performance one. A mailbox holds years of correspondence, much of it with
+ * people who are also in the CRM; reading all of it would stamp a "Replied"
+ * touchpoint dated three years ago onto contacts who answered a different
+ * conversation entirely, and promote half the book out of `New` on the strength
+ * of it. Two weeks is recent enough to be about the outbound that is running now.
+ */
+export const UNIPILE_FIRST_SYNC_DAYS = 14;
+
+/** Replies the contacts-page strip will render at once. */
+export const UNIPILE_STRIP_LIMIT = 40;
+
+/**
+ * Validate a Unipile account id.
+ *
+ * Load-bearing beyond the usual bounds check: the value is interpolated into a
+ * URL *path* (`DELETE /accounts/{id}`), so the character class is what stops it
+ * carrying a `../` and re-pointing an authenticated request at a different
+ * endpoint. Unipile's ids are opaque base62-ish handles rather than digits,
+ * which is why this is wider than validateCampaignId — and why
+ * unipile.server.ts re-checks it at the last moment anyway.
+ */
+export function validateUnipileAccountId(raw: unknown):
+  | { ok: true; id: string }
+  | { ok: false; error: string } {
+  const id = asString(raw);
+  if (!id) return { ok: false, error: "Missing account id." };
+  if (!/^[A-Za-z0-9_=-]{1,128}$/.test(id)) {
+    return { ok: false, error: `"${truncateForMessage(id)}" is not a valid account id.` };
+  }
+  return { ok: true, id };
+}
+
+// ---------------------------------------------------------------------------
 // Output escaping
 // ---------------------------------------------------------------------------
 

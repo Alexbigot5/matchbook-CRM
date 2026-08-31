@@ -185,6 +185,40 @@ export const SMARTLEAD_BUILDER_RULE: RateLimitRule = {
 };
 
 /**
+ * Syncing replies from Unipile.
+ *
+ * Tighter than SMARTLEAD_RULE because one press is far more expensive: a sync
+ * reads every connected account, up to UNIPILE_MESSAGE_MAX_PAGES of messages
+ * each, plus an attendee call per LinkedIn chat — dozens of subrequests where a
+ * Smartlead push is a handful. The button is also on two pages now (the contacts
+ * strip and /settings), which makes an impatient double-press likelier, and two
+ * concurrent syncs do the same work twice for one set of replies.
+ *
+ * Keyed on the user's email like SMARTLEAD_RULE: four people behind one office
+ * address should not share a budget.
+ */
+export const UNIPILE_SYNC_RULE: RateLimitRule = {
+  bucket: "unipile:sync",
+  limit: 10,
+  windowMs: 60 * 1000,
+};
+
+/**
+ * Everything else /settings does: reading the account list, minting a connect
+ * link, disconnecting, marking replies read.
+ *
+ * A separate, looser bucket for the reason SMARTLEAD_BUILDER_RULE is separate
+ * from SMARTLEAD_RULE — clearing a strip of twelve replies one card at a time is
+ * twelve writes that reach nothing but D1, and metering those against the sync
+ * budget would mean tidying the inbox exhausted the allowance to refill it.
+ */
+export const UNIPILE_RULE: RateLimitRule = {
+  bucket: "unipile:user",
+  limit: 120,
+  windowMs: 60 * 1000,
+};
+
+/**
  * Starting a prospecting run.
  *
  * Tight, and per hour rather than per minute, because a run is the only thing in

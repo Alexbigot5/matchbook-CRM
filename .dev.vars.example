@@ -58,3 +58,23 @@ ORIGAMI_API_KEY=""
 # local dev, wrangler dev, and production all work with no config. Set this only
 # if a proxy rewrites the host.
 # BETTER_AUTH_URL=""
+
+# --- Unipile (inbound replies) ------------------------------------------------
+# Drives the "New replies" strip on the contacts page and the Unipile section of
+# /settings: one key across the team's mailboxes and LinkedIn, read on a button
+# press, matched to contacts, and written back as replies + touchpoints.
+#
+# Unipile authenticates with an `X-API-KEY` HEADER, so unlike Smartlead the
+# secret never travels in a URL and a logged request URL is harmless.
+#
+# Create one at unipile.com -> dashboard -> Access Tokens. Leave blank to
+# disable: /settings still renders and explains what's missing, exactly as
+# /smartlead and the Prospect panel do.
+#   wrangler secret put UNIPILE_API_KEY
+UNIPILE_API_KEY=""
+
+# The API host issued with that key, e.g. https://api8.unipile.com:13851.
+# Requests to the wrong one 404 rather than failing usefully, so this is required
+# alongside the key. Not a credential, so it can equally live in wrangler.toml
+# [vars] — which is where the deployed Worker reads it from.
+UNIPILE_DSN=""

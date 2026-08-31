@@ -25,6 +25,7 @@ import {
   listContacts,
   logTouchpoint,
   markAdsSent,
+  markRepliesRead,
   resumeToLoop1,
   snoozeFollowUp,
   updateContactStatus,
@@ -74,8 +75,8 @@ function parseJsonField(value: FormDataEntryValue | null): unknown {
 /**
  * Handle one contact intent.
  *
- * Returns `null` when `intent` is none of the twelve, so each route keeps its own
- * `default:` and can layer page-specific intents around this call.
+ * Returns `null` when `intent` is none of the fourteen, so each route keeps its
+ * own `default:` and can layer page-specific intents around this call.
  */
 export async function handleContactIntent(
   form: FormData,
@@ -245,6 +246,35 @@ export async function handleContactIntent(
             ? `Imported ${inserted} contact${inserted === 1 ? "" : "s"}. ${notes.join(" ")}`
             : undefined,
         };
+      }
+      // The two reply intents. Here rather than on the contacts route for the
+      // reason this module exists: the New replies strip is rendered by `/`
+      // today, but a reply card opens the same detail slide-over that
+      // /lifecycle also renders, and the moment a card is dismissed from there
+      // the second route needs the identical intent. They are also the only
+      // half of the Unipile integration that touches nothing but D1 — the sync
+      // itself reaches a third party and therefore stays on the routes, where
+      // its rate limit and its key can live.
+      case "markReplyRead": {
+        // The ids arrive as a JSON array in one field, exactly as markAdsSent and
+        // deleteContacts send theirs — validateIds takes the PARSED value, not
+        // the form entry.
+        const parsed = parseJsonField(form.get("ids"));
+        if (parsed === null) return { ok: false, error: "Couldn’t read that reply." };
+        const ids = validateIds(parsed);
+        // validateIds' own messages name contacts, which is what it is for
+        // everywhere else; a reply card must not report "No contacts selected".
+        if (!ids.ok) return { ok: false, error: "Couldn’t read that reply." };
+        const changed = await markRepliesRead(DB, ids.ids);
+        // Not an error when nothing changed: the card was already dismissed, by
+        // this person on another tab or by a teammate. That is the state the
+        // click asked for, so it is a success — the same call
+        // removeContactFromDeal() makes about a link that is already gone.
+        return { ok: true, message: changed ? undefined : "Already read." };
+      }
+      case "markAllRepliesRead": {
+        await markRepliesRead(DB);
+        return { ok: true };
       }
       case "triggerAgent": {
         const id = form.get("id")?.toString();

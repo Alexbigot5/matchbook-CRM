@@ -186,6 +186,33 @@ export function IconWarn({ size = 15, style }: { size?: number; style?: CSSPrope
     </svg>
   );
 }
+/** The New replies strip's heading, and the reply chip on a contact row. */
+export function IconReply({ size = 14, style }: { size?: number; style?: CSSProperties }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={style}>
+      <path
+        d="M21 12a8 8 0 0 1-8 8H4l2.2-2.2A8 8 0 1 1 21 12Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+/** The Settings nav item. */
+export function IconSettings({ style }: { style?: CSSProperties }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style={style}>
+      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
+      <path
+        d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.7 5.3 17.2 6.8M6.8 17.2l-1.5 1.5M18.7 18.7l-1.5-1.5M6.8 6.8 5.3 5.3"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 export function IconChevronDown({ style }: { style?: CSSProperties }) {
   return (
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" style={style}>
@@ -193,9 +220,9 @@ export function IconChevronDown({ style }: { style?: CSSProperties }) {
     </svg>
   );
 }
-export function IconCheck({ style }: { style?: CSSProperties }) {
+export function IconCheck({ size = 13, style }: { size?: number; style?: CSSProperties }) {
   return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style={style}>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={style}>
       <path d="m5 12 4.5 4.5L19 7" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
