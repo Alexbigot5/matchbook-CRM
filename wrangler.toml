@@ -25,9 +25,15 @@ HYPERAGENT_TRIGGER_URL = ""
 # NOT a credential — it is printed on every page of Unipile's dashboard and only
 # names which server the key is valid against — so it belongs here rather than in
 # a secret, the same call ORIGAMI_PROJECT_ID makes. The key itself is a secret:
-# `wrangler secret put UNIPILE_API_KEY`. Leave this blank to disable /settings'
-# reply sync; the page still renders and says what is missing.
-UNIPILE_DSN = ""
+# `wrangler secret put UNIPILE_API_KEY`.
+#
+# KEEP IT HERE, NOT ONLY IN THE DASHBOARD. `[vars]` is authoritative on deploy:
+# `wrangler deploy` REPLACES the Worker's variables with this block, so a value
+# set only in the Cloudflare dashboard is silently reset to whatever appears
+# here on the next deploy. (That is exactly what happened once — the DSN was set
+# in the dashboard, and a deploy with this line blank wiped it.) Secrets are not
+# affected; they live outside [vars] and survive a deploy untouched.
+UNIPILE_DSN = "https://api13.unipile.com:14377"
 # Sender for magic-link sign-in emails. The domain must be verified in Resend.
 AUTH_EMAIL_FROM = "Matchbook CRM <noreply@onmatchbook.com>"
 
