@@ -31,8 +31,16 @@
 // the Unipile sync promotes a contact to `Replied` when it matches an inbound
 // message — and it is why the reply rule below reads the status rather than
 // counting touches.
+//
+// THE ONE EXCEPTION, AND IT IS LOAD-BEARING: the note prefix. Every count and
+// every silence figure the channel ladder is built from is OUTBOUND ONLY,
+// recognised by `isInbound` below. Without that, an out-of-office autoresponder
+// — filed by the Unipile sync as an ordinary `email` touchpoint — counts as one
+// of the emails WE sent, and one real send plus one autoresponder trips the
+// two-unanswered-emails threshold after a single step of the sequence.
 
-import type { Contact } from "./data";
+import { REPLY_NOTE_PREFIX } from "./campaigns";
+import type { Contact, Touch } from "./data";
 
 export const TODO_KINDS = [
   "reply",
@@ -150,11 +158,57 @@ function lastOn(c: Contact, ch: string): number | null {
   return null;
 }
 
-/** How many times `ch` has been used. */
-function countOn(c: Contact, ch: string): number {
+/**
+ * True when a touchpoint records something that ARRIVED rather than something
+ * this team sent.
+ *
+ * A touchpoint has no direction column and no source column, so the note prefix
+ * is the only thing separating the two — the same contract /analytics' Email
+ * campaigns tab runs on, which is why the constant is imported from
+ * ./campaigns.ts (beside the SEND_NOTE_PREFIX its writer uses) rather than
+ * spelled again here. Three readers, one string.
+ *
+ * WHY THIS MATTERS TO THE RULES BELOW. When an out-of-office autoresponder fires
+ * on a campaign email, the Unipile sync files it like any other reply: one
+ * `email` touchpoint on the contact, noted "Replied from …". Counted naively
+ * that is indistinguishable from an email WE sent — so one real send plus one
+ * autoresponder read as "2 emails, no reply" and fired the LinkedIn follow-up
+ * after a single step of the sequence. Worse, being the newest touch, it also
+ * reset the silence clock and held the call rule off for five days.
+ *
+ * So every figure the ladder is built from counts outbound touches only. Note
+ * this is not an out-of-office rule: a genuine reply is not an email we sent
+ * either, and neither is a bounce or an "I've left the company" autoresponder.
+ * Nothing here has to recognise the text of a message, which is the point —
+ * "​what did we send" is a question the timeline can answer exactly, where "is
+ * this an autoresponder" is a heuristic that would be wrong on someone's genuine
+ * "I'm out of office next week, call me Thursday".
+ *
+ * The one thing it gets wrong is a rep hand-logging a touch whose note happens
+ * to start with "Replied". That undercounts, so a to-do appears later rather
+ * than earlier — the safe direction for the exact bug this fixes.
+ */
+function isInbound(t: Touch): boolean {
+  return t.note.startsWith(REPLY_NOTE_PREFIX);
+}
+
+/** Days since the newest OUTBOUND touch on `ch`, or null if we never used it. */
+function lastOutboundOn(c: Contact, ch: string): number | null {
+  for (const t of c.touches) if (t.ch === ch && !isInbound(t)) return t.daysAgo;
+  return null;
+}
+
+/** How many times WE have used `ch`. Replies arriving on it do not count. */
+function countOutboundOn(c: Contact, ch: string): number {
   let n = 0;
-  for (const t of c.touches) if (t.ch === ch) n++;
+  for (const t of c.touches) if (t.ch === ch && !isInbound(t)) n++;
   return n;
+}
+
+/** Days since the newest outbound touch of any channel, or null if there is none. */
+function lastOutbound(c: Contact): number | null {
+  for (const t of c.touches) if (!isInbound(t)) return t.daysAgo;
+  return null;
 }
 
 /**
@@ -238,16 +292,23 @@ export function nextTodo(c: Contact): TodoItem | null {
   //     failure direction: this file can only reason about outreach the CRM was
   //     told about, and repeating a nudge costs less than telling someone to
   //     phone a contact who answered a DM nobody recorded.
-  const emailCount = countOn(c, "email");
-  const emailedDaysAgo = lastOn(c, "email");
-  const linkedinCount = countOn(c, "linkedin");
+  // OUTBOUND ONLY, all four — see isInbound. An out-of-office autoresponder
+  // lands on the timeline as an `email` touchpoint like any other reply, and
+  // counting it as one of ours is what used to fire the LinkedIn follow-up after
+  // a single step of the sequence.
+  const emailCount = countOutboundOn(c, "email");
+  const emailedDaysAgo = lastOutboundOn(c, "email");
+  const linkedinCount = countOutboundOn(c, "linkedin");
   const emailSilent = emailedDaysAgo !== null && emailedDaysAgo >= SILENT_DAYS;
+  // Not `lastOutboundOn`: a call is always hand-logged and can never be inbound,
+  // so the plain lookup says the same thing with one fewer moving part.
   const called = lastOn(c, "call") !== null;
   // Every channel, not just these two: `touches` is newest-first, so this is the
-  // age of the most recent contact of any kind. A meeting note or a dark-ad
-  // touch from yesterday means something is still in flight, and the call rule
-  // should not fire over the top of it.
-  const quietDays = c.touches.length ? c.touches[0].daysAgo : null;
+  // age of the most recent thing WE did, of any kind. A meeting note or a
+  // dark-ad touch from yesterday means something is still in flight, and the
+  // call rule should not fire over the top of it. An autoresponder arriving
+  // yesterday is not something in flight, which is why this is outbound too.
+  const quietDays = lastOutbound(c);
   const allQuiet = quietDays !== null && quietDays >= SILENT_DAYS;
 
   // The email sequence has been run and got nothing back. Two emails rather
