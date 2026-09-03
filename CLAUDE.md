@@ -52,8 +52,15 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    Router resolves a fetcher's POST against whichever route rendered it, and the contact
    detail slide-over is shared between them.
 6. `app/routes/analytics.tsx` — the `/analytics` loader mirrors home's (`requireUser` +
-   `listContacts` against one `now`) and additionally returns `buildAnalyticsLabels(now)`, the
-   precomputed date axis. **No `action`** — the page is read-only; all writes live on `/`.
+   `listContacts` against one `now`), additionally returns `buildAnalyticsLabels(now)` (the
+   precomputed date axis) and, for the **Email campaigns** tab, one `CampaignLoopInput` per
+   loop: the campaign binding, the pushed-lead count, the sequence resolved through the
+   *same* `buildSequencePlan` /smartlead uploads with, and `readCampaignEventStats` for each
+   **bound** loop (a second round trip, because it needs the bindings from the first; an
+   unbound loop is skipped rather than scanned for a guaranteed empty answer). Like
+   /smartlead's, this loader **makes no Smartlead calls** — it reads D1 only, so a vendor
+   outage doesn't 500 the page. **No `action`** — the page is read-only; all writes live
+   on `/`.
 7. `app/routes/templates.tsx` — the `/templates` loader reads `listTemplates` **and**
    `listContacts` (the latter only feeds the shared sidebar's OWNER counts) against one `now`.
    It has its own `action` with nine intents. Being a named route, its POSTs need no `?index`.
@@ -150,6 +157,41 @@ over a shared shell:
   and then booked belongs in the later bucket only. Bookings still have no event at all.
 - **`analytics-page.tsx`** — the `/analytics` UI. Read-only (no fetcher, no action). Charts are
   plain divs with percentage widths/heights — there is no charting dependency, deliberately.
+  It renders **two tabs over one shell**: *Pipeline* (everything `analytics.ts` computes) and
+  *Email campaigns* (`campaigns-panel.tsx`). Tabs rather than two routes because both share
+  the sidebar, the OWNER filter and the loader's single `now`. The **two rails agree on the
+  loop**: a sidebar Loop row moves the campaign tab's switch and the switch writes the
+  sidebar view back, so they can never contradict each other on screen. "All contacts" keeps
+  the last chosen loop, because a campaign is per-loop by schema (migration 0009) and there
+  is no "both" campaign to show.
+- **`campaigns.ts`** — pure, isomorphic campaign aggregation (`computeCampaigns`), the same
+  contract as `analytics.ts`: no React, no server imports, **no `Date`**. It reads **three
+  sources that must not be confused**, and the page captions say which is which.
+  *Email events* (migration 0022) are the good source: every headline figure, the daily
+  sends/opens/clicks chart and the step table read them whenever the campaign has been synced
+  since that migration, and every count is **unique leads**, matching Smartlead's own
+  reporting — one lead who opened eight times is one open. *Contacts* answer the progress
+  breakdown, which is a CRM question ("how far through the sequence is my book") rather than
+  a Smartlead one, and they back the fallback chart; campaign sends are told from a rep's
+  hand-logged email touch by note prefix (`SEND_NOTE_PREFIX` / `REPLY_NOTE_PREFIX`,
+  **imported by the two writers in `crm.server.ts` rather than duplicated there**), which is
+  the only signal there is. *Template variant counters* back the step table **only as a
+  fallback** for a campaign not yet synced since 0022 — they carry meetings, which events do
+  not, and no clicks at all. **The fallback is the point**: without it every campaign would
+  read as zero until its next sync, which looks exactly like a campaign that has stopped
+  working, so `fromEvents` travels to the page and the captions name the source. The progress
+  buckets are a real partition of the loop and their *evaluation* order is not their display
+  order — replied first (a reply stops the sequence), then no-email (nothing can ever be
+  sent), then the send count against the sequence length.
+- **`campaigns-panel.tsx`** — the Email campaigns tab's UI: campaign header, progress
+  breakdown, KPI tiles, a 14-day grouped chart, per-step performance cards and a
+  sending-by-owner table. A plain mapper, same as `analytics-page.tsx`. Its style constants
+  are local rather than imported from `analytics-page.tsx` — importing back would make the
+  two circular, and per-file `CARD`/`COL_LABEL` is already the convention (see
+  `prospecting-panel.tsx`). One rule worth keeping: `StatBox` renders **nothing** for a null
+  value rather than a zero, because the two step sources carry different figures (events have
+  clicks and no meetings, the counters the reverse) and printing 0 for something never
+  measured is worse than leaving the box out.
 - **`templates.ts`** — the email-template model, deliberately separate from `data.ts` (which is
   the *contacts* model). Types (`EmailTemplate`, `TemplateVariant`), the `TEMPLATE_STATUSES` /
   `VARIANT_SLOTS` closed sets, `UNTITLED`, and `templateStatusPill`. Pure, isomorphic, **no
@@ -390,6 +432,36 @@ is the only one of the five that never leaves D1.
     status changed mid-sync loses the race rather than winning it. A contact manually set
     back to `New` after its sends were logged is left alone: `markContacted` needs a *new*
     send.
+- **`migrations/0022_smartlead_email_events.sql` — the same read, stored instead of summed.**
+  `GET /campaigns/{id}/statistics` returns one row per email carrying `stats_id`,
+  `lead_email`, `sequence_number`, `sent_time`, `open_time`, **`click_time`**, `reply_time`,
+  `open_count`, `click_count`, **`lead_category`**, `is_bounced` and `is_unsubscribed` — and
+  the sync paged through every one of them while keeping only three timestamps. Clicks,
+  sentiment, bounces and unsubscribes were read over the wire and thrown away, and because
+  only totals survived there was no way to ask "how many went out last Tuesday". Storing the
+  rows costs **no extra API call**.
+  - **This does not contradict 0009's "derive, don't store".** That rule is about Smartlead's
+    *configuration* — status, schedule, sequence numbering — which someone can change in
+    Smartlead's UI at any moment, so a mirror would render something false. An email that was
+    sent on a date and opened at a time is a historical fact that cannot change. Same
+    distinction 0021 draws by storing replies but refusing to mirror the account list.
+  - **`stats_id` is the idempotency key**, so this half of the sync is written **page by page
+    and is gated by no budget at all** — a short read stores fewer emails, never wrong ones.
+    It is an **upsert**, unlike every other idempotent write in `crm.server.ts`: those record
+    that something happened and can never change, while an email sent yesterday and opened
+    this morning legitimately comes back with a new `open_time`.
+  - **Every headline read counts `DISTINCT lead_email`, never rows.** `is_positive` is a
+    property of the *lead*, repeated on each of their rows, so counting rows would report a
+    lead who received four emails as four positive replies. The per-step table is the one
+    place rows are counted, because there one row is one email of that step.
+  - **`is_positive` is resolved at sync time from `GET /leads/fetch-categories`**, whose
+    `sentiment_type` is the only thing that knows a team's own "Warm intro" is positive.
+    That call failing is **not** fatal: categories are still stored verbatim, `is_positive`
+    stays 0, and the sync's result line says sentiment could not be read — rather than the
+    page reporting zero positives as if that were the finding.
+  - **Day bucketing is `substr(<ts>, 1, 10)`**, the UTC date prefix of Smartlead's ISO
+    timestamps, joined against `buildAnalyticsLabels`' new `dayKeys`. Both sides bucket on
+    UTC midnight; change one and change the other.
 - **Sync timestamps are written as ISO strings from JS**, not via `datetime('now')`. The
   loader `Date.parse`es them to build a label, and SQLite's default has no timezone
   designator, so the column default would read a UTC instant as local time. `created_at`
@@ -421,7 +493,9 @@ is the only one of the five that never leaves D1.
   leaves a live campaign paused with no signal.
 - **A single Smartlead step can't be split per variant.** The `/statistics` rows carry a
   `sequence_number` but no variant id, so a step uploaded as an A/B split is skipped by
-  name. A step the builder has **pinned** to a slot is one variant by construction, so its
+  name. (This limits the *counters* only. /analytics' step table reads the 0022 event rows,
+  which carry their own `sequence_number` and need no attribution, so an A/B step does get
+  real per-step numbers there — just not per variant.) A step the builder has **pinned** to a slot is one variant by construction, so its
   numbers land on that slot — which is how a pinned B gets real figures rather than
   hand-typed ones. The other side of that: the same (template, slot) in two steps is
   skipped too, since these are absolute totals and the second write would replace the
@@ -517,6 +591,12 @@ Gotchas:
   opposite directions along the same guarded edge: `Contacted` on a send, `Replied` on a
   reply, each with the promotable set spelled out in SQL. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
   live conflict flag remains the name-based `hasNameConflict`/`conflictOwners`.
+- **Two touchpoint note prefixes are load-bearing.** `recordContactSends` writes
+  `Sent by X` / `Sent step N of X` and `recordReplies` writes `Replied from X`, and
+  /analytics' Email campaigns tab tells a campaign send from a rep's hand-logged email touch
+  by that prefix and nothing else. Both writers import the constants from
+  `app/crm/campaigns.ts`; change the text there, not inline, or the tab silently starts
+  counting zero sends.
 - **`contacts.dead_reason`** is captured by a prompt that intercepts the shared `setStatus`
   handler whenever a contact is set to Dead (covering both the row and detail status menus).
   `updateContactStatus` writes the column on *every* status change, so moving a contact off

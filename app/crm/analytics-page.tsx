@@ -4,12 +4,26 @@
 // Charts are plain divs — the repo has no charting dependency and this page didn't
 // warrant adding one. Bars are percentage widths/heights over a fixed-size track,
 // which also means they need no measurement, no effects, and no client-only code.
+//
+// TWO TABS, ONE SHELL. "Pipeline" is everything below; "Email campaigns" is
+// ./campaigns-panel.tsx over ./campaigns.ts. They are tabs rather than two routes
+// because they share the sidebar, the owner filter and the loader's single `now`,
+// and splitting them would mean a second loader reading the same contacts.
+//
+// The two rails agree on the loop rather than contradicting each other: picking a
+// loop in the sidebar moves the campaign tab's switch, and the switch writes the
+// sidebar's view back. The campaign tab is loop-scoped by construction — a
+// campaign belongs to exactly one loop (migration 0009) — so "All contacts" there
+// means "keep the loop I last chose", and the switch always shows which one that
+// is. The OWNER filter is orthogonal and applies on both tabs.
 
 import { useState } from "react";
 import { computeAnalytics, type AnalyticsLabels } from "./analytics";
+import { computeCampaigns, type CampaignLoopInput } from "./campaigns";
+import { CampaignsPanel } from "./campaigns-panel";
 import { loopBadge, type Contact, type Viewer } from "./data";
 import { buildOwnerTabs, buildViewTabs, Sidebar } from "./sidebar";
-import { css, GLOBAL_CSS, MONO } from "./ui";
+import { Box, css, GLOBAL_CSS, IconChart, IconMail, MONO } from "./ui";
 import type { ReactNode } from "react";
 
 const CARD = "border:1px solid #ededea; border-radius:11px; background:#fff;";
@@ -111,16 +125,24 @@ const CHANNEL_COLS =
 const SOURCE_COLS =
   "display:grid; grid-template-columns:minmax(0,1.6fr) 92px 92px 92px 92px 104px; gap:10px; align-items:center; padding:10px 14px;";
 
+/** The two sub-pages, in the order the tab strip renders them. */
+const TABS = [
+  { key: "pipeline", label: "Pipeline", Icon: IconChart },
+  { key: "campaigns", label: "Email campaigns", Icon: IconMail },
+] as const;
+
 export function AnalyticsPage({
   contacts,
   viewer,
   labels,
+  campaigns,
 }: {
   contacts: Contact[];
   viewer: Viewer;
   labels: AnalyticsLabels;
+  campaigns: CampaignLoopInput[];
 }) {
-  const [S, setS] = useState({ view: "all", owner: "all" });
+  const [S, setS] = useState({ view: "all", owner: "all", tab: "pipeline", loop: 1 });
   const patch = (u: Partial<typeof S>) => setS((s) => ({ ...s, ...u }));
 
   // Same predicates as the contacts page, so the two rails filter identically.
@@ -130,19 +152,40 @@ export function AnalyticsPage({
     S.owner === "all" ? true : S.owner === "unassigned" ? !c.owner : c.owner === S.owner;
 
   // Rail counts are over the unfiltered list; the metrics are over the filtered one.
-  const viewTabs = buildViewTabs(contacts, S.view, (key) => patch({ view: key }));
+  // A loop row also moves the campaign tab's switch, so the two never contradict
+  // each other; "All contacts" leaves the last chosen loop in place, since a
+  // campaign is per-loop and there is no "both" campaign to show.
+  const viewTabs = buildViewTabs(contacts, S.view, (key) =>
+    patch(key === "loop1" ? { view: key, loop: 1 } : key === "loop2" ? { view: key, loop: 2 } : { view: key }),
+  );
   const ownerTabs = buildOwnerTabs(contacts, S.owner, (key) => patch({ owner: key }));
 
   const scoped = contacts.filter((c) => byView(c) && byOwner(c));
   const A = computeAnalytics(scoped, labels);
 
+  // The campaign tab scopes by its own loop switch, so only the owner filter is
+  // applied here — computeCampaigns() picks the loop out of the list itself.
+  const C = computeCampaigns(contacts.filter(byOwner), {
+    dayLabels: labels.dayLabels,
+    dayKeys: labels.dayKeys,
+    loops: campaigns,
+  });
+  // A loop the loader didn't describe can't happen (it always sends both), but
+  // falling back beats rendering `undefined` if that ever changes.
+  const campaignView = C.loops.find((l) => l.loop === S.loop) ?? C.loops[0];
+
+  const ownerScope = S.owner === "all" ? "" : S.owner === "unassigned" ? "unassigned" : S.owner;
   const scope = [
     S.view === "loop1" ? "Loop 1" : S.view === "loop2" ? "Loop 2" : "",
-    S.owner === "all" ? "" : S.owner === "unassigned" ? "unassigned" : S.owner,
+    ownerScope,
   ].filter(Boolean);
   const headerSub =
-    `Pipeline, sources and activity · as of ${A.asOf}` +
-    (scope.length ? ` · ${scope.join(" · ")}` : "");
+    S.tab === "campaigns"
+      ? [`Sequence performance · as of ${A.asOf}`, `Loop ${S.loop}`, ownerScope]
+          .filter(Boolean)
+          .join(" · ")
+      : `Pipeline, sources and activity · as of ${A.asOf}` +
+        (scope.length ? ` · ${scope.join(" · ")}` : "");
 
   return (
     <div
@@ -165,12 +208,49 @@ export function AnalyticsPage({
           </div>
         </div>
 
+        <div
+          style={css(
+            "display:flex; align-items:center; gap:6px; padding:10px 24px; border-bottom:1px solid #ededea; background:#fbfbfa;",
+          )}
+        >
+          {TABS.map((t) => {
+            const active = S.tab === t.key;
+            return (
+              <Box
+                key={t.key}
+                as="button"
+                type="button"
+                onClick={() => patch({ tab: t.key })}
+                aria-pressed={active}
+                style={css(
+                  "display:inline-flex; align-items:center; gap:7px; padding:6px 12px; border-radius:8px; font-size:12.5px; font-family:inherit; cursor:pointer; border:1px solid transparent;" +
+                    (active
+                      ? "background:#fff; border-color:#ededea; color:#1a1a1a; font-weight:500;"
+                      : "background:transparent; color:#75756f;"),
+                )}
+                hover={active ? undefined : css("color:#1a1a1a; background:#f2f2ee;")}
+              >
+                <t.Icon style={css("flex:0 0 auto;")} />
+                {t.label}
+              </Box>
+            );
+          })}
+        </div>
+
         <div style={css("flex:1; overflow-y:auto; overflow-x:hidden;")}>
           <div
             style={css(
               "padding:18px 24px 48px; display:flex; flex-direction:column; gap:18px; max-width:1180px;",
             )}
           >
+            {S.tab === "campaigns" ? (
+              <CampaignsPanel
+                view={campaignView}
+                loop={S.loop}
+                onLoop={(n) => patch({ loop: n, view: n === 2 ? "loop2" : "loop1" })}
+              />
+            ) : (
+              <>
             {/* KPI ROW */}
             <div
               style={css(
@@ -496,6 +576,8 @@ export function AnalyticsPage({
                 ))
               )}
             </Panel>
+              </>
+            )}
           </div>
         </div>
       </main>

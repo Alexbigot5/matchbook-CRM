@@ -894,7 +894,150 @@ export type SmartleadStatRow = {
   sent_time?: string | null;
   open_time?: string | null;
   reply_time?: string | null;
+  // Everything below arrives on the SAME row and used to be discarded. Reading
+  // it costs no extra request — see migrations/0022.
+  //
+  // Smartlead's own id for this row, and the idempotency key the event table is
+  // built on. A row without one cannot be stored, because a synthetic key would
+  // re-insert the same email on every sync.
+  stats_id?: string | number | null;
+  click_time?: string | null;
+  // Raw counts, as opposed to the unique-per-lead figures every rate uses.
+  open_count?: number | string | null;
+  click_count?: number | string | null;
+  // The LEAD's sentiment category, repeated on each of their rows. Anything
+  // counting it must count distinct leads — see migrations/0022.
+  lead_category?: string | null;
+  is_bounced?: boolean | number | string | null;
+  is_unsubscribed?: boolean | number | string | null;
 };
+
+/**
+ * One entry of `GET /leads/fetch-categories`.
+ *
+ * `sentiment_type` is the only thing that says whether a category means the lead
+ * answered well. Guessing from the name would work for the built-in "Interested"
+ * and fail for every category a team invents, which is most of them.
+ */
+export type SmartleadLeadCategory = {
+  id?: number | string | null;
+  name?: string | null;
+  sentiment_type?: string | null;
+};
+
+/**
+ * The category names whose sentiment Smartlead calls positive, lowercased.
+ *
+ * Matching on `sentiment_type` containing "positive" rather than equalling it:
+ * the field is reported as `POSITIVE` on some accounts and `positive_sentiment`
+ * on others, and a category the API has not labelled at all is left OUT — a
+ * missing label is not evidence of a good reply.
+ */
+export function positiveCategoryNames(rows: SmartleadLeadCategory[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of rows) {
+    const name = typeof row?.name === "string" ? row.name.trim().toLowerCase() : "";
+    const sentiment = typeof row?.sentiment_type === "string" ? row.sentiment_type.toLowerCase() : "";
+    if (name && sentiment.includes("positive")) out.add(name);
+  }
+  return out;
+}
+
+/** One stored row of smartlead_email_events, ready for the upsert. */
+export type EmailEvent = {
+  statsId: string;
+  campaignId: string;
+  leadEmail: string;
+  sequenceNumber: number | null;
+  sentAt: string | null;
+  openedAt: string | null;
+  clickedAt: string | null;
+  repliedAt: string | null;
+  openCount: number;
+  clickCount: number;
+  leadCategory: string | null;
+  isPositive: boolean;
+  isBounced: boolean;
+  isUnsubscribed: boolean;
+};
+
+/** Trimmed string, or null — Smartlead sends "" and null interchangeably. */
+const stamp = (raw: unknown): string | null => {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  return value ? value : null;
+};
+
+/** A count that is never negative and never NaN, whatever the field held. */
+const count = (raw: unknown): number => {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+};
+
+/** Smartlead reports these as booleans on some accounts and 0/1 or "t" on others. */
+const flag = (raw: unknown): boolean => {
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return raw === 1;
+  if (typeof raw === "string") {
+    const v = raw.trim().toLowerCase();
+    return v === "true" || v === "t" || v === "1" || v === "yes";
+  }
+  return false;
+};
+
+/**
+ * Turn statistics rows into storable events.
+ *
+ * Rows with no `stats_id` and rows with no address are DROPPED rather than
+ * given a synthetic key: without a stable key the same email is inserted again
+ * on every sync, which is precisely the failure the table exists to avoid. They
+ * are counted so the sync can report how many it could not store instead of
+ * silently reporting a smaller campaign.
+ *
+ * `positive` is the set from positiveCategoryNames(). Passing an EMPTY set is
+ * meaningful and different from passing an unknown one: the caller passes null
+ * when the category list could not be read, and every event then keeps
+ * `isPositive: false` while the sync says so out loud.
+ */
+export function planEmailEvents(
+  rows: SmartleadStatRow[],
+  campaignId: string,
+  positive: Set<string> | null,
+  syncedAt: string,
+): { events: EmailEvent[]; skipped: number; syncedAt: string } {
+  const byId = new Map<string, EmailEvent>();
+  let skipped = 0;
+
+  for (const row of rows) {
+    const statsId = row?.stats_id === null || row?.stats_id === undefined ? "" : String(row.stats_id).trim();
+    const leadEmail = statEmail(row);
+    if (!statsId || !leadEmail) {
+      skipped++;
+      continue;
+    }
+    const seq = Number(row.sequence_number);
+    const category = typeof row.lead_category === "string" ? row.lead_category.trim() : "";
+    // Deduped within the read as well as across syncs: the same row can appear
+    // on two pages when the campaign is sending while we page through it.
+    byId.set(statsId, {
+      statsId,
+      campaignId,
+      leadEmail,
+      sequenceNumber: Number.isInteger(seq) && seq >= 1 ? seq : null,
+      sentAt: stamp(row.sent_time),
+      openedAt: stamp(row.open_time),
+      clickedAt: stamp(row.click_time),
+      repliedAt: stamp(row.reply_time),
+      openCount: count(row.open_count),
+      clickCount: count(row.click_count),
+      leadCategory: category || null,
+      isPositive: positive !== null && Boolean(category) && positive.has(category.toLowerCase()),
+      isBounced: flag(row.is_bounced),
+      isUnsubscribed: flag(row.is_unsubscribed),
+    });
+  }
+
+  return { events: [...byId.values()], skipped, syncedAt };
+}
 
 export type StepTotals = { sends: number; opens: number; replies: number };
 
