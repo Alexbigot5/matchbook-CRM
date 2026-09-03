@@ -55,6 +55,17 @@ export type TodoKind = (typeof TODO_KINDS)[number];
  */
 export const SILENT_DAYS = 5;
 
+/**
+ * How many emails have to have gone out, unanswered, before the list suggests
+ * LinkedIn.
+ *
+ * One email is not a sequence, it is the first step of one, and the answer to
+ * silence after it is the second email — which the campaign will send on its
+ * own. Two is the point at which the channel itself is the thing that is not
+ * working, and switching channels stops being impatience.
+ */
+export const EMAILS_BEFORE_LINKEDIN = 2;
+
 export type TodoItem = {
   kind: TodoKind;
   /** The imperative on the row: "Call them". */
@@ -139,6 +150,13 @@ function lastOn(c: Contact, ch: string): number | null {
   return null;
 }
 
+/** How many times `ch` has been used. */
+function countOn(c: Contact, ch: string): number {
+  let n = 0;
+  for (const t of c.touches) if (t.ch === ch) n++;
+  return n;
+}
+
 /**
  * True when a follow-up date was set and has arrived.
  *
@@ -196,16 +214,66 @@ export function nextTodo(c: Contact): TodoItem | null {
     };
   }
 
+  // THE ESCALATION LADDER — the email sequence, then LinkedIn, then the phone.
+  //
+  // The two rules below are mutually exclusive by construction: LinkedIn is
+  // suggested only when it has NEVER been tried, and the phone only once it
+  // HAS and went unanswered. So no contact can satisfy both, and the order they
+  // are tested in cannot change the answer — which is why it is simply the
+  // order they are grouped and displayed in.
+  //
+  // WHAT THE LINKEDIN COUNT ACTUALLY MEASURES, because it is not symmetric with
+  // the email one. Email touches are backfilled by the Smartlead sync
+  // (`recordContactSends`), so they appear whether or not anyone remembers.
+  // LinkedIn touches only exist because a rep pressed "Log touch" on the detail
+  // panel — nothing writes them automatically. Two consequences worth keeping in
+  // mind before tightening either rule:
+  //
+  //   * The LinkedIn row is cleared BY logging the touch. That is the loop
+  //     working — the list says send one, the rep sends it and logs it, the row
+  //     leaves and the contact becomes eligible for the call rule once it goes
+  //     quiet. It is also why the row does not need its own persisted "done".
+  //   * A message sent and never logged leaves the contact sitting in the
+  //     LinkedIn group and keeps it out of the call group. That is the honest
+  //     failure direction: this file can only reason about outreach the CRM was
+  //     told about, and repeating a nudge costs less than telling someone to
+  //     phone a contact who answered a DM nobody recorded.
+  const emailCount = countOn(c, "email");
   const emailedDaysAgo = lastOn(c, "email");
-  const linkedinDaysAgo = lastOn(c, "linkedin");
+  const linkedinCount = countOn(c, "linkedin");
   const emailSilent = emailedDaysAgo !== null && emailedDaysAgo >= SILENT_DAYS;
-  const linkedinSilent = linkedinDaysAgo !== null && linkedinDaysAgo >= SILENT_DAYS;
   const called = lastOn(c, "call") !== null;
+  // Every channel, not just these two: `touches` is newest-first, so this is the
+  // age of the most recent contact of any kind. A meeting note or a dark-ad
+  // touch from yesterday means something is still in flight, and the call rule
+  // should not fire over the top of it.
+  const quietDays = c.touches.length ? c.touches[0].daysAgo : null;
+  const allQuiet = quietDays !== null && quietDays >= SILENT_DAYS;
 
-  // 2. BOTH WRITTEN CHANNELS WENT QUIET. The phone is what is left, so this
-  //    needs a number to ring — an unreachable instruction is worse than none.
-  //    `!called` because a call already placed makes this the same nudge twice.
-  if (!called && emailSilent && linkedinSilent && (c.phone || "").trim()) {
+  // The email sequence has been run and got nothing back. Two emails rather
+  // than one — see EMAILS_BEFORE_LINKEDIN — because one email is the first step
+  // of a sequence, not a sequence, and the answer to silence after it is the
+  // second email, which the campaign sends on its own.
+  const emailsIgnored = emailCount >= EMAILS_BEFORE_LINKEDIN && emailSilent;
+
+  // 2. NEITHER WRITTEN CHANNEL GOT AN ANSWER — BOTH, not either. A LinkedIn
+  //    message that has gone unanswered is the thing that makes a call the next
+  //    move rather than an escalation past a step that was never taken, so the
+  //    rule waits for one to have been sent (`linkedinCount > 0`) as well as for
+  //    the sequence to have run out. `allQuiet` on top: everything on the
+  //    contact, any channel, has to have gone silent, so a call is never
+  //    suggested over the top of a message sent three days ago.
+  //
+  //    Needs a number to ring — an instruction nobody can carry out is worse
+  //    than none — and `!called` because a call already placed makes this the
+  //    same nudge twice.
+  if (
+    !called &&
+    allQuiet &&
+    emailsIgnored &&
+    linkedinCount > 0 &&
+    (c.phone || "").trim()
+  ) {
     return {
       kind: "call",
       action: "Call them",
@@ -214,14 +282,15 @@ export function nextTodo(c: Contact): TodoItem | null {
     };
   }
 
-  // 3. EMAIL WENT QUIET AND LINKEDIN WAS NEVER TRIED. The cheap next channel,
-  //    and the one this rule exists to stop people forgetting. Requires a
-  //    profile URL for the same reason the call rule requires a number.
-  if (emailSilent && linkedinDaysAgo === null && (c.linkedin || "").trim()) {
+  // 3. THE SEQUENCE RAN OUT AND LINKEDIN WAS NEVER TRIED. The cheap next
+  //    channel, and the one this rule exists to stop people forgetting.
+  //    Requires a profile URL for the same reason the call rule requires a
+  //    number.
+  if (emailsIgnored && linkedinCount === 0 && (c.linkedin || "").trim()) {
     return {
       kind: "linkedin",
       action: "Send a LinkedIn message",
-      why: "The email sequence went quiet. Try LinkedIn.",
+      why: emailCount + " emails, no reply. Try LinkedIn.",
       channel: "linkedin",
     };
   }

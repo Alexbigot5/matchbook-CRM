@@ -97,8 +97,19 @@ over a shared shell:
   `nextTodo(contact)` returns **one** item or null: reply / call / linkedin / sequence /
   assign / add, in that priority order, which is also the order the page renders the groups
   in. One per contact is what keeps the list a work queue rather than a set of overlapping
-  tags, and it is what makes the `todo` saved-view field answerable. Two things to know
-  before editing a rule. **Touchpoints have no direction column**, so nothing here may try
+  tags, and it is what makes the `todo` saved-view field answerable.
+  **The channel ladder is the email sequence → LinkedIn → the phone**, and the two middle
+  rules are mutually exclusive by construction: LinkedIn is suggested only when it has
+  never been tried, the phone only once it has and went unanswered *as well as* the
+  sequence (`EMAILS_BEFORE_LINKEDIN` = 2 unanswered emails — one email is the first step of
+  a sequence, not a sequence). The call rule additionally requires `allQuiet`, i.e. every
+  channel silent for `SILENT_DAYS`, so it never fires over a message sent three days ago.
+  **The two counts are not symmetric**: email touches are backfilled by the Smartlead sync,
+  LinkedIn touches exist only because a rep pressed "Log touch". So logging the LinkedIn
+  touch is what clears the LinkedIn row and makes the contact eligible for the call rule —
+  and a message sent but never logged keeps the contact in the LinkedIn group, which is the
+  deliberate failure direction.
+  Three more things to know before editing a rule. **Touchpoints have no direction column**, so nothing here may try
   to tell our email from theirs — `status === "Replied"` (written by the Unipile sync) is
   the only record that somebody answered. And **`followUp >= 0` means due**: it is
   `-(dueDay - today)`, so positive is days overdue and negative is days still to run. The
