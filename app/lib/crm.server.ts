@@ -35,6 +35,7 @@ import {
   type StoredLeadState,
   type StoredSequenceStep,
 } from "../crm/smartlead-map";
+import { REPLY_NOTE_PREFIX, SEND_NOTE_PREFIX } from "../crm/campaigns";
 import { REPLY_PROMOTES_FROM, REPLY_STATUS, type ReplyCard } from "../crm/unipile-map";
 import { parseConditions, type SavedView } from "../crm/views";
 import type { DedupedProspect, Prospect, RunCounts } from "../crm/prospecting";
@@ -1655,6 +1656,25 @@ export async function listPushedEmails(
 }
 
 /**
+ * How many leads each campaign holds, keyed by Smartlead campaign id.
+ *
+ * One grouped read rather than a query per loop: /analytics needs the figure for
+ * both loops at once and the table is small. Keyed on campaign_id rather than
+ * loop for the reason migration 0009 denormalises that column — a loop rebound to
+ * a different campaign must not retroactively claim the old campaign's pushes.
+ */
+export async function countPushedLeadsByCampaign(
+  db: D1Database,
+): Promise<Record<string, number>> {
+  const res = await db
+    .prepare("SELECT campaign_id, COUNT(*) AS n FROM smartlead_leads GROUP BY campaign_id")
+    .all<{ campaign_id: string; n: number }>();
+  const out: Record<string, number> = {};
+  for (const row of res.results ?? []) out[row.campaign_id] = Number(row.n) || 0;
+  return out;
+}
+
+/**
  * Record that these contacts are now in the campaign.
  *
  * INSERT OR IGNORE against the unique (contact_id, campaign_id) index, which is
@@ -1834,10 +1854,14 @@ export async function recordContactSends(
 
   for (const update of updates) {
     for (const send of update.newSends) {
+      // The SEND_NOTE_PREFIX is load-bearing, not decoration: /analytics' Email
+      // campaigns tab tells a campaign send from a rep's hand-logged email touch
+      // by this prefix and nothing else (a touchpoint has no direction and no
+      // source column). Keep both branches starting with it.
       const note =
         send.seqNumber === null
-          ? `Sent by ${label}`
-          : `Sent step ${send.seqNumber} of ${label}`;
+          ? `${SEND_NOTE_PREFIX}by ${label}`
+          : `${SEND_NOTE_PREFIX}step ${send.seqNumber} of ${label}`;
       statements.push(
         db
           .prepare(
@@ -3352,7 +3376,8 @@ export async function recordReplies(
             // falls back to whoever pressed Sync, exactly as recordContactSends()
             // and markAdsSent() do.
             ownerByContact.get(w.contactId) || actor,
-            `Replied${label}`,
+            // Same contract as the send prefix above — see SEND_NOTE_PREFIX.
+            `${REPLY_NOTE_PREFIX}${label}`,
             sqliteUTC(w.receivedAt) ?? sqliteUTC(new Date().toISOString())!,
           ),
       );

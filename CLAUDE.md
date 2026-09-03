@@ -52,8 +52,13 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    Router resolves a fetcher's POST against whichever route rendered it, and the contact
    detail slide-over is shared between them.
 6. `app/routes/analytics.tsx` — the `/analytics` loader mirrors home's (`requireUser` +
-   `listContacts` against one `now`) and additionally returns `buildAnalyticsLabels(now)`, the
-   precomputed date axis. **No `action`** — the page is read-only; all writes live on `/`.
+   `listContacts` against one `now`), additionally returns `buildAnalyticsLabels(now)` (the
+   precomputed date axis) and, for the **Email campaigns** tab, one `CampaignLoopInput` per
+   loop: the campaign binding, the pushed-lead count and the sequence resolved through the
+   *same* `buildSequencePlan` /smartlead uploads with, each step carrying the counters summed
+   over the slots it uploads. Like /smartlead's, this loader **makes no Smartlead calls** —
+   it reads D1 only, so a vendor outage doesn't 500 the page. **No `action`** — the page is
+   read-only; all writes live on `/`.
 7. `app/routes/templates.tsx` — the `/templates` loader reads `listTemplates` **and**
    `listContacts` (the latter only feeds the shared sidebar's OWNER counts) against one `now`.
    It has its own `action` with nine intents. Being a named route, its POSTs need no `?index`.
@@ -150,6 +155,35 @@ over a shared shell:
   and then booked belongs in the later bucket only. Bookings still have no event at all.
 - **`analytics-page.tsx`** — the `/analytics` UI. Read-only (no fetcher, no action). Charts are
   plain divs with percentage widths/heights — there is no charting dependency, deliberately.
+  It renders **two tabs over one shell**: *Pipeline* (everything `analytics.ts` computes) and
+  *Email campaigns* (`campaigns-panel.tsx`). Tabs rather than two routes because both share
+  the sidebar, the OWNER filter and the loader's single `now`. The **two rails agree on the
+  loop**: a sidebar Loop row moves the campaign tab's switch and the switch writes the
+  sidebar view back, so they can never contradict each other on screen. "All contacts" keeps
+  the last chosen loop, because a campaign is per-loop by schema (migration 0009) and there
+  is no "both" campaign to show.
+- **`campaigns.ts`** — pure, isomorphic campaign aggregation (`computeCampaigns`), the same
+  contract as `analytics.ts`: no React, no server imports, **no `Date`**. It reads **two
+  sources that must not be confused**, and the page captions say which is which.
+  *Per contact* — how many emails the campaign actually sent someone and whether they
+  answered — comes off the contact's touchpoints, recognised by note prefix
+  (`SEND_NOTE_PREFIX` / `REPLY_NOTE_PREFIX`, **imported by the two writers in
+  `crm.server.ts` rather than duplicated there**, so the halves cannot drift). That prefix is
+  the *only* thing separating a Smartlead send from a rep's hand-logged email touch:
+  touchpoints have no direction and no source column. *Per sequence step* — sends/opens/
+  replies/meetings — comes off `template_variants`, and **opens exist only there**, so there
+  is deliberately no per-day and no per-contact open figure. Two metrics the mock design
+  asked for are **absent on purpose**: there is no click counter anywhere in the schema, and
+  nothing classifies a reply as positive, so both would be numbers with no source. The
+  progress buckets are a real partition of the loop and their *evaluation* order is not their
+  display order — replied first (a reply stops the sequence), then no-email (nothing can ever
+  be sent), then the send count against the sequence length.
+- **`campaigns-panel.tsx`** — the Email campaigns tab's UI: campaign header, progress
+  breakdown, KPI tiles, a 14-day grouped sends/replies chart, per-step performance cards and
+  a sending-by-owner table. A plain mapper, same as `analytics-page.tsx`. Its style constants
+  are local rather than imported from `analytics-page.tsx` — importing back would make the
+  two circular, and per-file `CARD`/`COL_LABEL` is already the convention (see
+  `prospecting-panel.tsx`).
 - **`templates.ts`** — the email-template model, deliberately separate from `data.ts` (which is
   the *contacts* model). Types (`EmailTemplate`, `TemplateVariant`), the `TEMPLATE_STATUSES` /
   `VARIANT_SLOTS` closed sets, `UNTITLED`, and `templateStatusPill`. Pure, isomorphic, **no
@@ -517,6 +551,12 @@ Gotchas:
   opposite directions along the same guarded edge: `Contacted` on a send, `Replied` on a
   reply, each with the promotable set spelled out in SQL. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
   live conflict flag remains the name-based `hasNameConflict`/`conflictOwners`.
+- **Two touchpoint note prefixes are load-bearing.** `recordContactSends` writes
+  `Sent by X` / `Sent step N of X` and `recordReplies` writes `Replied from X`, and
+  /analytics' Email campaigns tab tells a campaign send from a rep's hand-logged email touch
+  by that prefix and nothing else. Both writers import the constants from
+  `app/crm/campaigns.ts`; change the text there, not inline, or the tab silently starts
+  counting zero sends.
 - **`contacts.dead_reason`** is captured by a prompt that intercepts the shared `setStatus`
   handler whenever a contact is set to Dead (covering both the row and detail status menus).
   `updateContactStatus` writes the column on *every* status change, so moving a contact off
