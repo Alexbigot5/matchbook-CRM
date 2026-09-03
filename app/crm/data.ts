@@ -704,21 +704,13 @@ export function statusMeta(id: string) {
   return STATUSES.find((s) => s.id === id) || STATUSES[0];
 }
 
-export function needsAttention(c: Contact): { flag: boolean; reason?: string } {
-  if (!c.owner) return { flag: true, reason: "Unassigned" };
-  if (c.touches.length === 0) return { flag: true, reason: "Not contacted yet" };
-  if (c.followUp !== null && c.followUp <= 0) {
-    const due = -c.followUp;
-    return {
-      flag: true,
-      reason: due === 0 ? "Follow-up due today" : "Follow-up in " + due + "d",
-    };
-  }
-  const last = c.touches.length ? c.touches[0].daysAgo : 99;
-  if ((c.status === "Contacted" || c.status === "New") && last >= 7)
-    return { flag: true, reason: "No reply · " + ago(last) };
-  return { flag: false };
-}
+// `needsAttention` USED TO LIVE HERE. It answered "is this contact in a bad
+// state, and what is the name of that state" — the contacts page rendered it as
+// a Needs attention queue of cards reading "Unassigned", "No reply · 2w ago".
+// It is now ./todo.ts, which answers the more useful question: what is the next
+// thing to DO about it. Every signal that function tested is still tested
+// there, so nothing stopped being noticed; the rules just return an instruction
+// and a channel instead of a flag and a diagnosis.
 
 export function loopBadge(loop: number, small: boolean) {
   if (loop === 2)

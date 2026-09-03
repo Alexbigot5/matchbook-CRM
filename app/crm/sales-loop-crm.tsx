@@ -10,7 +10,6 @@ import {
   hasNameConflict,
   isArrFigure,
   loopBadge,
-  needsAttention,
   normalizeName,
   statusMeta,
   statusPill,
@@ -32,11 +31,19 @@ import {
   IconReply,
   IconSave,
   IconSearch,
+  IconTodo,
   IconTrash,
   IconUpload,
-  IconWarn,
   MONO,
 } from "./ui";
+import {
+  daysOverdue,
+  groupTodos,
+  nextTodo,
+  TODO_META,
+  type TodoEntry,
+  type TodoKind,
+} from "./todo";
 import {
   defaultCondition,
   defaultValueForField,
@@ -171,6 +178,24 @@ type State = {
    * over a fresh result.
    */
   syncNotice: string;
+  /**
+   * The To do list's own UI state. All three are deliberately client-only and
+   * deliberately NOT persisted.
+   *
+   * `todoDone` holds contact ids ticked off in this session. A to-do is derived
+   * (see ./todo.ts), so there is nothing in the schema to mark: the row really
+   * leaves when the underlying fact changes — the call gets logged, the status
+   * moves off Replied, an owner is set. The tick is an acknowledgement that you
+   * have handled this one now, and "Reset N done" says plainly that it is not a
+   * record. Persisting it would be worse, not better: a stored tick on a
+   * contact who then goes quiet again is a to-do that never comes back.
+   *
+   * `todoExpanded` holds the group keys someone opened past the preview;
+   * `todoShowAll` opens every group at once.
+   */
+  todoDone: string[];
+  todoExpanded: TodoKind[];
+  todoShowAll: boolean;
   /** The "New view" builder card, and the view being drafted in it. */
   viewBuilder: boolean;
   draftConditions: ViewCondition[];
@@ -257,9 +282,9 @@ export function SalesLoopCRM({
    * contact and already capped by the loader. Optional and defaulted for the
    * same reason `deals` is.
    *
-   * UNFILTERED BY THE SIDEBAR, deliberately, unlike the Needs attention queue
-   * below it. The two strips answer different questions: the queue is "what
-   * should I work through in the slice I am looking at", while this is "somebody
+   * UNFILTERED BY THE SIDEBAR, deliberately, unlike the To do list below it.
+   * The two answer different questions: the list is "what should I work through
+   * in the slice I am looking at", while this is "somebody
    * answered". A reply hidden because the owner filter happens to be on Britton
    * is a reply nobody answers, and it is the one thing on this page with a
    * counterparty waiting on the other end.
@@ -304,6 +329,9 @@ export function SalesLoopCRM({
     deleteIds: [],
     actionError: "",
     syncNotice: "",
+    todoDone: [],
+    todoExpanded: [],
+    todoShowAll: false,
     viewBuilder: false,
     draftConditions: [],
     viewName: "",
@@ -661,6 +689,22 @@ export function SalesLoopCRM({
       viewBuilder: true,
       draftConditions: [defaultCondition()],
       viewName: "",
+      viewShared: true,
+      actionError: "",
+      menuId: null,
+    });
+  /**
+   * Open the builder already holding "todo is <kind>", from a To do group's
+   * header. This is the shortest path between noticing a recurring pile of work
+   * and having a saved view of it in the sidebar — "Calls to make" and
+   * "LinkedIn follow-ups" are one click each, and the card is still fully
+   * editable before Save so the owner or loop can be narrowed on top.
+   */
+  const openViewBuilderForTodo = (kind: TodoKind) =>
+    patch({
+      viewBuilder: true,
+      draftConditions: [{ field: "todo", op: "is", value: kind }],
+      viewName: TODO_META[kind].viewName,
       viewShared: true,
       actionError: "",
       menuId: null,
@@ -1095,25 +1139,49 @@ export function SalesLoopCRM({
   // from under the modal, in which case the prompt just drops the name.
   const deadTargetName = contacts.find((c) => c.id === S.pendingDeadId)?.name ?? "";
 
-  const prio = (c: Contact) => {
-    if (!c.owner) return 0;
-    if (c.followUp !== null && c.followUp <= 0) return 1;
-    if (c.status === "Meeting booked") return 2;
-    return 3;
-  };
-  const queueSrc = contacts
-    .filter((c) => byView(c) && byOwner(c) && bySource(c) && byTag(c))
-    .map((c) => ({ c, att: needsAttention(c) }))
-    .filter((x) => x.att.flag)
-    .sort(
-      (a, b) => prio(a.c) - prio(b.c) || (a.c.followUp ?? 99) - (b.c.followUp ?? 99),
-    )
-    .slice(0, 8);
+  // THE TO DO LIST. Filtered by the sidebar (view / owner / source / tags) but
+  // NOT by the stage bar or the search box: narrowing to one status would leave
+  // a list of "what to do next" that is really "what to do next among the
+  // Contacted", which is a different and much less useful claim. The stage bar
+  // belongs to the table below it.
+  //
+  // Not capped, unlike the eight-card queue this replaces. A cap is what made
+  // that queue decorative — you could not work through it. The preview-per-group
+  // below is the same restraint applied where it can be undone.
+  const todoEntries: TodoEntry[] = [];
+  for (const c of contacts) {
+    if (!(byView(c) && byOwner(c) && bySource(c) && byTag(c))) continue;
+    const todo = nextTodo(c);
+    if (todo) todoEntries.push({ contact: c, todo });
+  }
+  const doneSet = new Set(S.todoDone);
+  // Ticked-off rows leave the list rather than sitting struck through: the
+  // point of the tick is to get the line out of the way. The count of them is
+  // what "Reset N done" is offering to undo, and it is counted over the whole
+  // book rather than the current filter so switching view cannot strand ticks
+  // in a slice you can no longer see.
+  const todoDoneCount = S.todoDone.length;
+  const todoGroups = groupTodos(todoEntries.filter((e) => !doneSet.has(e.contact.id)));
+  const todoCount = todoGroups.reduce((n, g) => n + g.entries.length, 0);
+  const markTodoDone = (id: string) =>
+    patch((s) => ({ todoDone: s.todoDone.includes(id) ? s.todoDone : [...s.todoDone, id] }));
+  const resetTodoDone = () => patch({ todoDone: [] });
+  const toggleTodoGroup = (kind: TodoKind) =>
+    patch((s) => ({
+      todoExpanded: s.todoExpanded.includes(kind)
+        ? s.todoExpanded.filter((k) => k !== kind)
+        : [...s.todoExpanded, kind],
+    }));
+  // "Show all" opens every group; pressing it again collapses the per-group
+  // expansions too, so one control genuinely returns the list to its preview.
+  const toggleTodoShowAll = () =>
+    patch((s) => ({ todoShowAll: !s.todoShowAll, todoExpanded: [] }));
+
   // The New replies strip.
   //
-  // Built here alongside the queue, and precomputed the same way: the card
+  // Built here alongside the To do list, and precomputed the same way: the card
   // renders from strings and style fragments only, never from a lookup it does
-  // itself. Unlike the queue it is NOT run through the sidebar filters — see the
+  // itself. Unlike that list it is NOT run through the sidebar filters — see the
   // `replies` prop's docblock for why.
   const replyCards = replies.map((r) => {
     const ch = CH[r.channel] ?? NO_TOUCH;
@@ -1144,32 +1212,62 @@ export function SalesLoopCRM({
     submit({ intent: "syncReplies" });
   };
 
-  const queue = queueSrc.map(({ c, att }) => {
-    const o = ownerMeta(c.owner);
-    const last = c.touches[0];
-    const ch = last ? CH[last.ch] ?? NO_TOUCH : null;
-    const m = statusMeta(c.status);
-    const urgent = !c.owner || (c.followUp !== null && c.followUp <= 0);
+  /**
+   * How many rows a group shows before "+N more". Two, matching the reply strip's
+   * restraint: the list's job on first paint is to show the SHAPE of the day —
+   * nine LinkedIn follow-ups, thirteen calls — and let someone open the pile they
+   * want to work. A group that showed everything would bury the groups below it.
+   */
+  const TODO_PREVIEW = 2;
+
+  // The render model, precomputed the same way the reply cards and table rows
+  // are: every row below renders from strings and style fragments only, and does
+  // no lookup of its own.
+  const todoView = todoGroups.map((g) => {
+    const expanded = S.todoShowAll || S.todoExpanded.includes(g.kind);
+    const shown = expanded ? g.entries : g.entries.slice(0, TODO_PREVIEW);
     return {
-      name: c.name,
-      company: c.company,
-      hasSource: c.loops.includes(2) && !!(c.source && c.source.trim()),
-      source: (c.source || "").trim(),
-      reason: att.reason,
-      ownerColor: o ? o.color : "#b0b0aa",
-      ownerInitial: o ? o.initial : "?",
-      status: c.status,
-      statusStyle: statusPill(c.status, false),
-      statusDot: m.dot,
-      touchChannel: ch ? ch.label : "No touch",
-      touchAgo: last ? ago(last.daysAgo) : "-",
-      touchIconHtml: { __html: ch ? ch.icon : "" },
-      touchWrap: `width:20px;height:20px;border-radius:5px;background:${ch ? ch.bg : "#f2f2f0"};color:${ch ? ch.fg : "#a3a39d"};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
-      loops: c.loops.map((l) => loopBadge(l, true)),
-      reasonColor: urgent ? "#c2410c" : "#75756f",
-      border: urgent ? "#f6cfa2" : "#ededea",
-      bg: urgent ? "#fffaf2" : "#ffffff",
-      onClick: () => open(c.id),
+      kind: g.kind,
+      label: g.meta.group,
+      dot: g.meta.dot,
+      total: g.entries.length,
+      hidden: g.entries.length - shown.length,
+      expanded,
+      onToggle: () => toggleTodoGroup(g.kind),
+      onSaveView: () => openViewBuilderForTodo(g.kind),
+      rows: shown.map(({ contact: c, todo }) => {
+        const o = ownerMeta(c.owner);
+        const ch = todo.channel ? CH[todo.channel] ?? NO_TOUCH : null;
+        const over = daysOverdue(c);
+        return {
+          id: c.id,
+          action: todo.action,
+          actionColor: g.meta.accent,
+          why: todo.why,
+          name: c.name,
+          company: c.company,
+          hasSource: c.loops.includes(2) && !!(c.source && c.source.trim()),
+          source: (c.source || "").trim(),
+          hasChip: !!ch,
+          chipLabel: ch ? ch.label : "",
+          chipIconHtml: { __html: ch ? ch.icon : "" },
+          chipStyle: ch
+            ? `display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border-radius:6px; font-size:10.5px; font-weight:500; background:${ch.bg}; color:${ch.fg}; flex:0 0 auto;`
+            : "",
+          // Empty for a contact with no follow-up date, which is most of them —
+          // the label is about lateness, not about the row existing.
+          dueLabel: over === null ? "" : over === 0 ? "due today" : over + "d overdue",
+          dueColor: over !== null && over > 0 ? "#b91c1c" : "#b45309",
+          ownerColor: o ? o.color : "#b0b0aa",
+          ownerInitial: o ? o.initial : "?",
+          ownerTitle: c.owner || "Unassigned",
+          onOpen: () => open(c.id),
+          onDone: (e: any) => {
+            e.stopPropagation();
+            markTodoDone(c.id);
+          },
+        };
+      }),
     };
   });
 
@@ -1494,8 +1592,8 @@ export function SalesLoopCRM({
             ))}
           </div>
           {/* New replies.
-              Above Needs attention deliberately: this is the only thing on the
-              page with someone waiting on the other end of it, and the queue
+              Above the To do list deliberately: this is the only thing on the
+              page with someone waiting on the other end of it, and the list
               below is work we set ourselves. The header renders even at zero, so
               Sync has a home on the page where a reply is actually noticed —
               hiding it until a reply exists would leave no way to fetch the
@@ -1539,8 +1637,8 @@ export function SalesLoopCRM({
                 Nothing new. Sync checks the connected mailboxes and LinkedIn for replies.
               </div>
             ) : (
-              /* One horizontal row, not the wrapping grid the queue uses. Replies
-                 are ordered by recency and read left to right; a grid would reflow
+              /* One horizontal row, not the stacked rows the To do list uses.
+                 Replies are ordered by recency and read left to right; a stack would reflow
                  the newest card to a different place every time one arrives. The
                  scroll lives on this container so no card is clipped. */
               <div style={css("display:flex; gap:10px; overflow-x:auto; padding-bottom:6px;")}>
@@ -1596,52 +1694,146 @@ export function SalesLoopCRM({
               </div>
             )}
           </div>
+          {/* TO DO.
+              What used to be "Needs attention" — an eight-card grid of states a
+              contact was in ("Unassigned", "No reply · 2w ago"). The states were
+              accurate and nobody worked through them, because a diagnosis is not
+              a task. This is the same signals as instructions, grouped by the
+              kind of work and sorted by what to do next, which is the shape the
+              team already works in Smartlead's inbox.
 
-          {queue.length > 0 && (
-            <div style={css("padding:16px 24px 4px;")}>
-              <div style={css("display:flex; align-items:center; gap:8px; margin-bottom:10px;")}>
-                <IconWarn style={css("color:#c2410c;")} />
-                <span style={css("font-size:12.5px; font-weight:600; color:#3a3a38;")}>Needs attention</span>
-                <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{queue.length}</span>
-              </div>
-              <div style={css("display:grid; grid-template-columns:repeat(auto-fill, minmax(258px, 1fr)); gap:10px;")}>
-                {queue.map((qc, i) => (
+              Below New replies, not above it: a reply is somebody waiting on the
+              other end, and it stays the top of the page. The first group here is
+              those same replies as work items, which is deliberate — the strip is
+              where you read them, this is where you clear them. */}
+          {(todoCount > 0 || todoDoneCount > 0) && (
+            <div style={css("padding:18px 24px 4px;")}>
+              <div style={css("display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap;")}>
+                <IconTodo size={15} style={css("color:#3a3a38;")} />
+                <span style={css("font-size:12.5px; font-weight:600; color:#3a3a38;")}>To do</span>
+                <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{todoCount}</span>
+                <span style={css("font-size:11.5px; color:#b0b0aa;")}>sorted by what to do next</span>
+                <span style={css("flex:1;")} />
+                {/* Says "done", not "dismissed", and offers the undo in the same
+                    breath — the tick is session-only (see State.todoDone) and
+                    hiding that fact behind a permanent-looking control is how a
+                    to-do quietly goes missing. */}
+                {todoDoneCount > 0 && (
                   <Box
                     as="button"
-                    key={i}
-                    onClick={qc.onClick}
-                    style={css(`display:flex; flex-direction:column; gap:10px; padding:13px 14px; border:1px solid ${qc.border}; background:${qc.bg}; border-radius:12px; cursor:pointer; font-family:inherit; text-align:left;`)}
-                    hover={css("border-color:#d4d4ce; box-shadow:0 2px 8px rgba(0,0,0,0.05);")}
+                    onClick={resetTodoDone}
+                    title="Put the rows you ticked off back on the list"
+                    style={css("background:none; border:none; padding:2px 6px; border-radius:6px; font-size:11.5px; font-family:inherit; color:#75756f; cursor:pointer;")}
+                    hover={css("background:#f0f0ec; color:#3a3a38;")}
                   >
-                    <span style={css("display:flex; align-items:center; gap:10px; width:100%;")}>
-                      <span style={css(`width:30px; height:30px; border-radius:8px; background:${qc.ownerColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; flex:0 0 auto;`)}>{qc.ownerInitial}</span>
-                      <span style={css("display:flex; flex-direction:column; gap:1px; min-width:0; flex:1;")}>
-                        <span style={css("font-size:13.5px; font-weight:500; color:#1a1a1a; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{qc.name}</span>
-                        <span style={css("display:flex; align-items:center; gap:5px; min-width:0;")}>
-                          <span style={css("font-size:11.5px; color:#9a9a95; line-height:1.25; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;")}>{qc.company}</span>
-                          {qc.hasSource && <SourceTag label={qc.source} />}
-                        </span>
-                      </span>
-                      <span style={css("display:flex; gap:3px; flex:0 0 auto;")}>
-                        {qc.loops.map((lp, j) => (
-                          <span key={j} style={css(lp.style)}>{lp.label}</span>
-                        ))}
-                      </span>
-                    </span>
-                    <span style={css("display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%;")}>
-                      <span style={css("display:flex; align-items:center; gap:6px; min-width:0;")}>
-                        <span style={css(qc.touchWrap)}><span dangerouslySetInnerHTML={qc.touchIconHtml} style={css("display:flex;")} /></span>
-                        <span style={css("font-size:11.5px; color:#75756f; white-space:nowrap;")}>{qc.touchChannel} · <span style={css(MONO + "color:#a3a39d;")}>{qc.touchAgo}</span></span>
-                      </span>
-                      <span style={css(qc.statusStyle)}><span style={css(`width:6px; height:6px; border-radius:4px; background:${qc.statusDot};`)} />{qc.status}</span>
-                    </span>
-                    <span style={{ ...css("display:flex; align-items:center; gap:6px; width:100%; padding-top:9px; border-top:1px solid rgba(0,0,0,0.055); font-size:12px; font-weight:500;"), color: qc.reasonColor }}>
-                      <IconWarn size={13} style={css("flex:0 0 auto;")} />
-                      {qc.reason}
-                    </span>
+                    Reset {todoDoneCount} done
                   </Box>
-                ))}
+                )}
+                {todoCount > 0 && (
+                  <Box
+                    as="button"
+                    onClick={toggleTodoShowAll}
+                    style={css("background:none; border:none; padding:2px 6px; border-radius:6px; font-size:11.5px; font-family:inherit; color:#75756f; cursor:pointer;")}
+                    hover={css("background:#f0f0ec; color:#3a3a38;")}
+                  >
+                    {S.todoShowAll ? "Show less" : "Show all " + todoCount}
+                  </Box>
+                )}
               </div>
+
+              {todoCount === 0 ? (
+                <div style={css("font-size:12px; color:#a3a39d; padding-bottom:6px;")}>
+                  Everything on this list is ticked off. Reset to bring it back.
+                </div>
+              ) : (
+                <div style={css("display:flex; flex-direction:column; gap:16px;")}>
+                  {todoView.map((g) => (
+                    <div key={g.kind}>
+                      <div style={css("display:flex; align-items:center; gap:8px; margin-bottom:7px;")}>
+                        <span style={css(`width:7px; height:7px; border-radius:4px; background:${g.dot}; flex:0 0 auto;`)} />
+                        <span style={css("font-size:12px; font-weight:600; color:#3a3a38;")}>{g.label}</span>
+                        <span style={css(MONO + "font-size:11px; color:#a3a39d;")}>{g.total}</span>
+                        <span style={css("flex:1;")} />
+                        {/* THE ANSWER TO "can I have a Calls to make view". One
+                            press opens the New view builder holding `todo is
+                            call` and a prefilled name; Save puts it in the
+                            sidebar beside Loop 1 and Loop 2. */}
+                        <Box
+                          as="button"
+                          onClick={g.onSaveView}
+                          title={"Save “" + g.label + "” as a view"}
+                          style={css("display:inline-flex; align-items:center; gap:5px; background:none; border:none; padding:2px 6px; border-radius:6px; font-size:11.5px; font-family:inherit; color:#a3a39d; cursor:pointer;")}
+                          hover={css("background:#f0f0ec; color:#3a3a38;")}
+                        >
+                          <IconFilter size={12} />
+                          Save as view
+                        </Box>
+                      </div>
+
+                      <div style={css("display:flex; flex-direction:column; gap:6px;")}>
+                        {g.rows.map((r) => (
+                          <Box
+                            key={r.id}
+                            onClick={r.onOpen}
+                            style={css("display:flex; align-items:center; gap:10px; padding:10px 13px; border:1px solid #ededea; background:#fff; border-radius:11px; cursor:pointer;")}
+                            hover={css("border-color:#d8d8d3; background:#fcfcfb;")}
+                          >
+                            {/* Ticking a row is not a write — see State.todoDone.
+                                stopPropagation so the tick does not also open the
+                                contact behind it. */}
+                            <span style={css("display:flex; align-items:center; flex:0 0 auto;")} onClick={r.onDone}>
+                              <Checkbox checked={false} onClick={r.onDone} title="Tick off for now" />
+                            </span>
+                            {r.hasChip && (
+                              <span style={css(r.chipStyle)}>
+                                <span dangerouslySetInnerHTML={r.chipIconHtml} style={css("display:flex;")} />
+                                {r.chipLabel}
+                              </span>
+                            )}
+                            <span style={css("display:flex; flex-direction:column; gap:2px; min-width:0; flex:1;")}>
+                              <span style={css("display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap;")}>
+                                <span style={{ ...css("font-size:13px; font-weight:600; line-height:1.25;"), color: r.actionColor }}>
+                                  {r.action}
+                                </span>
+                                <span style={css("font-size:13px; font-weight:500; color:#1a1a1a; line-height:1.25; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}>
+                                  {r.name}
+                                </span>
+                                <span style={css("font-size:12px; color:#9a9a95; line-height:1.25; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;")}>
+                                  {r.company}
+                                </span>
+                                {r.hasSource && <SourceTag label={r.source} />}
+                              </span>
+                              <span style={css("font-size:11.5px; color:#9a9a95; line-height:1.3;")}>{r.why}</span>
+                            </span>
+                            {r.dueLabel && (
+                              <span style={{ ...css("font-size:11.5px; font-weight:500; flex:0 0 auto; white-space:nowrap;"), color: r.dueColor }}>
+                                {r.dueLabel}
+                              </span>
+                            )}
+                            <span
+                              title={r.ownerTitle}
+                              style={css(`width:22px; height:22px; border-radius:6px; background:${r.ownerColor}; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; flex:0 0 auto;`)}
+                            >
+                              {r.ownerInitial}
+                            </span>
+                          </Box>
+                        ))}
+                      </div>
+
+                      {(g.hidden > 0 || (g.expanded && !S.todoShowAll && g.total > TODO_PREVIEW)) && (
+                        <Box
+                          as="button"
+                          onClick={g.onToggle}
+                          style={css("background:none; border:none; padding:5px 2px 0; font-size:11.5px; font-family:inherit; color:#75756f; cursor:pointer;")}
+                          hover={css("color:#1a1a1a;")}
+                        >
+                          {g.hidden > 0 ? "+" + g.hidden + " more" : "Show less"}
+                        </Box>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
