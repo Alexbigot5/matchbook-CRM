@@ -111,6 +111,17 @@ over a shared shell:
   sequence (`EMAILS_BEFORE_LINKEDIN` = 2 unanswered emails — one email is the first step of
   a sequence, not a sequence). The call rule additionally requires `allQuiet`, i.e. every
   channel silent for `SILENT_DAYS`, so it never fires over a message sent three days ago.
+  **Every count and every silence figure the ladder uses is OUTBOUND ONLY**, via `isInbound`
+  — the `REPLY_NOTE_PREFIX` on the touchpoint note, imported from `campaigns.ts` because a
+  touchpoint has no direction and no source column. An out-of-office autoresponder is filed
+  by the Unipile sync as an ordinary `email` touchpoint, so counting the timeline naively
+  made one real send plus one autoresponder trip the two-email threshold after a single
+  step, *and* reset the silence clock so the call rule was held off for five days. Note this
+  is **not** an out-of-office rule — a genuine reply is not an email we sent either, nor is
+  a bounce. Nothing here recognises message text, deliberately: "what did we send" is exact,
+  "is this an autoresponder" is a heuristic that gets someone's real "I'm out next week,
+  call me Thursday" wrong, and losing a real reply is the one failure this list must not
+  have.
   **The two counts are not symmetric**: email touches are backfilled by the Smartlead sync,
   LinkedIn touches exist only because a rep pressed "Log touch". So logging the LinkedIn
   touch is what clears the LinkedIn row and makes the contact eligible for the call rule —
