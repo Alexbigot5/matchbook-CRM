@@ -199,6 +199,28 @@ export function IconReply({ size = 14, style }: { size?: number; style?: CSSProp
     </svg>
   );
 }
+/** The To do list's heading on the contacts page. */
+export function IconTodo({ size = 14, style }: { size?: number; style?: CSSProperties }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={style}>
+      <path
+        d="m3 7 2.5 2.5L10 5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="m3 17 2.5 2.5L10 15"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M13 8h8M13 18h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
 /** The Settings nav item. */
 export function IconSettings({ style }: { style?: CSSProperties }) {
   return (

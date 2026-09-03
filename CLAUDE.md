@@ -86,12 +86,31 @@ over a shared shell:
 
 - **`data.ts`** — the model and constants. Types (`Contact`, `Touch`, `Note`, `Viewer`), constants
   (`CH` channels, `STATUSES`, `OWNERS`), and pure helpers:
-  `needsAttention`, `hasConflict`, `statusMeta`, `loopBadge`, `statusPill`, date formatting
+  `hasConflict`, `statusMeta`, `loopBadge`, `statusPill`, date formatting
   (`ago`, `fmtDate`, `dateFrom`). The `Contact` shape (with relative `daysAgo`/`followUp`
   integers) is the contract between the server loader and the UI.
   **Determinism matters**: all date math happens server-side in the loader against a single
   `now`; the UI renders only from loader-serialized integers/labels, so SSR and client
   hydration match. Don't introduce `Date.now()`/`Math.random()` into the render path.
+- **`todo.ts`** — the contacts page's **To do** list, and what replaced `needsAttention`.
+  Pure, isomorphic, **no `Date`** — same contract as `analytics.ts` and `views.ts`.
+  `nextTodo(contact)` returns **one** item or null: reply / call / linkedin / sequence /
+  assign / add, in that priority order, which is also the order the page renders the groups
+  in. One per contact is what keeps the list a work queue rather than a set of overlapping
+  tags, and it is what makes the `todo` saved-view field answerable. Two things to know
+  before editing a rule. **Touchpoints have no direction column**, so nothing here may try
+  to tell our email from theirs — `status === "Replied"` (written by the Unipile sync) is
+  the only record that somebody answered. And **`followUp >= 0` means due**: it is
+  `-(dueDay - today)`, so positive is days overdue and negative is days still to run. The
+  old `needsAttention` tested `<= 0` and therefore flagged follow-ups scheduled for next
+  week while skipping the ones already late; `followUpDue()` here is the corrected reading,
+  matching `/lifecycle`'s.
+- **`views.ts`** — the saved-view filter DSL behind the "New view" builder and the sidebar's
+  VIEWS rows. Five fields (`status`, `owner`, `loop`, `category`, `todo`), two ops, AND only,
+  and `validate.ts` imports the closed sets to whitelist them. **Evaluated in JS against
+  contacts the loader already fetched — never compiled into SQL.** `todo` is the one derived
+  field, and the one whose membership changes as work gets done: logging the call takes a
+  contact out of a "Calls to make" view.
 - **`ui.tsx`** — presentation primitives. `css(string)` parses an inline CSS **string** into a
   React style object (the app keeps the original template's style strings verbatim). `Box` is
   a polymorphic element (`as=...`, any element type — the sidebar passes `Link`) that adds
@@ -228,7 +247,7 @@ over a shared shell:
   contact data itself lives in the loader. Every mutation (status changes, notes,
   follow-up snooze/clear, add, CSV import, delete) submits to the route `action` via a single
   `useFetcher` + a hidden `intent` field; React Router revalidates the loader afterward (no
-  optimistic UI). Contains all views: sidebar filters, "Needs attention" queue, contact
+  optimistic UI). Contains all views: sidebar filters, the To do list, contact
   table, detail slide-over, add/CSV-import modals.
 
 ### Two "loops" domain concept

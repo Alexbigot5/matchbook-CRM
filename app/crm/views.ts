@@ -46,12 +46,24 @@
 //     not Tom` above, and the same trap: pair it with another condition. Note
 //     it now also EXCLUDES a contact that is only partly Food & Beverage: one
 //     recognized segment is enough to fail an isNot on that group.
+//   * `todo is call` asks what ./todo.ts says the SINGLE next action on a
+//     contact is — not whether a call is one of several things you could do.
+//     That is what makes the field a partition rather than a tag: every contact
+//     is in at most one to-do group, so "Calls to make" and "LinkedIn
+//     follow-ups" saved side by side never double-count anybody. It also means
+//     the set moves on its own: logging the call takes the contact out of the
+//     view, which is the behaviour you want from a work queue and NOT the
+//     behaviour the other four fields have.
+//   * `todo is not call` therefore MATCHES every contact with no to-do at all —
+//     the whole Won/Dead/recently-contacted population. Same reading as `owner
+//     is not Tom` above, and the same advice: pair it with another condition.
 //   * matchesConditions(c, []) is true (a vacuous AND). validateSavedView refuses
 //     to save an empty condition list, so that only happens for a corrupt or
 //     hand-edited row — and showing everything is the safer failure than showing
 //     nothing, which reads as data loss.
 
 import { CATEGORY_GROUPS, categoryGroup, STATUSES, type Contact } from "./data";
+import { nextTodo, TODO_KINDS, TODO_META } from "./todo";
 
 export type ViewOp = "is" | "isNot";
 
@@ -78,7 +90,7 @@ export type SavedView = {
   conditions: ViewCondition[];
 };
 
-export const VIEW_FIELD_KEYS = ["status", "owner", "loop", "category"] as const;
+export const VIEW_FIELD_KEYS = ["status", "owner", "loop", "category", "todo"] as const;
 export const VIEW_OPS = ["is", "isNot"] as const;
 
 /**
@@ -95,7 +107,7 @@ export type ViewFieldOption = { value: string; label: string };
 export type ViewField = { key: string; label: string; options: ViewFieldOption[] };
 
 /**
- * The three filterable fields and the closed set of values each accepts.
+ * The five filterable fields and the closed set of values each accepts.
  * validateSavedView checks a condition's value against exactly these lists.
  *
  * Owner options are hardcoded Tom / Britton / Unassigned, mirroring
@@ -138,6 +150,20 @@ export const VIEW_FIELDS: ViewField[] = [
     key: "category",
     label: "Category",
     options: CATEGORY_GROUPS.map((g) => ({ value: g, label: g })),
+  },
+  {
+    // The one DERIVED field: nothing on the contact stores a to-do, ./todo.ts
+    // computes it from status, touch channels and the follow-up date. That is
+    // what makes "Calls to make" expressible as a saved view at all — the four
+    // fields above can describe who a contact IS, and none of them can describe
+    // what is owed on them.
+    //
+    // Values are the TodoKind strings, so a saved view survives a wording
+    // change to the group headings on the page. Kept in TODO_KINDS order,
+    // which is the page's own priority order.
+    key: "todo",
+    label: "To do",
+    options: TODO_KINDS.map((k) => ({ value: k, label: TODO_META[k].viewLabel })),
   },
 ];
 
@@ -214,6 +240,12 @@ function satisfies(c: Contact, field: string, value: string): boolean {
       // clause holds on any of them. A contact with no category, or none whose
       // spelling is mapped, resolves to [] and matches nothing.
       return categoryGroup(c.category).includes(value);
+    case "todo":
+      // The contact's ONE next action, not a set membership — see the header.
+      // `?.kind` rather than a null check: a contact with nothing to do matches
+      // no todo condition, which is the same "in no group" behaviour an
+      // uncategorised contact has above.
+      return nextTodo(c)?.kind === value;
     default:
       // An unknown field can only come from a corrupt row (parseConditions drops
       // them). Match nothing rather than everything, so a broken clause narrows

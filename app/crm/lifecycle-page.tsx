@@ -703,8 +703,8 @@ function LifecycleCard({
       </div>
 
       {/* Only a genuinely time-critical follow-up earns a line here. The full
-          "needs attention" signal (unassigned, never contacted, no reply) is
-          the contacts page queue's job — on a board it fires on nearly every
+          next-action signal (unassigned, never contacted, no reply) is the
+          contacts page To do list's job — on a board it fires on nearly every
           card, since nothing backfills historical outreach, and a flag that
           shows on everything is not a flag. */}
       {followUpDue && (
