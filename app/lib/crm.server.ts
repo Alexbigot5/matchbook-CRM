@@ -1639,7 +1639,12 @@ export async function stampCampaignSync(
     .run();
 }
 
-/** Contact ids already handed to this campaign. Drives "push only what's new". */
+/**
+ * Contact ids already handed to this campaign. Drives "push only what's new" on
+ * /smartlead, and is the cohort /analytics' campaign progress breakdown counts
+ * against — the leads the campaign was given, rather than every contact on the
+ * loop.
+ */
 export async function listPushedContactIds(
   db: D1Database,
   campaignId: string,

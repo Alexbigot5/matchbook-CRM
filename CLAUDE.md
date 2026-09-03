@@ -191,9 +191,22 @@ over a shared shell:
   not, and no clicks at all. **The fallback is the point**: without it every campaign would
   read as zero until its next sync, which looks exactly like a campaign that has stopped
   working, so `fromEvents` travels to the page and the captions name the source. The progress
-  buckets are a real partition of the loop and their *evaluation* order is not their display
-  order — replied first (a reply stops the sequence), then no-email (nothing can ever be
-  sent), then the send count against the sequence length.
+  buckets are a real partition of their cohort and their *evaluation* order is not their
+  display order — replied first (a reply stops the sequence), then no-email (nothing can ever
+  be sent), then the send count against the sequence length.
+  **That cohort is the leads PUSHED to the campaign, not the loop.** `pushedContactIds` (the
+  same `listPushedContactIds` read /smartlead's push guard uses) travels from the loader, and
+  every denominator in the progress panel — the row shares, the bar widths and `capacity` —
+  comes from it, because "campaign progress" asks how far the campaign has worked through
+  what it was *given*. Counting the loop instead made a campaign holding 348 leads report
+  "320 of 801", so a sequence most of the way through its book read as barely started, and
+  the gap widened every time somebody added a contact the campaign had never heard of. The
+  pushed set is **not** intersected with loop membership — a contact taken off the loop after
+  being pushed is still a lead the campaign sends to, and dropping them would put the
+  denominator below the sends that already went out. `null` (no campaign bound) falls back to
+  the loop's contacts, since "0 of 0" says less than the book this loop would push; a bound
+  campaign with nothing pushed is a different case and does read as zero, with a caption
+  saying which. The KPI tiles still count the loop — they are labelled "on this loop".
 - **`campaigns-panel.tsx`** — the Email campaigns tab's UI: campaign header, progress
   breakdown, KPI tiles, a 14-day grouped chart, per-step performance cards and a
   sending-by-owner table. A plain mapper, same as `analytics-page.tsx`. Its style constants
