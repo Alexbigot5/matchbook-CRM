@@ -12,6 +12,7 @@ import {
   countPushedLeadsByCampaign,
   getCampaignBindings,
   listContacts,
+  listPushedContactIds,
   listSequenceStepsByLoop,
   listTemplates,
   readCampaignEventStats,
@@ -68,6 +69,7 @@ function buildLoopInput(
   binding: CampaignBinding | undefined,
   leadCounts: Record<string, number>,
   events: CampaignEventStats | null,
+  pushedContactIds: string[] | null,
 ): CampaignLoopInput {
   const byId = new Map(templates.map((t) => [t.id, t]));
   const plan = buildSequencePlan(templates, loop, storedSteps);
@@ -97,6 +99,7 @@ function buildLoopInput(
     loop,
     campaignName: binding ? binding.campaignName || `Campaign ${binding.campaignId}` : null,
     leadsPushed: binding ? (leadCounts[binding.campaignId] ?? 0) : 0,
+    pushedContactIds,
     sequencePushedLabel: binding?.sequencePushedLabel ?? null,
     leadsPushedLabel: binding?.leadsPushedLabel ?? null,
     statsSyncedLabel: binding?.statsSyncedLabel ?? null,
@@ -128,17 +131,28 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     // loops that HAVE a campaign — an unbound loop has no rows to aggregate, and
     // asking would be a table scan for a guaranteed empty answer. The window
     // length comes from the labels so the axis owns it.
-    const events = Object.fromEntries(
+    //
+    // The lead ids ride along here for the same reason and with the same guard:
+    // they are the cohort the progress breakdown divides by, and an unbound loop
+    // has pushed nobody. `null` is therefore "no campaign", which the aggregator
+    // must tell from an empty array — a campaign bound but never pushed to.
+    const campaignReads = Object.fromEntries(
       await Promise.all(
         LOOPS.map(async (loop) => {
           const binding = bindings[loop];
-          const stats = binding
-            ? await readCampaignEventStats(DB, binding.campaignId, labels.dayKeys.length)
-            : null;
-          return [loop, stats] as const;
+          if (!binding) return [loop, { stats: null, pushedContactIds: null }] as const;
+          const [stats, pushedIds] = await Promise.all([
+            readCampaignEventStats(DB, binding.campaignId, labels.dayKeys.length),
+            // The same read /smartlead's push guard uses, so the cohort the
+            // progress breakdown divides by and the set the push button skips
+            // can never be two different answers. Spread to an array because
+            // this crosses the loader boundary as plain JSON.
+            listPushedContactIds(DB, binding.campaignId),
+          ]);
+          return [loop, { stats, pushedContactIds: [...pushedIds] }] as const;
         }),
       ),
-    ) as Record<number, CampaignEventStats | null>;
+    ) as Record<number, { stats: CampaignEventStats | null; pushedContactIds: string[] | null }>;
 
     return {
       contacts,
@@ -151,7 +165,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
           stepsByLoop[loop],
           bindings[loop],
           leadCounts,
-          events[loop] ?? null,
+          campaignReads[loop]?.stats ?? null,
+          campaignReads[loop]?.pushedContactIds ?? null,
         ),
       ),
     };

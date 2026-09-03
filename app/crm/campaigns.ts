@@ -22,7 +22,9 @@
 //     even when events are available. Campaign sends are told from a rep's
 //     hand-logged email touch by their note prefix — see SEND_NOTE_PREFIX — which
 //     is the only signal there is, because a touchpoint has no direction and no
-//     source column.
+//     source column. The breakdown counts the leads PUSHED to the campaign
+//     (migration 0009's smartlead_leads, arriving as `pushedContactIds`), not
+//     every contact on the loop — see the cohort note in buildLoop().
 //
 //   * TEMPLATE VARIANT COUNTERS (migrations/0008) — absolute lifetime totals
 //     pushed by the stats sync. Used for the step table ONLY as a fallback, for a
@@ -127,6 +129,13 @@ export type CampaignLoopInput = {
   campaignName: string | null;
   /** How many contacts have been handed to the campaign as leads. */
   leadsPushed: number;
+  /**
+   * The contact ids behind that count — the cohort the progress breakdown is
+   * about. Null means no campaign is bound, which the aggregator must tell from
+   * an empty array: a bound campaign nobody has pushed to has a cohort of zero
+   * leads, not a cohort of everyone on the loop.
+   */
+  pushedContactIds: string[] | null;
   sequencePushedLabel: string | null;
   leadsPushedLabel: string | null;
   statsSyncedLabel: string | null;
@@ -224,7 +233,7 @@ export type CampaignLoopView = {
   subtitle: string;
   /** The campaign name, or the "not linked" notice. */
   badge: { label: string; style: string };
-  /** Contacts on this loop, the denominator of every share in `progress`. */
+  /** Contacts on this loop. The empty state reads this; `progress` does not. */
   contacts: number;
   /** Whether the headline figures came from stored email events. */
   fromEvents: boolean;
@@ -232,6 +241,12 @@ export type CampaignLoopView = {
     pctComplete: number;
     processed: number;
     capacity: number;
+    /**
+     * The denominator of every row: the leads pushed to the campaign, or the
+     * loop's contacts when no campaign is bound. NOT `contacts` — see the
+     * cohort note in buildLoop().
+     */
+    total: number;
     caption: string;
     rows: ProgressRow[];
   };
@@ -544,6 +559,37 @@ function buildOwners(contacts: Contact[], sendsByContact: Map<string, number>): 
 // Loop
 // ---------------------------------------------------------------------------
 
+/**
+ * The line under the completion percentage, which has to name the cohort it
+ * divided by — "320 of 348" is only readable once the reader knows 348 is the
+ * pushed book and not the loop.
+ *
+ * Every branch below is a different reason the percentage is missing, and they
+ * are worth telling apart: nothing pushed, nothing built, and nobody with an
+ * address are three different next actions.
+ */
+function progressCaption(
+  processed: number,
+  capacity: number,
+  cohortTotal: number,
+  stepCount: number,
+  pushed: boolean,
+): string {
+  const cohortNote = pushed
+    ? `across ${plural(cohortTotal, "pushed lead")}`
+    : `across ${plural(cohortTotal, "contact")} on this loop`;
+  if (capacity > 0) return `${processed} of ${capacity} sends processed ${cohortNote}`;
+  if (cohortTotal === 0) {
+    return pushed
+      ? "No leads have been pushed to this campaign yet."
+      : "No contacts on this loop yet.";
+  }
+  if (stepCount === 0) return "No sequence steps built yet, so there is nothing to complete.";
+  return pushed
+    ? "None of the pushed leads has an email address."
+    : "No contacts on this loop have an email address.";
+}
+
 function buildLoop(
   contacts: Contact[],
   input: CampaignLoopInput,
@@ -557,6 +603,40 @@ function buildLoop(
   const events = input.events;
 
   const sendsByContact = new Map<string, number>();
+  const sendsOf = (c: Contact): number => {
+    const cached = sendsByContact.get(c.id);
+    if (cached !== undefined) return cached;
+    const n = campaignSends(c);
+    sendsByContact.set(c.id, n);
+    return n;
+  };
+
+  /*
+   * WHO "CAMPAIGN PROGRESS" IS ABOUT: the leads pushed to the campaign, not
+   * every contact sitting on the loop.
+   *
+   * The panel answers "how far has this campaign worked through what it was
+   * given". A contact that was never pushed was never given to it, so counting
+   * them made a campaign holding 348 leads report 320 of 801 — a sequence that
+   * is most of the way through its book read as barely started, and the gap grew
+   * every time someone added a contact the campaign had never heard of. The
+   * cohort is the pushed set and every denominator below comes from it.
+   *
+   * The pushed set is authoritative and is deliberately NOT intersected with
+   * loop membership: a contact taken off the loop after being pushed is still a
+   * lead the campaign holds and still receives its emails, and dropping them
+   * would put the count back below the number of sends that actually went out.
+   *
+   * `null` (no campaign bound) falls back to the loop's contacts, because
+   * "0 of 0" would be a worse answer than the book this loop would push if it
+   * were linked — and the badge already says it is linked to nothing. A bound
+   * campaign with an empty cohort is a different thing and does read as zero.
+   */
+  const pushedIds = input.pushedContactIds;
+  const pushedSet = pushedIds ? new Set(pushedIds) : null;
+  const cohort = pushedSet ? contacts.filter((c) => pushedSet.has(c.id)) : inLoop;
+  const cohortTotal = cohort.length;
+
   const counts: Record<BucketKey, number> = {
     finished: 0,
     inProgress: 0,
@@ -565,25 +645,32 @@ function buildLoop(
     noEmail: 0,
   };
   let processed = 0;
-  let contactedInCrm = 0;
-  let withEmail = 0;
-  let repliedInCrm = 0;
+  let cohortWithEmail = 0;
 
-  for (const c of inLoop) {
-    const sends = campaignSends(c);
-    sendsByContact.set(c.id, sends);
+  for (const c of cohort) {
+    const sends = sendsOf(c);
     processed += sends;
-    if (sends > 0) contactedInCrm++;
-    if (c.email) withEmail++;
-    if (REPLIED.has(c.status)) repliedInCrm++;
+    if (c.email) cohortWithEmail++;
     counts[classify(c, sends, stepCount)]++;
   }
 
+  // The loop's own figures, which the KPI tiles fall back to when there are no
+  // events. Kept over the loop rather than the cohort: those tiles are labelled
+  // "on this loop", and a lead pushed from another loop is not one of them.
+  let contactedInCrm = 0;
+  let withEmail = 0;
+  let repliedInCrm = 0;
+  for (const c of inLoop) {
+    if (sendsOf(c) > 0) contactedInCrm++;
+    if (c.email) withEmail++;
+    if (REPLIED.has(c.status)) repliedInCrm++;
+  }
+
   const meetings = inLoop.filter((c) => MEETING.has(c.status)).length;
-  // What a fully-run sequence would amount to: every contact that could be
+  // What a fully-run sequence would amount to: every PUSHED lead that could be
   // emailed, times the steps it would receive. Zero steps means the sequence is
   // unknown, and a percentage against an unknown denominator is worse than none.
-  const capacity = stepCount * withEmail;
+  const capacity = stepCount * cohortWithEmail;
 
   // The headline row. With events every figure is Smartlead's own unique-lead
   // count; without them it falls back to what the CRM can see for itself, which
@@ -685,19 +772,15 @@ function buildLoop(
       pctComplete: pct(processed, capacity),
       processed,
       capacity,
-      caption:
-        capacity > 0
-          ? `${processed} of ${capacity} sends processed`
-          : stepCount === 0
-            ? "No sequence steps built yet, so there is nothing to complete."
-            : "No contacts on this loop have an email address.",
+      total: cohortTotal,
+      caption: progressCaption(processed, capacity, cohortTotal, stepCount, Boolean(pushedSet)),
       rows: PROGRESS_BUCKETS.map((b) => ({
         key: b.key,
         label: b.label,
         count: counts[b.key],
-        pct: pct(counts[b.key], total),
+        pct: pct(counts[b.key], cohortTotal),
         color: b.color,
-        barWidth: barWidth(counts[b.key], total),
+        barWidth: barWidth(counts[b.key], cohortTotal),
       })),
     },
     kpis,

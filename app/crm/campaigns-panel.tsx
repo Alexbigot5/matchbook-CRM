@@ -188,7 +188,7 @@ export function CampaignsPanel({
                         {r.label}
                       </span>
                       <span style={css(MONO + "margin-left:auto; font-size:11.5px; color:#a3a39d; white-space:nowrap;")}>
-                        {r.count} of {view.contacts} · {r.pct}%
+                        {r.count} of {view.progress.total} · {r.pct}%
                       </span>
                     </div>
                     <span
