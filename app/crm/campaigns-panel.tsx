@@ -58,7 +58,14 @@ function Rate({ value }: { value: number | null }) {
   return <span style={css(MONO + "font-size:11.5px; color:#a3a39d;")}>({value}%)</span>;
 }
 
-/** One SENT / OPENED / REPLIED / MEETINGS box under a step card. */
+/**
+ * One SENT / OPENED / CLICKED / REPLIED box under a step card.
+ *
+ * A null `value` renders nothing at all rather than a zero: the two sources this
+ * page reads carry different figures (events have clicks and no meetings, the
+ * variant counters the reverse), and printing 0 for a number that was never
+ * measured is the one thing worse than leaving the box out.
+ */
 function StatBox({
   label,
   value,
@@ -66,10 +73,11 @@ function StatBox({
   color,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   rate?: number | null;
   color: string;
 }) {
+  if (value === null) return null;
   return (
     <div style={css("border:1px solid #f0f0ec; border-radius:9px; padding:9px 11px; min-width:0;")}>
       <div style={css(COL_LABEL)}>{label}</div>
@@ -218,18 +226,23 @@ export function CampaignsPanel({
                   <div style={css("font-size:11.5px; color:#9a9a95; margin-top:4px;")}>{k.sub}</div>
                 </div>
               ))}
+              {view.deliverability && (
+                <div style={css("grid-column:1 / -1; font-size:11.5px; color:#a3a39d;")}>
+                  {view.deliverability}
+                </div>
+              )}
             </div>
           </div>
 
           {/* DAILY VOLUME */}
           <Panel
-            title={`Sends and replies · last ${chart.days.length} days`}
+            title={`${chart.series.map((s) => s.label).join(", ")} · last ${chart.days.length} days`}
             hint={chart.total ? `${chart.total} events` : undefined}
-            caption="Campaign sends are the ones Smartlead has reported back; replies are counted on whichever channel they arrived on. Opens have no per-day record — they exist only as step totals below."
+            caption={chart.caption}
           >
             {chart.total === 0 ? (
               <div style={css(PANEL_EMPTY)}>
-                No campaign sends or replies in the last {chart.days.length} days.
+                Nothing recorded in the last {chart.days.length} days.
               </div>
             ) : (
               <>
@@ -330,16 +343,14 @@ export function CampaignsPanel({
                   >
                     <StatBox label="Sent" value={step.sends} color="#1a1a1a" />
                     <StatBox label="Opened" value={step.opens} rate={step.openRate} color="#6d3fc4" />
+                    <StatBox label="Clicked" value={step.clicks} rate={step.clickRate} color="#0a7ea4" />
                     <StatBox label="Replied" value={step.replies} rate={step.replyRate} color="#8b5cf6" />
                     <StatBox label="Meetings" value={step.meetings} rate={step.meetingRate} color="#22c55e" />
                   </div>
                 </section>
               ))
             )}
-            <div style={css("font-size:11.5px; color:#a3a39d;")}>
-              Step figures are absolute lifetime totals on the template's variants, written by the
-              Smartlead stats sync. A reply is credited to the last step the contact received.
-            </div>
+            <div style={css("font-size:11.5px; color:#a3a39d;")}>{view.stepsCaption}</div>
           </div>
 
           {/* BY OWNER */}

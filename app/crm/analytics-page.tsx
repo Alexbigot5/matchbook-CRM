@@ -167,6 +167,7 @@ export function AnalyticsPage({
   // applied here — computeCampaigns() picks the loop out of the list itself.
   const C = computeCampaigns(contacts.filter(byOwner), {
     dayLabels: labels.dayLabels,
+    dayKeys: labels.dayKeys,
     loops: campaigns,
   });
   // A loop the loader didn't describe can't happen (it always sends both), but

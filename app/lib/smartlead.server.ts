@@ -286,6 +286,22 @@ export function createSmartleadClient(apiKey: string) {
       });
     },
 
+    /**
+     * The account's lead sentiment categories.
+     *
+     * Account-wide, not per campaign, and tiny — one call per sync resolves
+     * every `lead_category` on every statistics row into "was this a positive
+     * reply". The alternative is guessing from the category NAME, which works
+     * for the built-in "Interested" and fails for every category a team invents.
+     *
+     * A failure here is deliberately NOT fatal to the sync: the caller stores
+     * the categories verbatim anyway and says in its result line that sentiment
+     * could not be resolved this time.
+     */
+    listLeadCategories() {
+      return call<Record<string, unknown>>("GET", "/leads/fetch-categories");
+    },
+
     /* --- Email accounts (the mailboxes a campaign sends from) ------------ *
      *
      * Read-and-assign only. Nothing here buys, creates or reconnects a mailbox:

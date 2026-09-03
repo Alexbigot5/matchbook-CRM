@@ -6,15 +6,18 @@ import {
   buildSequencePlan,
   duplicateStatKeys,
   planContactSends,
+  planEmailEvents,
   planImport,
   planLeads,
   planSenders,
+  positiveCategoryNames,
   sendsByLead,
   statKey,
   totalStatsBySequence,
   type SequencePlan,
   type SmartleadEmailAccount,
   type SmartleadLead,
+  type SmartleadLeadCategory,
   type SmartleadSender,
   type SmartleadStatRow,
   type StoredSequenceStep,
@@ -48,6 +51,7 @@ import {
   setSequenceStepVariant,
   stampCampaignSync,
   unbindCampaign,
+  upsertEmailEvents,
   type CampaignBinding,
 } from "../lib/crm.server";
 import { rateLimit, SMARTLEAD_BUILDER_RULE, SMARTLEAD_RULE } from "../lib/ratelimit.server";
@@ -1079,8 +1083,15 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
       }
 
       /**
-       * Total the campaign's per-email rows by sequence step and write them onto
-       * the matching template's variant counters.
+       * Read the campaign's per-email rows and put them to work three ways:
+       * store each row (migration 0022), mark the contacts that were emailed
+       * (migration 0015), and total them by step onto the template counters
+       * (migration 0008).
+       *
+       * The three halves are ordered by how they fail, not by importance. Row
+       * storage and contact marking are per-row facts keyed on an id, so a
+       * partial read applies partially and correctly; the template counters are
+       * absolute lifetime totals, so a partial read must write nothing.
        *
        * Two limits are reported rather than hidden. Neither is a shortcut:
        *
@@ -1106,9 +1117,30 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
         ]);
         const plan = buildSequencePlan(templates, loop, steps);
 
+        /*
+         * Lead sentiment, read once for the whole sync.
+         *
+         * This is the only thing that says whether a `lead_category` on a
+         * statistics row means the lead answered WELL — the built-in
+         * "Interested" is obvious, a team's own "Warm intro" is not, and only
+         * `sentiment_type` knows. A failure here is deliberately NOT fatal: the
+         * categories are still stored verbatim, `is_positive` is left at 0, and
+         * the result line says sentiment could not be resolved, rather than the
+         * page reporting zero positive replies as though that were the finding.
+         */
+        const categoryRes = await client.listLeadCategories();
+        const positive = categoryRes.ok
+          ? positiveCategoryNames(rowsOf(categoryRes.data) as SmartleadLeadCategory[])
+          : null;
+
         const rows: SmartleadStatRow[] = [];
         let total: number | null = null;
         let exhausted = false;
+        let storedEvents = 0;
+        let unkeyedRows = 0;
+        // One instant for every row this sync writes, so "when did we last see
+        // this campaign" is a single answer rather than a spread of timestamps.
+        const syncedAt = new Date().toISOString();
 
         for (let page = 0; page < SMARTLEAD_STATS_MAX_PAGES; page++) {
           const res = await client.listStatistics(
@@ -1120,9 +1152,33 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
           if (total === null) total = totalOf(res.data);
           const batch = rowsOf(res.data) as SmartleadStatRow[];
           rows.push(...batch);
+
+          /*
+           * Half zero: keep the rows themselves (migration 0022).
+           *
+           * Written HERE, per page, rather than after the loop — and unlike the
+           * template counters below it is not gated by the page budget at all.
+           * These rows are keyed on Smartlead's own stats_id, so a short read
+           * stores fewer emails and never a wrong one, and the next press picks
+           * up the rest. That is the same argument the contact half makes, and
+           * it is the whole reason absolute counters and per-row facts are
+           * treated differently.
+           */
+          const planned = planEmailEvents(batch, binding.campaignId, positive, syncedAt);
+          unkeyedRows += planned.skipped;
+          storedEvents += await upsertEmailEvents(DB, planned.events, syncedAt);
+
           if (batch.length < SMARTLEAD_STATS_PAGE) break;
           if (page === SMARTLEAD_STATS_MAX_PAGES - 1) exhausted = true;
         }
+
+        const eventSummary =
+          (storedEvents
+            ? `Stored ${storedEvents} email row${storedEvents === 1 ? "" : "s"}`
+            : "No email rows to store") +
+          (unkeyedRows ? `, ${unkeyedRows} without an id skipped` : "") +
+          (positive === null ? ", lead sentiment could not be read this time" : "") +
+          ".";
 
         /*
          * Half one: the sends land on the CONTACTS they were sent to.
@@ -1201,7 +1257,7 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Ac
             ".";
         }
 
-        const summary = `${statsSummary} ${contactSummary}`;
+        const summary = `${statsSummary} ${contactSummary} ${eventSummary}`;
         await stampCampaignSync(DB, loop, "stats", summary);
         return { ok: true, message: summary };
       }

@@ -35,7 +35,12 @@ const rate = (n: number, d: number): number | null => (d > 0 ? Math.round((n / d
 const barWidth = (count: number, total: number): string =>
   count > 0 ? `${Math.max(pct(count, total), 1.5)}%` : "0%";
 
-export type AnalyticsLabels = { asOf: string; dayLabels: string[] };
+export type AnalyticsLabels = {
+  asOf: string;
+  dayLabels: string[];
+  /** The same axis as `YYYY-MM-DD` UTC dates. Used only by ./campaigns.ts. */
+  dayKeys: string[];
+};
 
 export type KpiTile = { key: string; label: string; value: string; sub: string };
 export type StageRow = { id: string; count: number; pct: number; dot: string; barWidth: string };

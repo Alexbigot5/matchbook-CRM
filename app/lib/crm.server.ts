@@ -32,6 +32,7 @@ import {
   MAX_SEQUENCE_STEPS,
   SENT_STATUS,
   type ContactSendUpdate,
+  type EmailEvent,
   type StoredLeadState,
   type StoredSequenceStep,
 } from "../crm/smartlead-map";
@@ -88,15 +89,27 @@ function dateLabel(ms: number): string {
  * `daysAgo === k` belongs to `dayLabels[days - 1 - k]`. That alignment is what
  * lets app/crm/analytics.ts bucket the chart without touching a Date — changing
  * either side means changing both.
+ *
+ * `dayKeys` is the same axis as `YYYY-MM-DD` UTC dates, and exists so the
+ * campaign chart can join Smartlead's own timestamps onto it. Those arrive as
+ * ISO strings whose first ten characters ARE the UTC day, which is what
+ * readCampaignEventStats() groups on — so the join is a string lookup and, once
+ * again, no Date reaches the render path. Emitted here rather than derived in
+ * the page because this is the one function that owns what a day means.
  */
 export function buildAnalyticsLabels(
   now: number,
   days = 14,
-): { asOf: string; dayLabels: string[] } {
+): { asOf: string; dayLabels: string[]; dayKeys: string[] } {
   const today = startOfUTCDay(now);
   const dayLabels: string[] = [];
-  for (let i = days - 1; i >= 0; i--) dayLabels.push(dateLabel(today - i * DAY));
-  return { asOf: dateLabel(now), dayLabels };
+  const dayKeys: string[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const ms = today - i * DAY;
+    dayLabels.push(dateLabel(ms));
+    dayKeys.push(new Date(ms).toISOString().slice(0, 10));
+  }
+  return { asOf: dateLabel(now), dayLabels, dayKeys };
 }
 
 function parseLoops(raw: string): number[] {
@@ -1905,6 +1918,253 @@ export async function recordContactSends(
 
   await flush();
   return { touchpoints, contacted };
+}
+
+// ---------------------------------------------------------------------------
+// Smartlead email events (migration 0022)
+// ---------------------------------------------------------------------------
+//
+// The per-email rows the stats sync used to total and discard. Written page by
+// page as they are read, and read back as aggregates by /analytics — never as
+// individual rows, which is why nothing here returns an event.
+
+/**
+ * Store (or refresh) one page of email events.
+ *
+ * An upsert rather than an INSERT OR IGNORE, unlike every other idempotent write
+ * in this file: those record that something HAPPENED and can never change, while
+ * an email sent yesterday and opened this morning legitimately comes back with a
+ * new open_time. `stats_id` is Smartlead's own key, so the upsert can only ever
+ * refresh the same email.
+ *
+ * Flushed in fixed-size batches for the reason recordContactSends gives: a batch
+ * is atomic, and a failure mid-sync leaves earlier batches applied — which is
+ * safe here precisely because re-reading the same rows rewrites the same keys.
+ */
+export async function upsertEmailEvents(
+  db: D1Database,
+  events: EmailEvent[],
+  syncedAt: string,
+): Promise<number> {
+  const BATCH = 50;
+  let written = 0;
+  let statements: D1PreparedStatement[] = [];
+
+  const flush = async () => {
+    if (!statements.length) return;
+    await db.batch(statements);
+    statements = [];
+  };
+
+  for (const e of events) {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO smartlead_email_events
+             (stats_id, campaign_id, lead_email, sequence_number, sent_at, opened_at,
+              clicked_at, replied_at, open_count, click_count, lead_category,
+              is_positive, is_bounced, is_unsubscribed, synced_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(stats_id) DO UPDATE SET
+             campaign_id = excluded.campaign_id,
+             lead_email = excluded.lead_email,
+             sequence_number = excluded.sequence_number,
+             sent_at = excluded.sent_at,
+             opened_at = excluded.opened_at,
+             clicked_at = excluded.clicked_at,
+             replied_at = excluded.replied_at,
+             open_count = excluded.open_count,
+             click_count = excluded.click_count,
+             lead_category = excluded.lead_category,
+             is_positive = excluded.is_positive,
+             is_bounced = excluded.is_bounced,
+             is_unsubscribed = excluded.is_unsubscribed,
+             synced_at = excluded.synced_at`,
+        )
+        .bind(
+          e.statsId,
+          e.campaignId,
+          e.leadEmail,
+          e.sequenceNumber,
+          e.sentAt,
+          e.openedAt,
+          e.clickedAt,
+          e.repliedAt,
+          e.openCount,
+          e.clickCount,
+          e.leadCategory,
+          e.isPositive ? 1 : 0,
+          e.isBounced ? 1 : 0,
+          e.isUnsubscribed ? 1 : 0,
+          syncedAt,
+        ),
+    );
+    written++;
+    if (statements.length >= BATCH) await flush();
+  }
+
+  await flush();
+  return written;
+}
+
+/** Aggregates for one campaign, all counted as UNIQUE LEADS — see below. */
+export type CampaignEventTotals = {
+  emails: number;
+  leads: number;
+  sent: number;
+  opened: number;
+  clicked: number;
+  replied: number;
+  positive: number;
+  bounced: number;
+  unsubscribed: number;
+};
+
+export type CampaignStepTotals = {
+  sequenceNumber: number;
+  emails: number;
+  opened: number;
+  clicked: number;
+  replied: number;
+};
+
+/** One UTC day's volume, keyed by the `YYYY-MM-DD` prefix of the timestamp. */
+export type CampaignDayTotals = { day: string; sent: number; opened: number; clicked: number };
+
+export type CampaignEventStats = {
+  totals: CampaignEventTotals;
+  steps: CampaignStepTotals[];
+  days: CampaignDayTotals[];
+  lastSyncedAt: string | null;
+};
+
+/**
+ * Every /analytics figure that comes from the event table, for one campaign.
+ *
+ * COUNT(DISTINCT lead_email) throughout the headline totals, never COUNT(*).
+ * Smartlead's own UI reports unique engagement — one lead who opened eight times
+ * is one open — and `is_positive` is a property of the LEAD repeated on each of
+ * their rows, so counting rows would report a lead who received four emails as
+ * four positive replies. The per-step table below is the one place rows are
+ * counted directly, because there one row IS one email of that step.
+ *
+ * Bucketing is `substr(<ts>, 1, 10)`, the UTC date prefix of Smartlead's ISO
+ * timestamps. That has to agree with buildAnalyticsLabels(), which builds its
+ * axis from UTC midnights — change one and change the other.
+ */
+export async function readCampaignEventStats(
+  db: D1Database,
+  campaignId: string,
+  days: number,
+): Promise<CampaignEventStats | null> {
+  const [totalsRow, stepsRes, daysRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT COUNT(*) AS emails,
+                COUNT(DISTINCT lead_email) AS leads,
+                COUNT(DISTINCT CASE WHEN sent_at IS NOT NULL THEN lead_email END) AS sent,
+                COUNT(DISTINCT CASE WHEN opened_at IS NOT NULL THEN lead_email END) AS opened,
+                COUNT(DISTINCT CASE WHEN clicked_at IS NOT NULL THEN lead_email END) AS clicked,
+                COUNT(DISTINCT CASE WHEN replied_at IS NOT NULL THEN lead_email END) AS replied,
+                COUNT(DISTINCT CASE WHEN is_positive = 1 THEN lead_email END) AS positive,
+                COUNT(DISTINCT CASE WHEN is_bounced = 1 THEN lead_email END) AS bounced,
+                COUNT(DISTINCT CASE WHEN is_unsubscribed = 1 THEN lead_email END) AS unsubscribed,
+                MAX(synced_at) AS last_synced_at
+           FROM smartlead_email_events
+          WHERE campaign_id = ?`,
+      )
+      .bind(campaignId)
+      .first<Record<string, unknown>>(),
+    db
+      .prepare(
+        `SELECT sequence_number,
+                COUNT(*) AS emails,
+                SUM(CASE WHEN opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opened,
+                SUM(CASE WHEN clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicked,
+                SUM(CASE WHEN replied_at IS NOT NULL THEN 1 ELSE 0 END) AS replied
+           FROM smartlead_email_events
+          WHERE campaign_id = ? AND sent_at IS NOT NULL AND sequence_number IS NOT NULL
+          GROUP BY sequence_number
+          ORDER BY sequence_number ASC`,
+      )
+      .bind(campaignId)
+      .all<Record<string, unknown>>(),
+    // One row per (day, series) rather than three queries: the three timestamps
+    // sit on the same row but a given row belongs to a different day for each,
+    // so they cannot share a GROUP BY. UNION ALL and fold in JS.
+    //
+    // The campaign id is bound three times as three plain `?` rather than once as
+    // a repeated `?1`. Numbered parameters are valid SQLite, but every other
+    // statement in this file uses positional ones and D1's driver is the layer
+    // that would have to agree — binding the value again costs nothing and
+    // removes the question.
+    db
+      .prepare(
+        `SELECT substr(sent_at, 1, 10) AS day, 'sent' AS kind, COUNT(*) AS n
+           FROM smartlead_email_events
+          WHERE campaign_id = ? AND sent_at IS NOT NULL
+          GROUP BY day
+         UNION ALL
+         SELECT substr(opened_at, 1, 10) AS day, 'opened' AS kind, COUNT(*) AS n
+           FROM smartlead_email_events
+          WHERE campaign_id = ? AND opened_at IS NOT NULL
+          GROUP BY day
+         UNION ALL
+         SELECT substr(clicked_at, 1, 10) AS day, 'clicked' AS kind, COUNT(*) AS n
+           FROM smartlead_email_events
+          WHERE campaign_id = ? AND clicked_at IS NOT NULL
+          GROUP BY day
+          ORDER BY day ASC`,
+      )
+      .bind(campaignId, campaignId, campaignId)
+      .all<{ day: string; kind: string; n: number }>(),
+  ]);
+
+  const num = (raw: unknown) => Number(raw) || 0;
+  const emails = num(totalsRow?.emails);
+  // No rows means this campaign has never been synced since migration 0022, which
+  // the caller must be able to tell from "synced and genuinely empty" — a zero
+  // would render as a campaign that has sent nothing.
+  if (!emails) return null;
+
+  const byDay = new Map<string, CampaignDayTotals>();
+  for (const row of daysRes.results ?? []) {
+    const day = String(row.day ?? "");
+    if (!day) continue;
+    const entry = byDay.get(day) ?? { day, sent: 0, opened: 0, clicked: 0 };
+    if (row.kind === "sent") entry.sent = num(row.n);
+    else if (row.kind === "opened") entry.opened = num(row.n);
+    else if (row.kind === "clicked") entry.clicked = num(row.n);
+    byDay.set(day, entry);
+  }
+
+  // Trimmed to the window the page draws. Sorted so the caller can index it by
+  // label without re-sorting, and `days` is a parameter rather than a constant
+  // so the axis length stays owned by buildAnalyticsLabels().
+  const window = [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)).slice(-days);
+
+  return {
+    totals: {
+      emails,
+      leads: num(totalsRow?.leads),
+      sent: num(totalsRow?.sent),
+      opened: num(totalsRow?.opened),
+      clicked: num(totalsRow?.clicked),
+      replied: num(totalsRow?.replied),
+      positive: num(totalsRow?.positive),
+      bounced: num(totalsRow?.bounced),
+      unsubscribed: num(totalsRow?.unsubscribed),
+    },
+    steps: (stepsRes.results ?? []).map((row) => ({
+      sequenceNumber: num(row.sequence_number),
+      emails: num(row.emails),
+      opened: num(row.opened),
+      clicked: num(row.clicked),
+      replied: num(row.replied),
+    })),
+    days: window,
+    lastSyncedAt: (totalsRow?.last_synced_at as string | null) ?? null,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,9 @@ import {
   listContacts,
   listSequenceStepsByLoop,
   listTemplates,
+  readCampaignEventStats,
   type CampaignBinding,
+  type CampaignEventStats,
 } from "../lib/crm.server";
 
 export function meta({}: Route.MetaArgs) {
@@ -50,6 +52,11 @@ const LOOPS = [1, 2] as const;
  * split per variant"): an A/B step gets no figures written at all, so it reads as
  * zeroes rather than as a mixture.
  *
+ * These counters are the FALLBACK. When the campaign has stored email events
+ * (migration 0022) the step table reads those instead, keyed on the same
+ * seqNumber — which is strictly better, since an event row carries its own
+ * sequence number and so needs none of the attribution the counters do.
+ *
  * Deliberately NOT a Smartlead call. This loader reaches no third party, for the
  * reason /smartlead's does not: a page that 500s whenever a vendor is down is
  * worse than a page showing what was last synced.
@@ -60,6 +67,7 @@ function buildLoopInput(
   storedSteps: StoredSequenceStep[] | undefined,
   binding: CampaignBinding | undefined,
   leadCounts: Record<string, number>,
+  events: CampaignEventStats | null,
 ): CampaignLoopInput {
   const byId = new Map(templates.map((t) => [t.id, t]));
   const plan = buildSequencePlan(templates, loop, storedSteps);
@@ -93,6 +101,7 @@ function buildLoopInput(
     leadsPushedLabel: binding?.leadsPushedLabel ?? null,
     statsSyncedLabel: binding?.statsSyncedLabel ?? null,
     steps,
+    events,
   };
 }
 
@@ -106,6 +115,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   // they have to agree on where "today" starts.
   const now = Date.now();
   try {
+    const labels = buildAnalyticsLabels(now);
     const [contacts, templates, bindings, stepsByLoop, leadCounts] = await Promise.all([
       listContacts(DB, now),
       listTemplates(DB, now),
@@ -113,12 +123,36 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       listSequenceStepsByLoop(DB),
       countPushedLeadsByCampaign(DB),
     ]);
+
+    // Second round trip because it needs the bindings from the first. Only for
+    // loops that HAVE a campaign — an unbound loop has no rows to aggregate, and
+    // asking would be a table scan for a guaranteed empty answer. The window
+    // length comes from the labels so the axis owns it.
+    const events = Object.fromEntries(
+      await Promise.all(
+        LOOPS.map(async (loop) => {
+          const binding = bindings[loop];
+          const stats = binding
+            ? await readCampaignEventStats(DB, binding.campaignId, labels.dayKeys.length)
+            : null;
+          return [loop, stats] as const;
+        }),
+      ),
+    ) as Record<number, CampaignEventStats | null>;
+
     return {
       contacts,
       viewer: { name: user.name, initial: avatar.initial, color: avatar.color },
-      labels: buildAnalyticsLabels(now),
+      labels,
       campaigns: LOOPS.map((loop) =>
-        buildLoopInput(loop, templates, stepsByLoop[loop], bindings[loop], leadCounts),
+        buildLoopInput(
+          loop,
+          templates,
+          stepsByLoop[loop],
+          bindings[loop],
+          leadCounts,
+          events[loop] ?? null,
+        ),
       ),
     };
   } catch (err) {
