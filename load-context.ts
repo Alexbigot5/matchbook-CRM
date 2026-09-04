@@ -68,8 +68,19 @@ export function getLoadContext(env: Env, request: Request) {
     // is not a credential, so it may live in wrangler.toml [vars] — exactly the
     // split ORIGAMI_PROJECT_ID makes against ORIGAMI_API_KEY. Both are read
     // through here so either source works.
-    UNIPILE_API_KEY: e.UNIPILE_API_KEY ?? "",
-    UNIPILE_DSN: e.UNIPILE_DSN ?? "",
+    //
+    // BOTH ARE TRIMMED. normalizeDsn() already trims the host, but the key was
+    // passed through raw, and a secret pasted into the Cloudflare dashboard as
+    // a lone space or a trailing newline then satisfied every `if (!apiKey)`
+    // guard in the app: the page reported itself configured, the request went
+    // out, and fetch's own header normalisation stripped the value to nothing,
+    // so Unipile answered the 401 it answers for a request with no key at all.
+    // Trimming here is what makes an effectively-empty secret report as the
+    // unset secret it is, instead of as a rejected one. (Header normalisation
+    // means a key with real characters and stray padding was always sent
+    // correctly; this is about the guards, not the wire.)
+    UNIPILE_API_KEY: (e.UNIPILE_API_KEY ?? "").trim(),
+    UNIPILE_DSN: (e.UNIPILE_DSN ?? "").trim(),
   };
 }
 
