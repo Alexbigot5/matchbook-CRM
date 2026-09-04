@@ -4,7 +4,7 @@ import { APIError, createAuthMiddleware } from "better-auth/api";
 import { displayNameFor, isAllowed } from "./allowlist";
 import { sendSignInEmail, type EmailEnv } from "./email.server";
 
-// Magic-link auth over D1, gated to the four addresses in allowlist.ts.
+// Magic-link auth over D1, gated to the five addresses in allowlist.ts.
 //
 // `database` is handed the raw D1 binding: better-auth duck-types it
 // (`"batch" in db && "exec" in db && "prepare" in db`) and loads its own bundled
