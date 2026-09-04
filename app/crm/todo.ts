@@ -4,8 +4,8 @@
 // This replaces `needsAttention` (removed from ./data.ts), and the difference
 // is the whole point. That returned a *flag and a reason* — "No reply · 2w ago"
 // — which told you a contact was in a bad state and left you to work out what
-// to do about it. This returns an *instruction*: reply to them, call them, try
-// LinkedIn, send the step that is due. Same underlying signals, read as work
+// to do about it. This returns an *instruction*: reply to them, DM the ones who
+// opened, call them, try LinkedIn, send the step that is due. Same signals, read
 // rather than as an alarm, which is the shape Smartlead's inbox-side task list
 // has and the reason that one gets worked through.
 //
@@ -32,6 +32,14 @@
 // message — and it is why the reply rule below reads the status rather than
 // counting touches.
 //
+// WHAT IT CAN SEE THAT THE TIMELINE CANNOT: the open. `openedStep` and
+// `campaignReplied` on the Contact (see ./data.ts) come from
+// smartlead_email_events, not from touchpoints — they are what the SENDING TOOL
+// observed rather than what this CRM did, which is why they are separate fields
+// and not rows in `touches`. They are the only inputs here that are absent for a
+// contact no campaign has emailed, so every rule reading them must treat missing
+// as "unknown" rather than as zero.
+//
 // THE ONE EXCEPTION, AND IT IS LOAD-BEARING: the note prefix. Every count and
 // every silence figure the channel ladder is built from is OUTBOUND ONLY,
 // recognised by `isInbound` below. Without that, an out-of-office autoresponder
@@ -44,6 +52,7 @@ import type { Contact, Touch } from "./data";
 
 export const TODO_KINDS = [
   "reply",
+  "opened",
   "call",
   "linkedin",
   "sequence",
@@ -73,6 +82,31 @@ export const SILENT_DAYS = 5;
  * working, and switching channels stops being impatience.
  */
 export const EMAILS_BEFORE_LINKEDIN = 2;
+
+/**
+ * The sequence step whose OPEN makes LinkedIn the next move, on its own.
+ *
+ * Two, matching EMAILS_BEFORE_LINKEDIN above and for the same reason: opening
+ * step one is somebody checking who wrote to them, and the answer to it is the
+ * second email, which the campaign sends by itself. Opening the second is a
+ * person who has now read us twice and still not written back — which is the
+ * point where the channel, not the copy, is what is in the way.
+ *
+ * `>=`, not `===`: a five-step sequence has openers at three and four, and they
+ * are warmer than the step-two openers, not colder. Reading the furthest step
+ * they reached is also what makes one number on the Contact enough (see
+ * `openedStep` in ./data.ts) instead of a set of every step they ever opened.
+ *
+ * WHY THIS RULE EXISTS AT ALL, given the LinkedIn rule below already suggests the
+ * same action. That one waits for silence — two emails out and five days quiet —
+ * because with nothing but a timeline, silence is the only evidence there is that
+ * email is not landing. An open is better evidence and it is evidence of the
+ * opposite thing: the person is there, they are reading, and the reply is what is
+ * missing. Waiting five more days to act on that spends the warmest moment the
+ * campaign will produce. So this fires the day the open is synced, and it is
+ * above the silence rule in TODO_KINDS.
+ */
+export const OPENED_STEP_FOR_LINKEDIN = 2;
 
 export type TodoItem = {
   kind: TodoKind;
@@ -108,6 +142,13 @@ export const TODO_META: Record<TodoKind, TodoMeta> = {
     viewName: "Replies to answer",
     dot: "#8b5cf6",
     accent: "#6b3fb5",
+  },
+  opened: {
+    group: "Opened your email",
+    viewLabel: "Opened the sequence",
+    viewName: "Openers to DM",
+    dot: "#0ea5e9",
+    accent: "#0369a1",
   },
   call: {
     group: "Calls to make",
@@ -268,13 +309,59 @@ export function nextTodo(c: Contact): TodoItem | null {
     };
   }
 
+  // 2. THEY OPENED THE SEQUENCE AND SAID NOTHING. The warmest signal short of a
+  //    reply, and the only rule on this page built from something the CRM did not
+  //    do itself — Smartlead's open pixel, stored by the stats sync
+  //    (migrations/0022) and folded onto the contact by listContacts().
+  //
+  //    ABOVE THE LADDER BELOW, deliberately. Every rule under this one is
+  //    inferred from silence, and silence is what you reason from when you have
+  //    nothing else. Here there is something else: this person opened our second
+  //    email. Making them wait out SILENT_DAYS before the list mentions them
+  //    throws that away, and the whole reason to switch to LinkedIn is that they
+  //    are reading and not replying.
+  //
+  //    THE REPLY GUARD IS NOT OPTIONAL. `campaignReplied` is Smartlead's own
+  //    record that this address answered, and it is a different witness from
+  //    `status === "Replied"` — that one is written by the Unipile sync, which
+  //    only knows about mailboxes somebody connected on /settings and only as far
+  //    back as it has synced. Without this check the list tells a rep to DM
+  //    somebody who has already written back, which is the single worst line it
+  //    could print.
+  //
+  //    Requires a profile URL for the same reason the two rules below do: an
+  //    instruction nobody can carry out is worse than none. That is also why the
+  //    group is usually smaller than the campaign tab's open count — that figure
+  //    counts every lead the campaign emailed, including the ones with no
+  //    LinkedIn on file and the ones this CRM does not hold at all.
+  //
+  //    `linkedinCount === 0` keeps this exclusive with the two rules below, so
+  //    logging the DM clears the row here exactly as it does there, and the
+  //    contact becomes eligible for the call rule once everything goes quiet.
+  //
+  //    `Meeting booked` is excluded HERE rather than by the shared early return
+  //    further down, which the two silence rules deliberately sit above (a booked
+  //    meeting that has gone quiet for a week is still worth a nudge). This rule
+  //    has no silence requirement at all, so without the check every opener with
+  //    a meeting on the calendar would be told to DM them the moment their open
+  //    synced, chasing a channel over the top of a call that is already booked.
+  const openedStep = c.openedStep ?? 0;
+  const openedDeep =
+    !c.campaignReplied &&
+    c.status !== "Meeting booked" &&
+    openedStep >= OPENED_STEP_FOR_LINKEDIN;
+
   // THE ESCALATION LADDER — the email sequence, then LinkedIn, then the phone.
   //
-  // The two rules below are mutually exclusive by construction: LinkedIn is
-  // suggested only when it has NEVER been tried, and the phone only once it
-  // HAS and went unanswered. So no contact can satisfy both, and the order they
-  // are tested in cannot change the answer — which is why it is simply the
-  // order they are grouped and displayed in.
+  // All three rules below are mutually exclusive by construction, including the
+  // open rule above: LinkedIn is suggested only when it has NEVER been tried
+  // (`linkedinCount === 0`, in the open rule and the silence one alike), and the
+  // phone only once it HAS and went unanswered. So no contact can satisfy the
+  // call rule and either LinkedIn rule, and the order they are tested in cannot
+  // change the answer — which is why it is simply the order they are grouped and
+  // displayed in. The two LinkedIn rules DO overlap (an opener whose email also
+  // went quiet satisfies both), and there the order is the answer: the open is
+  // the better evidence, so it is tested first and names itself on the row.
   //
   // WHAT THE LINKEDIN COUNT ACTUALLY MEASURES, because it is not symmetric with
   // the email one. Email touches are backfilled by the Smartlead sync
@@ -317,7 +404,16 @@ export function nextTodo(c: Contact): TodoItem | null {
   // second email, which the campaign sends on its own.
   const emailsIgnored = emailCount >= EMAILS_BEFORE_LINKEDIN && emailSilent;
 
-  // 2. NEITHER WRITTEN CHANNEL GOT AN ANSWER — BOTH, not either. A LinkedIn
+  if (openedDeep && linkedinCount === 0 && (c.linkedin || "").trim()) {
+    return {
+      kind: "opened",
+      action: "Send a LinkedIn message",
+      why: "Opened email " + openedStep + " and never replied.",
+      channel: "linkedin",
+    };
+  }
+
+  // 3. NEITHER WRITTEN CHANNEL GOT AN ANSWER — BOTH, not either. A LinkedIn
   //    message that has gone unanswered is the thing that makes a call the next
   //    move rather than an escalation past a step that was never taken, so the
   //    rule waits for one to have been sent (`linkedinCount > 0`) as well as for
@@ -343,7 +439,7 @@ export function nextTodo(c: Contact): TodoItem | null {
     };
   }
 
-  // 3. THE SEQUENCE RAN OUT AND LINKEDIN WAS NEVER TRIED. The cheap next
+  // 4. THE SEQUENCE RAN OUT AND LINKEDIN WAS NEVER TRIED. The cheap next
   //    channel, and the one this rule exists to stop people forgetting.
   //    Requires a profile URL for the same reason the call rule requires a
   //    number.
@@ -356,7 +452,7 @@ export function nextTodo(c: Contact): TodoItem | null {
     };
   }
 
-  // 4. A DATE SOMEBODY TYPED HAS ARRIVED. Below the two channel rules on
+  // 5. A DATE SOMEBODY TYPED HAS ARRIVED. Below the two channel rules on
   //    purpose: those only fire once a contact has already stopped answering on
   //    the channel this step would use again.
   if (followUpDue(c)) {
@@ -372,7 +468,7 @@ export function nextTodo(c: Contact): TodoItem | null {
   // the calendar, not on this page.
   if (c.status === "Meeting booked") return null;
 
-  // 5. NOBODY OWNS IT. Only reached by a contact no outreach rule fired on,
+  // 6. NOBODY OWNS IT. Only reached by a contact no outreach rule fired on,
   //    which in practice means one nobody has started — and starting it is
   //    exactly what an owner is for.
   if (!c.owner) {
@@ -384,7 +480,7 @@ export function nextTodo(c: Contact): TodoItem | null {
     };
   }
 
-  // 6. OWNED, AND NOTHING HAS EVER BEEN SENT.
+  // 7. OWNED, AND NOTHING HAS EVER BEEN SENT.
   if (c.touches.length === 0) {
     return {
       kind: "add",

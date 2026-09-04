@@ -101,9 +101,9 @@ over a shared shell:
   hydration match. Don't introduce `Date.now()`/`Math.random()` into the render path.
 - **`todo.ts`** — the contacts page's **To do** list, and what replaced `needsAttention`.
   Pure, isomorphic, **no `Date`** — same contract as `analytics.ts` and `views.ts`.
-  `nextTodo(contact)` returns **one** item or null: reply / call / linkedin / sequence /
-  assign / add, in that priority order, which is also the order the page renders the groups
-  in. One per contact is what keeps the list a work queue rather than a set of overlapping
+  `nextTodo(contact)` returns **one** item or null: reply / opened / call / linkedin /
+  sequence / assign / add, in that priority order, which is also the order the page renders
+  the groups in. One per contact is what keeps the list a work queue rather than a set of overlapping
   tags, and it is what makes the `todo` saved-view field answerable.
   **The channel ladder is the email sequence → LinkedIn → the phone**, and the two middle
   rules are mutually exclusive by construction: LinkedIn is suggested only when it has
@@ -111,6 +111,22 @@ over a shared shell:
   sequence (`EMAILS_BEFORE_LINKEDIN` = 2 unanswered emails — one email is the first step of
   a sequence, not a sequence). The call rule additionally requires `allQuiet`, i.e. every
   channel silent for `SILENT_DAYS`, so it never fires over a message sent three days ago.
+  **The `opened` rule is the one that reasons from something other than silence.** Every
+  other rule here infers from the timeline going quiet, because with touchpoints alone that
+  is the only evidence there is. `openedStep` / `campaignReplied` on the `Contact` (read off
+  `smartlead_email_events` by `listContacts`, matched on lowercased email — see "Smartlead"
+  below) say the person opened step `OPENED_STEP_FOR_LINKEDIN` (2, matching
+  `EMAILS_BEFORE_LINKEDIN` and for the same reason) or later and still has not written back,
+  which is better evidence and evidence of the opposite thing — so it fires the day the open
+  syncs rather than waiting out `SILENT_DAYS`, and it sits above the ladder. Three guards, all
+  load-bearing: `campaignReplied` (Smartlead's own record that the address answered, a
+  *different witness* from `status === "Replied"`, which only exists where Unipile is
+  connected and synced), `status !== "Meeting booked"` (this rule has no silence requirement,
+  so without it every opener with a call already booked gets a DM instruction), and a
+  LinkedIn URL on file. That last one, plus contacts the CRM does not hold at all, is why the
+  group is smaller than the open count on /analytics' campaign tab — the two figures are
+  answering different questions and are not meant to match. Missing engagement is **unknown,
+  never zero**: a contact no campaign has emailed has `openedStep` null.
   **Every count and every silence figure the ladder uses is OUTBOUND ONLY**, via `isInbound`
   — the `REPLY_NOTE_PREFIX` on the touchpoint note, imported from `campaigns.ts` because a
   touchpoint has no direction and no source column. An out-of-office autoresponder is filed
@@ -494,6 +510,18 @@ is the only one of the five that never leaves D1.
   `datetime('now')`'s exact format. `listContacts` orders touchpoints by the raw string, so
   an ISO `…T09:00:00.000Z` next to a stored `… 09:00:00` would sort every backdated send
   after every logged touch on the same day.
+- **`migrations/0023_smartlead_events_lead_index.sql` — the same rows, asked about a person.**
+  0022's two indexes are both keyed on `campaign_id`, because /analytics always asks about one
+  campaign. The contacts page asks the opposite: for every contact in the book, how far into a
+  sequence did they open and did they answer — a `GROUP BY lead_email` across every campaign,
+  which without an index is a full scan on `listContacts`, the app's busiest read. The column
+  order `(lead_email, sequence_number, opened_at, replied_at)` makes it **covering**, so that
+  query is an index-only scan. No new columns and no new writes; the sync's upsert maintains
+  it. The fold onto contacts is done **in JS, not SQL**: the address is the only link (0022
+  deliberately has no `contact_id`), so a join would be `LOWER(c.email) = e.lead_email` — no
+  index on `contacts` can serve it, and it would silently drop every contact with no address,
+  turning an engagement lookup into a filter on the contact list itself. It feeds exactly one
+  thing: the To do list's `opened` rule (see `todo.ts` above).
 - **The SENDERS section is a live read, not a mirror.** Which mailboxes a campaign
   rotates between is Smartlead's own state, so nothing about it reaches D1 and there is
   no migration behind it: `fetchSenders` reads `/campaigns/{id}/email-accounts` plus a
