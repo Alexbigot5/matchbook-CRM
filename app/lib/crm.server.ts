@@ -188,7 +188,7 @@ export async function listContacts(
   const limit = page?.limit !== undefined ? Math.max(0, Math.floor(page.limit)) : null;
   const offset = page?.offset !== undefined ? Math.max(0, Math.floor(page.offset)) : 0;
 
-  const [contactsRes, notesRes, touchesRes, tagsRes] = await Promise.all([
+  const [contactsRes, notesRes, touchesRes, tagsRes, engagementRes] = await Promise.all([
     (limit === null
       ? db.prepare(
           "SELECT id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
@@ -220,6 +220,33 @@ export async function listContacts(
           ORDER BY t.name`,
       )
       .all<{ contact_id: string; id: string; name: string }>(),
+    // CAMPAIGN ENGAGEMENT, one row per address rather than per contact — see the
+    // fold below for why the join is done here and not in SQL.
+    //
+    // Grouped across every campaign, not filtered to one: this answers a question
+    // about a PERSON ("how far into a sequence did they get, and did they
+    // answer"), where every other read of this table answers one about a campaign.
+    // A contact whose loop was rebound to a new campaign has still opened what
+    // they opened.
+    //
+    // `sequence_number IS NOT NULL` on the outside rather than inside the MAX,
+    // because 0022 stores rows that arrive without a step and neither value here
+    // can say anything about one. The MAX is over opened rows only; the SUM is
+    // over all of them, which is the point — a lead who replied without the open
+    // pixel ever firing must still count as replied.
+    //
+    // Covered end to end by idx_smartlead_events_lead_engagement (0023), so this
+    // is an index-only scan and not a table scan on the app's busiest read.
+    db
+      .prepare(
+        `SELECT lead_email,
+                MAX(CASE WHEN opened_at IS NOT NULL THEN sequence_number END) AS opened_step,
+                SUM(CASE WHEN replied_at IS NOT NULL THEN 1 ELSE 0 END) AS replies
+           FROM smartlead_email_events
+          WHERE sequence_number IS NOT NULL
+          GROUP BY lead_email`,
+      )
+      .all<{ lead_email: string; opened_step: number | null; replies: number | null }>(),
   ]);
 
   const notesByContact = new Map<string, Note[]>();
@@ -258,7 +285,30 @@ export async function listContacts(
     tagsByContact.set(t.contact_id, list);
   }
 
+  // Engagement is keyed on the ADDRESS, so it is folded onto contacts here in JS
+  // rather than joined in SQL. Two reasons, and they are the same two that keep
+  // 0022 free of a contact_id. The event rows are Smartlead's record of what it
+  // emailed, and the address on them is the only link there is; a join would have
+  // to be `LOWER(c.email) = e.lead_email`, which no index on `contacts` can serve
+  // and which silently drops every contact with no address — turning an
+  // engagement lookup into a filter on the contact list itself.
+  //
+  // Lowercased on both sides: 0022 lowercases at write time, and a contact typed
+  // in with a capital in the local part would otherwise never match its own sends.
+  // Two contacts sharing an address both get the same figures, which is correct —
+  // it is one inbox and one person opened it.
+  const engagementByEmail = new Map<string, { openedStep: number | null; replied: boolean }>();
+  for (const row of engagementRes.results ?? []) {
+    const key = (row.lead_email ?? "").trim().toLowerCase();
+    if (!key) continue;
+    const step = row.opened_step === null ? null : Number(row.opened_step) || null;
+    engagementByEmail.set(key, { openedStep: step, replied: Number(row.replies) > 0 });
+  }
+
   return (contactsRes.results ?? []).map((row): Contact => {
+    const engagement = row.email
+      ? engagementByEmail.get(row.email.trim().toLowerCase())
+      : undefined;
     let followUp: number | null = null;
     let followUpDateLabel: string | null = null;
     if (row.follow_up_at) {
@@ -291,6 +341,11 @@ export async function listContacts(
       resumedToLoop1At: row.resumed_to_loop1_at ?? null,
       resumedLabel,
       deadReason: row.dead_reason ?? null,
+      // Both undefined-by-absence rather than defaulted to 0/false: a contact no
+      // campaign has emailed has not opened nothing, we simply have no record of
+      // them, and ./todo.ts must be able to tell the two apart.
+      openedStep: engagement?.openedStep ?? null,
+      campaignReplied: engagement?.replied ?? false,
       opts: {},
     };
   });

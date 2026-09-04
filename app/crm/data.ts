@@ -59,6 +59,27 @@ export type Contact = {
   // app/lib/validate.ts). Null for contacts marked Dead before the column existed,
   // or when the person chose to skip the prompt.
   deadReason?: string | null;
+  // CAMPAIGN ENGAGEMENT, read off smartlead_email_events (migrations/0022) and
+  // matched to this contact by lowercased email address. Both are facts about
+  // what the SENDING TOOL saw, which is why they live beside the timeline rather
+  // than in it: a touchpoint records something this CRM did, and nobody here
+  // opened anything.
+  //
+  // `openedStep` is the furthest sequence step this address is recorded as having
+  // opened, across every campaign — Smartlead's own 1-based numbering, the same
+  // one /analytics' step table prints. Null for a contact with no email, whose
+  // address no campaign has emailed, or whose campaign has never been synced
+  // since 0022 (all three genuinely mean "we do not know", and none of them mean
+  // zero). `campaignReplied` is true when any of those same rows carries a
+  // reply_time.
+  //
+  // WHY BOTH, given `status` already says "Replied". Smartlead sees replies to
+  // the campaign directly; the CRM only learns about one if Unipile is connected
+  // and has synced (see the Replies section of CLAUDE.md). ./todo.ts reads the
+  // pair together and never the open alone — telling a rep to DM somebody who
+  // already answered the email is the one instruction this list must not print.
+  openedStep?: number | null;
+  campaignReplied?: boolean;
   opts: ContactOpts;
 };
 
