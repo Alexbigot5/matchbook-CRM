@@ -555,6 +555,22 @@ the contact's timeline, and a status move to `Replied` for anyone still at `New`
   accepts the three shapes the dashboard shows and **refuses anything but https** — that
   value is the host every keyed request is sent to, so a quietly wrong DSN is a key handed
   to a stranger.
+- **A 401 from Unipile is never repeated verbatim, and that is deliberate.** Unipile answers
+  a request with NO key and one with a WRONG key identically — `{"status":401,
+  "type":"errors/missing_credentials","title":"Missing credentials"}` on `/accounts` and on
+  `/hosted/accounts/link` alike — so "Missing credentials" is its phrase for *"I did not
+  accept this key"*, not for *"you sent none"*. Forwarding it was a false statement by the
+  time it reached the screen: `call()` returns early on an empty key and /settings' action
+  checks again before building a client, so a 401 can only happen on a key that WAS sent.
+  An operator who had just pasted a key into the Cloudflare dashboard was told the
+  credentials were missing and went to re-check the one thing that was provably fine.
+  `rejectedKeyMessage` says the key was sent and rejected, names the DSN it was rejected by
+  (a Unipile key is issued against one DSN — pointing one account's key at another's host is
+  the ordinary way to get here), and quotes the vendor's wording only as an aside so it can
+  still be searched for. 403 routes through the same message: it is fixed in the same place.
+  Both credentials are also **trimmed in `load-context.ts`** — a secret saved as a lone space
+  passed every `if (!apiKey)` guard, then fetch's own header normalisation stripped it to
+  nothing on the wire, producing this exact 401 for a key that really was absent.
 - **`app/lib/unipile-sync.server.ts`** — one sync, called by both pages. Reads accounts
   live, then per account reads forward from that account's watermark. **One account's
   failure is not the sync's**: each is read, written and stamped independently, because a

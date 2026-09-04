@@ -39,6 +39,43 @@ const MIN_GAP_MS = 120;
 /** How much of a Unipile error body to quote back. Enough to diagnose, not a payload. */
 const MAX_ERROR_CHARS = 240;
 
+/**
+ * What Unipile calls a 401, and why this module refuses to repeat it.
+ *
+ * `GET /api/v1/accounts` and `POST /api/v1/hosted/accounts/link` both answer a
+ * request carrying NO key and a request carrying a WRONG key with the same
+ * bytes:
+ *
+ *     {"status":401,"type":"errors/missing_credentials","title":"Missing credentials"}
+ *
+ * So "Missing credentials" is Unipile's word for "I did not accept this key",
+ * not for "you sent none" — it cannot tell the two apart and does not try.
+ *
+ * Passing that through was actively misleading, because by the time a 401 can
+ * happen this app has ALREADY established the key is present: `call()` returns
+ * early when `apiKey` is empty, and /settings' action checks it again before
+ * building a client. An operator who has just pasted a key into the Cloudflare
+ * dashboard is then told the credentials are missing, so they go and check the
+ * one thing that is provably fine, and the actual cause — a key that is not
+ * valid for this DSN — is never named. That is a real support loop and it is
+ * this app's message that creates it, not Unipile's.
+ *
+ * A Unipile key is issued against one DSN, so pointing a key from one account at
+ * another account's host is the ordinary way to arrive here. The DSN is
+ * interpolated in for that reason: it is not a credential (see the header) and
+ * it is half of the pair that has to match.
+ */
+function rejectedKeyMessage(status: number, base: string, vendorTitle: string): string {
+  const vendor = vendorTitle ? ` Unipile's own wording is "${vendorTitle}", which it returns` +
+    " for a key it rejects just as it does for a request carrying none." : "";
+  return (
+    `Unipile rejected the API key (${status}). The key is set and was sent with this request, ` +
+    `so it is not valid for ${base}.${vendor} Check that UNIPILE_API_KEY was copied from the ` +
+    `same Unipile account this DSN belongs to and has not been rotated since, then set it ` +
+    `again and redeploy.`
+  );
+}
+
 export type UnipileResult<T> =
   | { ok: true; status: number; data: T }
   | { ok: false; error: string; status?: number; retryAfterSeconds?: number };
@@ -217,6 +254,17 @@ export function createUnipileClient(apiKey: string, dsn: string) {
         // keep the raw text
       }
       const trimmed = String(detail ?? "").slice(0, MAX_ERROR_CHARS).trim();
+      // 401/403 is the one status whose vendor text this module will not repeat —
+      // see rejectedKeyMessage. 403 joins it because Unipile uses it for a key
+      // that is valid but not entitled to the endpoint, which an operator fixes
+      // in exactly the same place.
+      if (res.status === 401 || res.status === 403) {
+        return {
+          ok: false,
+          status: res.status,
+          error: rejectedKeyMessage(res.status, base, trimmed),
+        };
+      }
       const result: UnipileResult<T> = {
         ok: false,
         status: res.status,
