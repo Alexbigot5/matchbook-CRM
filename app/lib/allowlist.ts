@@ -3,12 +3,12 @@
 //
 // Deliberately isomorphic (no `.server` suffix, no server-only imports): the
 // login route, the better-auth hooks, and the CRM UI all read from it. It holds
-// no secrets — just four email addresses — so shipping it to the client is fine.
+// no secrets — just five email addresses — so shipping it to the client is fine.
 //
 // Removing an email here revokes access on that person's next request, even if
 // they still hold a valid session cookie, because requireUser() re-checks it.
 
-// Null-prototype so the map carries nothing but these four keys. With a plain
+// Null-prototype so the map carries nothing but these five keys. With a plain
 // object literal, `"constructor" in ALLOWED_USERS` and `ALLOWED_USERS["__proto__"]`
 // both hit Object.prototype — see the note on isAllowed below.
 export const ALLOWED_USERS: Record<string, string> = Object.assign(
@@ -18,6 +18,7 @@ export const ALLOWED_USERS: Record<string, string> = Object.assign(
     "tom@onmatchbook.com": "Tom",
     "britton@onmatchbook.com": "Britton",
     "mikehennesse@gmail.com": "Mike",
+    "sales@onmatchbook.com": "Mike",
   },
 );
 

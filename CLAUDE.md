@@ -681,9 +681,9 @@ Gotchas:
 ## Auth
 
 Magic-link sign-in via better-auth, with email delivered by **Resend**. The dataset is shared,
-but access is restricted to four hardcoded addresses.
+but access is restricted to five hardcoded addresses.
 
-- **`app/lib/allowlist.ts`** — the four permitted emails mapped to display names. Isomorphic
+- **`app/lib/allowlist.ts`** — the five permitted emails mapped to display names. Isomorphic
   (no secrets). Editing this is how you add or remove a user; a removal takes effect on that
   person's next request even if they hold a live session cookie.
 - **`app/lib/auth.server.ts`** — `createAuth(env, baseURL)`. Passes the raw `DB` binding as
