@@ -151,11 +151,14 @@ over a shared shell:
   week while skipping the ones already late; `followUpDue()` here is the corrected reading,
   matching `/lifecycle`'s.
 - **`views.ts`** — the saved-view filter DSL behind the "New view" builder and the sidebar's
-  VIEWS rows. Five fields (`status`, `owner`, `loop`, `category`, `todo`), two ops, AND only,
-  and `validate.ts` imports the closed sets to whitelist them. **Evaluated in JS against
-  contacts the loader already fetched — never compiled into SQL.** `todo` is the one derived
-  field, and the one whose membership changes as work gets done: logging the call takes a
-  contact out of a "Calls to make" view.
+  VIEWS rows. Six fields (`status`, `owner`, `loop`, `category`, `tags`, `todo`), two ops,
+  AND only, and `validate.ts` imports the closed sets to whitelist them. **Evaluated in JS
+  against contacts the loader already fetched — never compiled into SQL.** `todo` is the one
+  derived field, and the one whose membership changes as work gets done: logging the call
+  takes a contact out of a "Calls to make" view. `tags` asks about *presence* (`None`/`Any`),
+  not which tag — filtering by name is the sidebar's TAGS group, and the thing that group
+  cannot express (it only lists names that exist) is the absence of all of them, i.e. the
+  untagged contacts.
 - **`ui.tsx`** — presentation primitives. `css(string)` parses an inline CSS **string** into a
   React style object (the app keeps the original template's style strings verbatim). `Box` is
   a polymorphic element (`as=...`, any element type — the sidebar passes `Link`) that adds

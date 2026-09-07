@@ -57,6 +57,24 @@
 //   * `todo is not call` therefore MATCHES every contact with no to-do at all —
 //     the whole Won/Dead/recently-contacted population. Same reading as `owner
 //     is not Tom` above, and the same advice: pair it with another condition.
+//   * `tags is none` asks whether the contact carries ANY industry tag, not
+//     which one. Deliberately not a per-tag-name field: tag names are rows in
+//     D1, and VIEW_FIELDS is the static closed set validate.ts whitelists
+//     against — a dropdown built from the tags table would either have to be
+//     threaded through the validator or drop the whitelist entirely. Filtering
+//     BY a specific tag is already the sidebar's TAGS group; what that group
+//     cannot express, because it only lists names that exist, is the absence of
+//     all of them. Hence one two-valued field rather than N.
+//   * `tags` is the only field whose two values are each other's negation, so
+//     `is none` and `is not any` select the same contacts. Kept symmetric with
+//     the other four rather than special-cased into a single value: the op
+//     dropdown is rendered for every row, and a field where one of its two
+//     options is a no-op would be stranger than a redundant pair.
+//   * Empty tags mean "created before migration 0020 shipped", not "reviewed
+//     and found to have no industry" — nothing backfills them (see the note on
+//     Tag in ./data.ts). So `tags is none` is most of the book today, and is
+//     worth pairing with a condition that narrows it to the contacts you would
+//     actually go and tag.
 //   * matchesConditions(c, []) is true (a vacuous AND). validateSavedView refuses
 //     to save an empty condition list, so that only happens for a corrupt or
 //     hand-edited row — and showing everything is the safer failure than showing
@@ -90,7 +108,7 @@ export type SavedView = {
   conditions: ViewCondition[];
 };
 
-export const VIEW_FIELD_KEYS = ["status", "owner", "loop", "category", "todo"] as const;
+export const VIEW_FIELD_KEYS = ["status", "owner", "loop", "category", "tags", "todo"] as const;
 export const VIEW_OPS = ["is", "isNot"] as const;
 
 /**
@@ -103,11 +121,21 @@ export const VIEW_OP_LABELS: Record<ViewOp, string> = { is: "is", isNot: "is not
 /** The sentinel `owner` value for "nobody owns this contact". */
 export const UNASSIGNED = "unassigned";
 
+/**
+ * The two `tags` values: carries no industry tag, and carries at least one.
+ *
+ * Sentinels rather than a tag name for the same reason UNASSIGNED is one — the
+ * field asks about presence, and presence is not spellable as a member of the
+ * set it is asking about.
+ */
+export const TAGS_NONE = "none";
+export const TAGS_ANY = "any";
+
 export type ViewFieldOption = { value: string; label: string };
 export type ViewField = { key: string; label: string; options: ViewFieldOption[] };
 
 /**
- * The five filterable fields and the closed set of values each accepts.
+ * The six filterable fields and the closed set of values each accepts.
  * validateSavedView checks a condition's value against exactly these lists.
  *
  * Owner options are hardcoded Tom / Britton / Unassigned, mirroring
@@ -150,6 +178,18 @@ export const VIEW_FIELDS: ViewField[] = [
     key: "category",
     label: "Category",
     options: CATEGORY_GROUPS.map((g) => ({ value: g, label: g })),
+  },
+  {
+    // Presence, not identity: "does this contact have industry tags at all",
+    // never "which". See the header for why this is two fixed values and not a
+    // dropdown of the tags table, and ./sidebar.tsx's TAGS group for the
+    // filter-by-name half that this one is the complement of.
+    key: "tags",
+    label: "Tags",
+    options: [
+      { value: TAGS_NONE, label: "None" },
+      { value: TAGS_ANY, label: "Any" },
+    ],
   },
   {
     // The one DERIVED field: nothing on the contact stores a to-do, ./todo.ts
@@ -240,6 +280,13 @@ function satisfies(c: Contact, field: string, value: string): boolean {
       // clause holds on any of them. A contact with no category, or none whose
       // spelling is mapped, resolves to [] and matches nothing.
       return categoryGroup(c.category).includes(value);
+    case "tags":
+      // `?.length`, not a null check: `tags` is optional on Contact, but
+      // listContacts always sets it (to [] when the join found nothing), so
+      // undefined only reaches here from a Contact built somewhere else — and
+      // "no tags array" and "an empty tags array" are the same answer to this
+      // question either way.
+      return value === TAGS_NONE ? !c.tags?.length : !!c.tags?.length;
     case "todo":
       // The contact's ONE next action, not a set membership — see the header.
       // `?.kind` rather than a null check: a contact with nothing to do matches
