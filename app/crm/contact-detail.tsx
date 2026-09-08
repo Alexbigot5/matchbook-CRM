@@ -39,6 +39,7 @@ import {
   ownerAvatar,
   type Viewer,
 } from "./data";
+import { useState } from "react";
 import { Link } from "react-router";
 import {
   Box,
@@ -245,6 +246,14 @@ export type ContactDetailProps = {
   /** Opens the page's confirm modal — this does not delete on its own. */
   onDelete: (ids: string[]) => void;
   /**
+   * Removes one row from the touchpoint history — the undo for a touch logged
+   * by mistake. Unlike `onDelete` this one DOES delete: the confirm is the
+   * two-step trash on the row itself (below), not a page-owned modal, because
+   * unlike a contact delete there is no bulk selection to share a modal with
+   * and no cascade to spell out.
+   */
+  onDeleteTouch: (touchId: string) => void;
+  /**
    * The OTHER contacts at this contact's company, and the deals that company
    * has. Both resolved by `company_id`, never by the free-text `company` string
    * — matching on the string misses the colleague who typed "halcyon labs" and
@@ -280,6 +289,7 @@ export function ContactDetail({
   onResumeLoop1,
   onDraftOutreach,
   onDelete,
+  onDeleteTouch,
   companyPeers = [],
   companyDeals = [],
   onOpenContact,
@@ -289,6 +299,14 @@ export function ContactDetail({
   const conflictWith = conflictOwners(contact, nameIndex);
   const conflict = conflictWith.length > 0;
   const lastT = contact.touches[0];
+  // Which touchpoint's trash has been pressed once. Deleting one is a hard
+  // delete with no restore, so the row arms on the first press and commits on
+  // the second. That guard lives here rather than in a page-owned modal (the
+  // pattern contact delete uses) because there is no bulk selection to share a
+  // modal with and no cascade to spell out — and keeping it local means both
+  // pages that render this panel get it without extra plumbing. Both mount
+  // this component with `key={contact.id}`, so switching contacts resets it.
+  const [armedTouch, setArmedTouch] = useState<string | null>(null);
 
   const statusMenu = STATUSES.map((s) => ({
     label: s.id,
@@ -377,6 +395,7 @@ export function ContactDetail({
   const timeline = contact.touches.map((t, i) => {
     const c2 = CH[t.ch] ?? NO_TOUCH;
     return {
+      id: t.id,
       channel: c2.label,
       iconHtml: { __html: c2.icon },
       iconWrap: `width:26px;height:26px;border-radius:8px;background:${c2.bg};color:${c2.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
@@ -732,8 +751,8 @@ export function ContactDetail({
               <div style={css("font-size:11.5px; color:#a3a39d;")}>Last reached by <span style={css("color:#3a3a38; font-weight:500;")}>{lastT ? lastT.owner : "-"}</span></div>
             </div>
             <div style={css("position:relative; padding-left:4px;")}>
-              {timeline.map((t, j) => (
-                <div key={j} style={css("display:grid; grid-template-columns:26px 1fr; gap:12px; padding-bottom:16px; position:relative;")}>
+              {timeline.map((t) => (
+                <div key={t.id} style={css("display:grid; grid-template-columns:26px 1fr; gap:12px; padding-bottom:16px; position:relative;")}>
                   <div style={css("display:flex; flex-direction:column; align-items:center;")}>
                     <span style={css(t.iconWrap)}><span dangerouslySetInnerHTML={t.iconHtml} style={css("display:flex;")} /></span>
                     {t.hasLine && <span style={css("width:2px; flex:1; background:#ededea; margin-top:4px;")} />}
@@ -743,6 +762,46 @@ export function ContactDetail({
                       <span style={css("font-size:13px; font-weight:500; color:#1a1a1a;")}>{t.channel}</span>
                       <span style={css(t.loopStyle)}>{t.loopLabel}</span>
                       <span style={css("font-size:11.5px; color:#a3a39d; margin-left:auto;" + MONO)}>{t.date}</span>
+                      {/* Per-row undo for a touch logged by accident. Two steps:
+                          the trash arms the row, and the confirm that replaces
+                          it commits. Nothing restores a deleted touchpoint —
+                          the audit_log snapshot is a record, not a redo. */}
+                      {armedTouch === t.id ? (
+                        <span style={css("display:inline-flex; align-items:center; gap:6px;")}>
+                          <Box
+                            as="button"
+                            onClick={() => {
+                              onDeleteTouch(t.id);
+                              setArmedTouch(null);
+                            }}
+                            disabled={pending}
+                            title="Permanently delete this touchpoint"
+                            style={css(`border:1px solid #f0cccc; background:#fff; color:#b91c1c; padding:2px 8px; border-radius:6px; font-size:11.5px; font-weight:500; font-family:inherit; cursor:${pending ? "default" : "pointer"}; opacity:${pending ? "0.5" : "1"};`)}
+                            hover={pending ? undefined : css("background:#dc2626; color:#fff; border-color:#dc2626;")}
+                          >
+                            Delete
+                          </Box>
+                          <Box
+                            as="button"
+                            onClick={() => setArmedTouch(null)}
+                            style={css("border:1px solid #e6e6e2; background:#fff; color:#75756f; padding:2px 8px; border-radius:6px; font-size:11.5px; font-family:inherit; cursor:pointer;")}
+                            hover={css("background:#f5f5f2;")}
+                          >
+                            Cancel
+                          </Box>
+                        </span>
+                      ) : (
+                        <Box
+                          as="button"
+                          onClick={() => setArmedTouch(t.id)}
+                          title={`Delete this ${t.channel.toLowerCase()} touchpoint`}
+                          aria-label={`Delete this ${t.channel.toLowerCase()} touchpoint`}
+                          style={css("display:flex; align-items:center; justify-content:center; border:none; background:none; color:#c4c4bd; padding:2px; border-radius:5px; font-family:inherit; cursor:pointer;")}
+                          hover={css("background:#fdf2f2; color:#b91c1c;")}
+                        >
+                          <IconTrash size={13} />
+                        </Box>
+                      )}
                     </div>
                     <div style={css("font-size:12px; color:#75756f; margin-top:2px;")}>by {t.owner}</div>
                     {t.hasNote && (

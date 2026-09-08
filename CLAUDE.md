@@ -375,10 +375,10 @@ scaffold a new numbered file in `migrations/`, add your `CREATE`/`ALTER` SQL, th
 recorded in `d1_migrations`, so files are applied once, in numeric order.
 
 **Every contact write lives in `app/lib/contact-intents.server.ts`** — one
-`handleContactIntent(form, {DB, user, ...})` switch over the fourteen intents (`setStatus`,
-`logTouch`, `addNote`, `logMeeting`, `snooze`, `clearFollow`, `addContact`, `resumeLoop1`,
-`markAdsSent`, `deleteContacts`, `importContacts`, `triggerAgent`, `markReplyRead`,
-`markAllRepliesRead`), shared by `/`, `/lifecycle` and `/settings`. The two reply intents
+`handleContactIntent(form, {DB, user, ...})` switch over the fifteen intents (`setStatus`,
+`logTouch`, `deleteTouch`, `addNote`, `logMeeting`, `snooze`, `clearFollow`, `addContact`,
+`resumeLoop1`, `markAdsSent`, `deleteContacts`, `importContacts`, `triggerAgent`,
+`markReplyRead`, `markAllRepliesRead`), shared by `/`, `/lifecycle` and `/settings`. The two reply intents
 are in here rather than on the contacts route because they are pure D1 writes that any page
 rendering a reply card needs; the *sync* that produces those cards is not, and stays on the
 routes where its key and its rate limit live. It returns `null` for an unknown intent so each route keeps its own default.
@@ -404,7 +404,9 @@ this module rather than validating inline.**
 
 Deletion is recorded in an append-only `audit_log` table with a JSON snapshot of each removed
 row and the acting user — contact deletion is a hard delete that also drops the contact's
-notes and touchpoints, on a dataset shared by all four users. Template and variant deletion
+notes and touchpoints, on a dataset shared by all four users. Deleting a single touchpoint
+from the detail timeline audits too (`touchpoint.delete`, snapshotting the whole row) — it is
+the same hard delete on the same shared dataset, just one row of it. Template and variant deletion
 audit too (`template.delete` / `template_variant.delete`); the template snapshot carries its
 variants as well, since the copy is the only irreplaceable thing on that page. Stat writes are
 **not** audited — they're non-destructive and re-pushable, and logging every poll would flood
@@ -662,6 +664,12 @@ Gotchas:
   opposite directions along the same guarded edge: `Contacted` on a send, `Replied` on a
   reply, each with the promotable set spelled out in SQL. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
   live conflict flag remains the name-based `hasNameConflict`/`conflictOwners`.
+  **One path removes them**: the detail timeline's per-row trash (`deleteTouch` →
+  `deleteTouchpoint`), for a touch logged on the wrong contact or the wrong channel. It
+  matches on `(id, contact_id)` so a row can only be removed from the contact it belongs to,
+  and it deliberately does **not** reverse the status move a sync writer may have made when
+  it wrote the row — status is edited from the status menu, not inferred back out of the
+  timeline. Deleting a touch does change what /analytics counts, which is the point.
 - **Two touchpoint note prefixes are load-bearing.** `recordContactSends` writes
   `Sent by X` / `Sent step N of X` and `recordReplies` writes `Replied from X`, and
   /analytics' Email campaigns tab tells a campaign send from a rep's hand-logged email touch

@@ -618,6 +618,10 @@ export function SalesLoopCRM({
     patch({ noteDraft: "" });
     submit({ intent: "logTouch", id: S.selectedId, ch, text });
   };
+  const deleteTouch = (touchId: string) => {
+    if (!S.selectedId) return;
+    submit({ intent: "deleteTouch", id: S.selectedId, touchId });
+  };
   const onNoteInput = (e: any) => patch({ noteDraft: e.target.value });
   const addNote = () => {
     const txt = (S.noteDraft || "").trim();
@@ -2028,6 +2032,7 @@ export function SalesLoopCRM({
           onResumeLoop1={resumeLoop1}
           onDraftOutreach={draftOutreach}
           onDelete={askDelete}
+          onDeleteTouch={deleteTouch}
           companyPeers={companyCtx.peers}
           companyDeals={companyCtx.deals}
           onOpenContact={open}

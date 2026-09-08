@@ -267,6 +267,7 @@ export async function listContacts(
   for (const t of touchesRes.results ?? []) {
     const list = touchesByContact.get(t.contact_id) ?? [];
     list.push({
+      id: t.id,
       owner: t.owner ?? "",
       ch: t.type ?? "email",
       loop: Number(t.loop) || 1,
@@ -938,6 +939,56 @@ export async function logTouchpoint(
     )
     .bind(crypto.randomUUID(), contactId, type, resolvedLoop, owner, str(note))
     .run();
+}
+
+/**
+ * Hard-delete one touchpoint, snapshotting the row to audit_log first.
+ *
+ * This is the undo for a touch logged by mistake — the detail timeline's
+ * per-row trash. There is no soft-delete column and no restore path, so the
+ * snapshot is the whole record of what was removed; it goes in the same batch
+ * as the DELETE, matching deleteContacts and deleteTemplate.
+ *
+ * Constrained by `AND contact_id = ?`, not by the touchpoint id alone, for the
+ * reason every template_variants write is constrained by its template: the id
+ * comes off a form, and the caller only ever means "this row on the contact
+ * whose panel is open". Without it a stale or hand-edited form could delete a
+ * touchpoint belonging to someone else's contact.
+ *
+ * Returns false when nothing matched — an id that doesn't exist, or one that
+ * belongs to a different contact. The `deleteTouch` intent treats that as
+ * success (see there for why), but the boolean is kept so a future caller that
+ * needs to tell the two apart can. Deleting a touchpoint is silent as
+ * far as the contact goes: `status`, `follow_up_at` and the loop are untouched,
+ * because none of them are derived from the timeline (the two sync writers move
+ * status when they *write* a touch, and that move is not reversed here).
+ */
+export async function deleteTouchpoint(
+  db: D1Database,
+  id: string,
+  contactId: string,
+  actor: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      "SELECT id, contact_id, type, loop, owner, note, created_at FROM touchpoints WHERE id = ? AND contact_id = ?",
+    )
+    .bind(id, contactId)
+    .first<TouchpointRow>();
+  if (!row) return false;
+
+  const res = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO audit_log (id, actor, action, entity_type, entity_id, snapshot)
+         VALUES (?, ?, 'touchpoint.delete', 'touchpoint', ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), actor, id, JSON.stringify(row)),
+    db
+      .prepare("DELETE FROM touchpoints WHERE id = ? AND contact_id = ?")
+      .bind(id, contactId),
+  ]);
+  return (res[res.length - 1]?.meta?.changes ?? 0) > 0;
 }
 
 /**

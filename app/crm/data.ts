@@ -3,6 +3,11 @@
 // hydration mismatch).
 
 export type Touch = {
+  // The `touchpoints` row id. Carried so the detail timeline can name one row
+  // for the per-row delete (a touch logged by mistake) and key it in React.
+  // Nothing derives anything from it — every other reader of `touches` treats
+  // the list as positional, newest-first.
+  id: string;
   owner: string;
   ch: string;
   loop: number;
