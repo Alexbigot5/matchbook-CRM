@@ -1,6 +1,6 @@
 // Server-only HTTP client for the Unipile REST API (v1).
 //
-// Same contract as app/lib/smartlead.server.ts and app/lib/hyperagent.server.ts,
+// Same contract as app/lib/smartlead.server.ts and app/lib/origami.server.ts,
 // the other outbound integrations: it NEVER throws, it returns a plain result
 // object so callers can surface a friendly message, and a missing key means
 // "integration disabled" rather than an attempted fetch. Everything that talks

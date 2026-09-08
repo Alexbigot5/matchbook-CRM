@@ -1,18 +1,11 @@
-# Local dev secrets for the HyperAgent integration.
-# Copy to `.dev.vars` (gitignored) and fill in real values, then restart the
-# dev server. For the deployed Worker, set the two keys with
-# `wrangler secret put CRM_API_KEY` / `wrangler secret put HYPERAGENT_API_KEY`
-# and set HYPERAGENT_TRIGGER_URL in wrangler.toml [vars] (or as a secret).
+# Local dev secrets. Copy to `.dev.vars` (gitignored) and fill in real values,
+# then restart the dev server. For the deployed Worker, set each with
+# `wrangler secret put <NAME>`.
 
-# Bearer token HyperAgent must present when calling INTO the CRM API
-# (GET/POST /api/hyperagent). Generate a long random string.
+# Bearer token a machine must present when calling INTO the CRM API
+# (GET/POST /api/hyperagent). Generate a long random string. This is the only
+# direction the HyperAgent integration runs: the CRM never calls out to it.
 CRM_API_KEY=""
-
-# Bearer token the CRM presents when calling OUT to HyperAgent's trigger URL.
-HYPERAGENT_API_KEY=""
-
-# HyperAgent agent trigger endpoint (HTTP/webhook) the CRM POSTs to.
-HYPERAGENT_TRIGGER_URL=""
 
 # --- Auth (magic-link sign-in) ------------------------------------------------
 # Signs session cookies. REQUIRED: better-auth throws on every request in a
@@ -33,8 +26,7 @@ RESEND_API_KEY=""
 # app/lib/smartlead.server.ts redacts the key from everything it returns or logs.
 #
 # Find it at app.smartlead.ai → Settings → Profile. Leave blank to disable: the
-# page still renders and explains what's missing, exactly as HyperAgent does with
-# an empty trigger URL.
+# page still renders and explains what's missing.
 #   wrangler secret put SMARTLEAD_API_KEY
 SMARTLEAD_API_KEY=""
 

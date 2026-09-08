@@ -23,7 +23,6 @@ import {
   createManyContacts,
   deleteContacts,
   deleteTouchpoint,
-  listContacts,
   logTouchpoint,
   markAdsSent,
   markRepliesRead,
@@ -31,7 +30,6 @@ import {
   snoozeFollowUp,
   updateContactStatus,
 } from "./crm.server";
-import { triggerAgent } from "./hyperagent.server";
 import {
   asString,
   isValidDeadReason,
@@ -50,10 +48,6 @@ export type ContactIntentDeps = {
   DB: D1Database;
   /** Already authenticated by the caller. Its name is recorded as note/touch author. */
   user: { name: string };
-  // Empty string means "integration disabled"; triggerAgent reports that itself
-  // rather than attempting a fetch. The load context already defaults them.
-  HYPERAGENT_TRIGGER_URL: string;
-  HYPERAGENT_API_KEY: string;
 };
 
 function parseLoopsField(value: FormDataEntryValue | null): unknown {
@@ -76,14 +70,14 @@ function parseJsonField(value: FormDataEntryValue | null): unknown {
 /**
  * Handle one contact intent.
  *
- * Returns `null` when `intent` is none of the fifteen, so each route keeps its
+ * Returns `null` when `intent` is none of the fourteen, so each route keeps its
  * own `default:` and can layer page-specific intents around this call.
  */
 export async function handleContactIntent(
   form: FormData,
   deps: ContactIntentDeps,
 ): Promise<ContactActionResult | null> {
-  const { DB, user, HYPERAGENT_TRIGGER_URL, HYPERAGENT_API_KEY } = deps;
+  const { DB, user } = deps;
   const intent = form.get("intent")?.toString();
 
   try {
@@ -295,33 +289,6 @@ export async function handleContactIntent(
       }
       case "markAllRepliesRead": {
         await markRepliesRead(DB);
-        return { ok: true };
-      }
-      case "triggerAgent": {
-        const id = form.get("id")?.toString();
-        if (!id) return { ok: false, error: "Missing id." };
-        // Build the payload server-side from stored data so the client can't
-        // spoof it. The agent writes results back via /api/hyperagent.
-        const contact = (await listContacts(DB, Date.now())).find((c) => c.id === id);
-        if (!contact) return { ok: false, error: "Contact not found." };
-        const result = await triggerAgent(
-          { url: HYPERAGENT_TRIGGER_URL, key: HYPERAGENT_API_KEY },
-          {
-            task: "draft_outreach",
-            contact: {
-              id: contact.id,
-              name: contact.name,
-              company: contact.company,
-              email: contact.email ?? null,
-              phone: contact.phone ?? null,
-              linkedin: contact.linkedin ?? null,
-              status: contact.status,
-              loops: contact.loops,
-              source: contact.source ?? null,
-            },
-          },
-        );
-        if (!result.ok) return { ok: false, error: result.error };
         return { ok: true };
       }
       default:

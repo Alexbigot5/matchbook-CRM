@@ -228,7 +228,7 @@ export type ContactDetailProps = {
   nameIndex: NameIndex;
   noteDraft: string;
   statusMenuOpen: boolean;
-  /** fetcher.state !== "idle" — disables the HyperAgent button while in flight. */
+  /** fetcher.state !== "idle" — disables the touchpoint delete while in flight. */
   pending: boolean;
   onClose: () => void;
   onToggleStatusMenu: () => void;
@@ -242,7 +242,6 @@ export type ContactDetailProps = {
   onSnoozeFollow: () => void;
   onClearFollow: () => void;
   onResumeLoop1: () => void;
-  onDraftOutreach: () => void;
   /** Opens the page's confirm modal — this does not delete on its own. */
   onDelete: (ids: string[]) => void;
   /**
@@ -287,7 +286,6 @@ export function ContactDetail({
   onSnoozeFollow,
   onClearFollow,
   onResumeLoop1,
-  onDraftOutreach,
   onDelete,
   onDeleteTouch,
   companyPeers = [],
@@ -657,16 +655,6 @@ export function ContactDetail({
                 <Box as="button" onClick={onSnoozeFollow} style={css("border:1px solid #e6e6e2; background:#fff; padding:6px 11px; border-radius:8px; font-size:12px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>{snoozeLabel}</Box>
               </div>
             </div>
-          </div>
-
-          <div style={css("margin-top:12px; border:1px solid #ededea; border-radius:11px; padding:14px; background:#fbfbfa; display:flex; align-items:center; justify-content:space-between; gap:12px;")}>
-            <div style={css("min-width:0;")}>
-              <div style={css("font-size:13px; font-weight:500; color:#1a1a1a;")}>Draft outreach with HyperAgent</div>
-              <div style={css("font-size:12px; color:#75756f; margin-top:1px;")}>Hand this contact to a HyperAgent run; results post back to the timeline.</div>
-            </div>
-            <Box as="button" onClick={onDraftOutreach} disabled={pending} style={css(`border:none; background:#1a1a1a; color:#fff; padding:7px 13px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:${pending ? "default" : "pointer"}; white-space:nowrap; flex:0 0 auto; opacity:${pending ? "0.6" : "1"};`)} hover={css("background:#333;")}>
-              {pending ? "Working…" : "Draft outreach"}
-            </Box>
           </div>
 
           {canResume && (

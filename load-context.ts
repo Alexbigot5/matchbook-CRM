@@ -1,15 +1,13 @@
 import { createContext, RouterContextProvider } from "react-router";
 import { createAuth } from "./app/lib/auth.server";
 
-// Secrets/vars for the HyperAgent integration and auth. HYPERAGENT_TRIGGER_URL
-// and AUTH_EMAIL_FROM come from wrangler.toml [vars]; the keys are Worker secrets
+// Secrets/vars for the integrations and auth. AUTH_EMAIL_FROM comes from
+// wrangler.toml [vars]; the keys are Worker secrets
 // (`wrangler secret put ...`) mirrored in a local .dev.vars. They may be absent on
 // the generated `Env` type until `wrangler types` runs, so read them through this
 // shape.
 type IntegrationEnv = {
   CRM_API_KEY?: string;
-  HYPERAGENT_API_KEY?: string;
-  HYPERAGENT_TRIGGER_URL?: string;
   BETTER_AUTH_SECRET?: string;
   BETTER_AUTH_URL?: string;
   RESEND_API_KEY?: string;
@@ -39,12 +37,10 @@ export function getLoadContext(env: Env, request: Request) {
     // Lazy so requests that never touch auth (/api/hyperagent, static assets)
     // don't pay to construct it.
     getAuth: () => (auth ??= createAuth(e as unknown as Parameters<typeof createAuth>[0], baseURL)),
-    // Machine-to-machine config for HyperAgent (see app/routes/api.hyperagent.ts
-    // and app/lib/hyperagent.server.ts). Default to "" so a missing binding is a
-    // clean "disabled", not a crash.
+    // Bearer token for the machine-callable JSON API (app/routes/api.hyperagent.ts).
+    // Default to "" so a missing binding is a clean "disabled", not a crash —
+    // authFailure rejects every request rather than authenticating against "".
     CRM_API_KEY: e.CRM_API_KEY ?? "",
-    HYPERAGENT_API_KEY: e.HYPERAGENT_API_KEY ?? "",
-    HYPERAGENT_TRIGGER_URL: e.HYPERAGENT_TRIGGER_URL ?? "",
     // Smartlead (app/lib/smartlead.server.ts). Same "" = disabled convention:
     // /smartlead renders and explains itself rather than erroring.
     SMARTLEAD_API_KEY: e.SMARTLEAD_API_KEY ?? "",

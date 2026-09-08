@@ -11,8 +11,7 @@
 //
 //   1. The brief is COMPOSED. What the user types is wrapped with instructions
 //      naming the columns we want back, built server-side so the client cannot
-//      replace them — the same reason the triggerAgent intent builds its payload
-//      from stored data rather than from the form.
+//      replace them.
 //
 //   2. Column slugs are NOT known in advance. An Origami agent names its own
 //      columns, so mapColumns() resolves whatever it built onto our seven

@@ -375,10 +375,10 @@ scaffold a new numbered file in `migrations/`, add your `CREATE`/`ALTER` SQL, th
 recorded in `d1_migrations`, so files are applied once, in numeric order.
 
 **Every contact write lives in `app/lib/contact-intents.server.ts`** — one
-`handleContactIntent(form, {DB, user, ...})` switch over the fifteen intents (`setStatus`,
+`handleContactIntent(form, {DB, user})` switch over the fourteen intents (`setStatus`,
 `logTouch`, `deleteTouch`, `addNote`, `logMeeting`, `snooze`, `clearFollow`, `addContact`,
-`resumeLoop1`, `markAdsSent`, `deleteContacts`, `importContacts`, `triggerAgent`,
-`markReplyRead`, `markAllRepliesRead`), shared by `/`, `/lifecycle` and `/settings`. The two reply intents
+`resumeLoop1`, `markAdsSent`, `deleteContacts`, `importContacts`, `markReplyRead`,
+`markAllRepliesRead`), shared by `/`, `/lifecycle` and `/settings`. The two reply intents
 are in here rather than on the contacts route because they are pure D1 writes that any page
 rendering a reply card needs; the *sync* that produces those cards is not, and stays on the
 routes where its key and its rate limit live. It returns `null` for an unknown intent so each route keeps its own default.
@@ -423,8 +423,8 @@ template variant counters, and onto the contacts it emailed. There is
 deliberately **no cron and no inbound webhook** — every operation is a button. The builder
 is the only one of the five that never leaves D1.
 
-- **`app/lib/smartlead.server.ts`** — the HTTP client, shaped like `hyperagent.server.ts`
-  (never throws, returns a result, empty key = disabled). Two things to keep: **the API
+- **`app/lib/smartlead.server.ts`** — the HTTP client, shaped like `origami.server.ts` and
+  `unipile.server.ts` (never throws, returns a result, empty key = disabled). Two things to keep: **the API
   key is a query parameter**, not a bearer header, so it is inside every request URL —
   everything returned or logged goes through `redact()`, and `console.error(res.url)`
   would leak a live secret. And it **does not retry**: a 429 is reported with its
