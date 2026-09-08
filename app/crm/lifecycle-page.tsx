@@ -189,6 +189,10 @@ export function LifecyclePage({
       addNote();
     }
   };
+  const deleteTouch = (touchId: string) => {
+    if (!S.selectedId) return;
+    submit({ intent: "deleteTouch", id: S.selectedId, touchId });
+  };
   const logTouch = (ch: string) => {
     if (!S.selectedId) return;
     const text = (S.noteDraft || "").trim();
@@ -434,6 +438,7 @@ export function LifecyclePage({
           onResumeLoop1={resumeLoop1}
           onDraftOutreach={draftOutreach}
           onDelete={askDelete}
+          onDeleteTouch={deleteTouch}
           companyPeers={companyCtx.peers}
           companyDeals={companyCtx.deals}
           onOpenContact={open}

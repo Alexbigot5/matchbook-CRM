@@ -22,6 +22,7 @@ import {
   createContact,
   createManyContacts,
   deleteContacts,
+  deleteTouchpoint,
   listContacts,
   logTouchpoint,
   markAdsSent,
@@ -75,7 +76,7 @@ function parseJsonField(value: FormDataEntryValue | null): unknown {
 /**
  * Handle one contact intent.
  *
- * Returns `null` when `intent` is none of the fourteen, so each route keeps its
+ * Returns `null` when `intent` is none of the fifteen, so each route keeps its
  * own `default:` and can layer page-specific intents around this call.
  */
 export async function handleContactIntent(
@@ -120,6 +121,26 @@ export async function handleContactIntent(
           return { ok: false, error: `Notes must be ${LIMITS.note} characters or fewer.` };
         }
         await logTouchpoint(DB, id, ch, user.name, text);
+        return { ok: true };
+      }
+      case "deleteTouch": {
+        // The undo for a touch logged on the wrong contact or the wrong
+        // channel. `id` is the contact, `touchId` the row: both are required,
+        // and the writer matches on the pair so a touchpoint can only be
+        // removed from the contact it actually belongs to.
+        const id = form.get("id")?.toString();
+        const touchId = form.get("touchId")?.toString();
+        if (!id || !touchId) return { ok: false, error: "Missing id." };
+        // Idempotent: a row that matched nothing (already deleted by whoever
+        // else had the panel open, or a double submit) is reported as success,
+        // because the caller's intent — this touchpoint should not exist — now
+        // holds either way, and the revalidated loader shows the truth. It is
+        // also the only safe answer on the contacts page, which surfaces
+        // `actionError` solely inside the saved-view builder and the CSV modal:
+        // an error set from here would show up unexplained the next time one of
+        // those opened. And no `message` on success — that field means "the
+        // import partly failed, hold the modal open".
+        await deleteTouchpoint(DB, touchId, id, user.name);
         return { ok: true };
       }
       case "addNote": {
