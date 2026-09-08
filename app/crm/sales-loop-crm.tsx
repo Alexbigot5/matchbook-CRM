@@ -653,12 +653,6 @@ export function SalesLoopCRM({
     if (!S.selectedId) return;
     submit({ intent: "resumeLoop1", id: S.selectedId });
   };
-  // Kick off a HyperAgent run for this contact. The agent drafts outreach and
-  // writes results back through /api/hyperagent; the loader then revalidates.
-  const draftOutreach = () => {
-    if (!S.selectedId) return;
-    submit({ intent: "triggerAgent", id: S.selectedId });
-  };
 
   const defaultLoops = () => (S.view === "loop2" ? [2] : [1]);
   const openAdd = () =>
@@ -2030,7 +2024,6 @@ export function SalesLoopCRM({
           onSnoozeFollow={snoozeFollow}
           onClearFollow={clearFollow}
           onResumeLoop1={resumeLoop1}
-          onDraftOutreach={draftOutreach}
           onDelete={askDelete}
           onDeleteTouch={deleteTouch}
           companyPeers={companyCtx.peers}

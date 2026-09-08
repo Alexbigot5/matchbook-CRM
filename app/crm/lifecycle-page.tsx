@@ -211,11 +211,6 @@ export function LifecyclePage({
     if (!S.selectedId) return;
     submit({ intent: "resumeLoop1", id: S.selectedId });
   };
-  const draftOutreach = () => {
-    if (!S.selectedId) return;
-    submit({ intent: "triggerAgent", id: S.selectedId });
-  };
-
   const closeModal = () =>
     patch({
       modal: null,
@@ -436,7 +431,6 @@ export function LifecyclePage({
           onSnoozeFollow={snoozeFollow}
           onClearFollow={clearFollow}
           onResumeLoop1={resumeLoop1}
-          onDraftOutreach={draftOutreach}
           onDelete={askDelete}
           onDeleteTouch={deleteTouch}
           companyPeers={companyCtx.peers}

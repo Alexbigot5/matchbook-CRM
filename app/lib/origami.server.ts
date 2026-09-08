@@ -1,6 +1,6 @@
 // Server-only HTTP client for the Origami v2 API (https://docs.origami.chat).
 //
-// Same contract as app/lib/smartlead.server.ts and app/lib/hyperagent.server.ts,
+// Same contract as app/lib/smartlead.server.ts and app/lib/unipile.server.ts,
 // the other two outbound integrations: it NEVER throws, it returns a plain
 // result object so callers can surface a friendly message, and an empty key
 // means "integration disabled" rather than an attempted fetch. Everything that

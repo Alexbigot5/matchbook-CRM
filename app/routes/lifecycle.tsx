@@ -56,8 +56,6 @@ export async function action({ request, context }: Route.ActionArgs): Promise<Co
   const result = await handleContactIntent(form, {
     DB: ctx.DB,
     user,
-    HYPERAGENT_TRIGGER_URL: ctx.HYPERAGENT_TRIGGER_URL,
-    HYPERAGENT_API_KEY: ctx.HYPERAGENT_API_KEY,
   });
   return result ?? { ok: false, error: "Unknown action." };
 }

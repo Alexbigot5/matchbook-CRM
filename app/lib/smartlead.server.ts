@@ -1,9 +1,9 @@
 // Server-only HTTP client for the Smartlead.ai REST API (v1).
 //
-// Same contract as app/lib/hyperagent.server.ts, the other outbound integration:
-// it NEVER throws, it returns a plain result object so callers can surface a
-// friendly message, and an empty key means "integration disabled" rather than an
-// attempted fetch. Everything that talks to Smartlead goes through here.
+// Same contract as app/lib/origami.server.ts and app/lib/unipile.server.ts, the
+// other outbound integrations: it NEVER throws, it returns a plain result object
+// so callers can surface a friendly message, and an empty key means "integration
+// disabled" rather than an attempted fetch. Everything that talks to Smartlead goes through here.
 //
 // THE API KEY IS A QUERY PARAMETER. Smartlead has no bearer-token auth — every
 // request carries `?api_key=…`, so the live secret is part of every request URL.

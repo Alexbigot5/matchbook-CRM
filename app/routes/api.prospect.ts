@@ -824,8 +824,7 @@ async function startRun(
 
   const client = createOrigamiClient(apiKey, projectId);
   // Composed server-side from the stored prompt, so the client cannot replace
-  // the column contract — the same reason triggerAgent builds its payload from
-  // stored data rather than from the form.
+  // the column contract.
   const brief = composeBrief(parsed.prompt);
 
   const res: OrigamiResult<OrigamiAgentCreated> = agentId
