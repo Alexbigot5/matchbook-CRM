@@ -1,0 +1,48 @@
+-- Two columns a real contact export has and this CRM was throwing away.
+--
+-- The contacts table grew out of a hand-maintained list, so it holds the fields
+-- someone types: name, company, the three channels, a loop and an owner. Every
+-- lead export the team actually buys — ZoomInfo, Apollo, a scraped list — carries
+-- two more that matter and had nowhere to land: the company's WEBSITE and the
+-- person's JOB TITLE.
+--
+-- Losing them was not neutral. A job title is most of what decides whether a
+-- contact is worth a sequence at all ("Head of Influencer Marketing" and "Retail
+-- Associate" at the same brand are not the same lead), and the website is how a
+-- rep checks the company is the one they think it is before writing. Both were
+-- being read off the file and discarded at import.
+--
+-- WHY COLUMNS AND NOT TAGS. `contact_tags` (0020) exists for the category, which
+-- is a small closed-ish vocabulary that several contacts share and that people
+-- filter by. These are the opposite: one value per contact, never shared, never
+-- filtered on, and read one row at a time in the detail panel. That is a column.
+--
+-- WHY NOT ON `companies` (0017). The website is a fact about the company and
+-- arguably belongs there. It is here because the import writes one row per
+-- CONTACT and resolves the company by name afterwards — a website on the company
+-- would mean deciding what to do when two contacts at "Acme" disagree about the
+-- URL, which is a merge policy nobody has asked for. Storing what the file said,
+-- next to the contact the file described, keeps the import honest; promoting it
+-- onto the company row later is a backfill, and this column is what it would read.
+--
+-- Both are nullable with no default and nothing backfills them, so every contact
+-- already in the book keeps rendering exactly as it does today: contact-detail.tsx
+-- renders each row only when non-empty, the same way it already treats LinkedIn.
+--
+-- Applied via Wrangler's D1 migrations (tracked in the `d1_migrations` table):
+--   npm run db:migrate:local
+--   npm run db:migrate:remote
+
+-- The company URL as the export spelled it ("www.acme.com", "https://acme.com").
+-- Stored verbatim and never normalised: the detail panel strips the scheme for
+-- display and adds one back for the link, which is the same arrangement the
+-- `linkedin` column has had since 0003 and for the same reason — rewriting a URL
+-- on the way in loses what the source actually said.
+ALTER TABLE contacts ADD COLUMN website TEXT;
+
+-- The person's role at that company, free text. No vocabulary and no CHECK:
+-- these arrive as whatever the source wrote, up to and including "Head of
+-- Operations, Influencer Marketing & Talent Management", and bounding them is
+-- app/lib/validate.ts's job (LIMITS.jobTitle), where the rest of the field
+-- lengths already live.
+ALTER TABLE contacts ADD COLUMN job_title TEXT;

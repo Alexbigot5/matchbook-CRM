@@ -32,6 +32,13 @@ export type Contact = {
   email?: string | null;
   phone?: string | null;
   linkedin?: string | null;
+  // Two facts every bought lead list carries and the hand-typed form does not
+  // require: the company's URL and the person's role there (migration 0025).
+  // Null for every contact created before them, and for anything added by hand
+  // without them — so nothing may make a contact's rendering depend on either
+  // being set, the same rule `companyId` above states.
+  website?: string | null;
+  jobTitle?: string | null;
   loops: number[];
   owner: string | null;
   status: string;

@@ -37,6 +37,13 @@ export const LIMITS = {
   email: 320,
   phone: 60,
   linkedin: 500,
+  // Same order as `linkedin`, and for the same reason: both hold a URL as the
+  // source spelled it, and a real one with tracking parameters runs long.
+  website: 500,
+  // A job title is a label, not content — same family as `name` and `company`.
+  // Sized for the ones exports actually carry: "Head of Operations, Influencer
+  // Marketing & Talent Management" is 62 characters and not the longest.
+  jobTitle: 200,
   source: 200,
   status: 60,
   // A deal's stage id, and the company name typed on the new-deal form. The
@@ -342,6 +349,8 @@ export type ContactFields = {
   email: string | null;
   phone: string | null;
   linkedin: string | null;
+  website: string | null;
+  jobTitle: string | null;
   loops: number[] | undefined;
   owner: string | null;
   status: string;
@@ -394,6 +403,19 @@ export function validateContact(raw: unknown): ValidationResult {
     return { ok: false, error: `LinkedIn must be ${LIMITS.linkedin} characters or fewer.` };
   }
 
+  // Length-capped and otherwise taken as written, exactly like `linkedin`
+  // above: these arrive from a third-party export and there is no format worth
+  // enforcing on them. A `website` that isn't a URL is still what the file said.
+  const website = asString(r.website);
+  if (website.length > LIMITS.website) {
+    return { ok: false, error: `Website must be ${LIMITS.website} characters or fewer.` };
+  }
+
+  const jobTitle = asString(r.jobTitle);
+  if (jobTitle.length > LIMITS.jobTitle) {
+    return { ok: false, error: `Job title must be ${LIMITS.jobTitle} characters or fewer.` };
+  }
+
   const source = asString(r.source);
   if (source.length > LIMITS.source) {
     return { ok: false, error: `Source must be ${LIMITS.source} characters or fewer.` };
@@ -444,6 +466,8 @@ export function validateContact(raw: unknown): ValidationResult {
       email: email || null,
       phone: phone || null,
       linkedin: linkedin || null,
+      website: website || null,
+      jobTitle: jobTitle || null,
       loops,
       owner: ownerGiven ? rawOwner : null,
       status,
