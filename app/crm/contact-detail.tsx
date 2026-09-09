@@ -100,6 +100,23 @@ export const linkedinUrl = (raw: string | null | undefined) => {
   return /^https?:\/\//i.test(v) ? v : "https://" + v;
 };
 
+/*
+ * Icons for the two contact-info rows that are NOT touch channels.
+ *
+ * Kept here rather than added to `CH` in ./data.ts, which is the *touchpoint
+ * channel* registry: everything in it is a way somebody was contacted, and it is
+ * what `TOUCH_CHANNELS`, the timeline and `isValidTouchType` all read. A website
+ * is not a channel and nobody logs a touch to a job title, so putting them there
+ * would offer both as "Log touch" chips and widen the touch-type whitelist to
+ * match. Neutral colours for the same reason — these are attributes of the
+ * person, not one of the coloured channels they can be reached on.
+ */
+const WEBSITE_ICON =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M3.5 9h17M3.5 15h17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z" stroke="currentColor" stroke-width="2"/></svg>';
+const JOB_TITLE_ICON =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"><rect x="3" y="7.5" width="18" height="12" rx="2.5" stroke="currentColor" stroke-width="2"/><path d="M9 7.5V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 12.5h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+const ATTRIBUTE_ROW = { bg: "#f2f2ef", fg: "#75756f" };
+
 // Small amber pill marking a Loop 2 contact's community/event of origin.
 export function SourceTag({ label }: { label: string }) {
   return (
@@ -347,7 +364,30 @@ export function ContactDetail({
       ? linkedinRaw
       : "https://" + linkedinRaw
     : "";
+  // Stored as the export spelled it ("www.acme.com"), so the scheme is stripped
+  // for display and added back for the href — the same pair of rules the
+  // LinkedIn row above has always used, and the reason migration 0025 stores
+  // the raw value rather than normalising on the way in.
+  const websiteRaw = (contact.website || "").trim();
+  const websiteHref = websiteRaw
+    ? /^https?:\/\//i.test(websiteRaw)
+      ? websiteRaw
+      : "https://" + websiteRaw
+    : "";
+  const jobTitleRaw = (contact.jobTitle || "").trim();
   const contactInfo = [
+    // First, because it says what this person DOES and every row under it is a
+    // way to reach them. Not a link: a job title has nowhere to go, and the row
+    // renders as a plain div when `href` is absent.
+    jobTitleRaw
+      ? {
+          iconHtml: { __html: JOB_TITLE_ICON },
+          iconWrap: `width:30px;height:30px;border-radius:8px;background:${ATTRIBUTE_ROW.bg};color:${ATTRIBUTE_ROW.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
+          label: jobTitleRaw,
+          href: "",
+          external: false,
+        }
+      : null,
     contact.email && contact.email.trim()
       ? {
           iconHtml: { __html: CH.email.icon },
@@ -377,6 +417,15 @@ export function ContactDetail({
           iconWrap: `width:30px;height:30px;border-radius:8px;background:${CH.linkedin.bg};color:${CH.linkedin.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
           label: linkedinRaw.replace(/^https?:\/\//i, ""),
           href: linkedinHref,
+          external: true,
+        }
+      : null,
+    websiteRaw
+      ? {
+          iconHtml: { __html: WEBSITE_ICON },
+          iconWrap: `width:30px;height:30px;border-radius:8px;background:${ATTRIBUTE_ROW.bg};color:${ATTRIBUTE_ROW.fg};display:flex;align-items:center;justify-content:center;flex:0 0 auto;`,
+          label: websiteRaw.replace(/^https?:\/\//i, ""),
+          href: websiteHref,
           external: true,
         }
       : null,

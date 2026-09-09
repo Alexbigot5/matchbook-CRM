@@ -152,6 +152,25 @@ over a shared shell:
   old `needsAttention` tested `<= 0` and therefore flagged follow-ups scheduled for next
   week while skipping the ones already late; `followUpDue()` here is the corrected reading,
   matching `/lifecycle`'s.
+- **`import-map.ts`** — reading a contact export: which column is which, and how a
+  row becomes a contact (`HEADER_ALIASES`, `readHeaderRow`, `buildImportRows`,
+  `parseImportOwner`, `splitCsvLine`). Pure, isomorphic, **no `Date`** — same contract as
+  `views.ts` and `smartlead-map.ts`, and its own module so "does this file's third column
+  mean Loop or Website" is answerable without rendering anything.
+  **The bug it exists to prevent**: the importer used to read columns by POSITION against a
+  fixed eleven-column shape, and a real ZoomInfo export carries `Website` and `Job Title`
+  after `Company`. A positional read of one of those does not fail — it succeeds with every
+  field shifted, putting the website in the loop and the job title in the owner. Columns are
+  now identified by **header name in any order**, unrecognised ones are skipped without
+  moving anything around them, and the eleven-column order survives only as the fallback for
+  a **headerless** paste (a shape the app has always accepted and which nothing else can
+  disambiguate). A file that has labels but no Name column is **refused with a message**
+  rather than read positionally — that refusal is the whole point. `HEADER_LOOKUP` is a
+  **null-prototype object** because it is indexed by text out of a file, and
+  `normalizeHeader` strips the **UTF-8 BOM** Excel writes onto the first cell, without which
+  `Name` never matches and every Excel-exported CSV silently falls back to positional
+  reading. `parseImportOwner` checks the `OWNERS` names **before** the legacy first-letter
+  heuristic; the old order was why an Owner column reading "Mike" imported unassigned.
 - **`views.ts`** — the saved-view filter DSL behind the "New view" builder and the sidebar's
   VIEWS rows. Six fields (`status`, `owner`, `loop`, `category`, `tags`, `todo`), two ops,
   AND only, and `validate.ts` imports the closed sets to whitelist them. **Evaluated in JS
@@ -384,7 +403,10 @@ values the UI renders — keeping every `Date` call server-side is what preserve
 determinism. The schema lives in `migrations/` (applied via Wrangler's D1 migrations, tracked
 in a `d1_migrations` table) and mirrors the `data.ts` model: `contacts` stores `loops` as a JSON
 text array, a nullable `follow_up_at`, a nullable `source`, and a nullable
-`resumed_to_loop1_at`; `notes` uses a `text` column. `email_templates` + `template_variants`
+`resumed_to_loop1_at`; `notes` uses a `text` column. `website` and `job_title` (migration `0025`) are nullable and unbackfilled — every bought
+lead list carries a company URL and a person's role, both of which the importer used to read
+off the file and throw away; `contact-detail.tsx` renders each row only when non-empty, the
+way it already treats LinkedIn. `email_templates` + `template_variants`
 (migration `0008`) back the templates page — one row per variant, with a unique
 `(template_id, slot)` index that is the real guard behind "add variant B", and CHECKs only on
 `loop` and the four `>= 0` counters (`slot`/`status` are whitelisted in `validate.ts` instead,
@@ -814,6 +836,17 @@ but access is restricted to five hardcoded addresses.
 
 ## Conventions
 
+- **`.xlsx` import is client-side and lazily loaded.** `sales-loop-crm.tsx` `await import("xlsx")`s
+  SheetJS inside the drop handler, never at module scope — it is the largest thing this page
+  could depend on and the contacts table is the landing screen, so it code-splits into a chunk
+  nobody downloads unless they open the import modal. Two `sheet_to_json` options are
+  load-bearing: `defval: ""` (a spreadsheet stores no cell for a blank value, so without it a
+  row with an empty Email comes back SHORT and every later column slides left — the same
+  off-by-N corruption through a different door) and `raw: false` (formatted text, so a numeric
+  ARR arrives as "$8,321,000", which is the shape `isArrFigure` already expects). The
+  dependency is installed from **SheetJS's own CDN tarball, not npm** — the npm `xlsx` is
+  pinned at 0.18.5 and carries known advisories that are fixed only in the vendor-distributed
+  0.19.3+.
 - **Inline-style strings** passed through `css("...")`, not Tailwind classes, throughout the
   CRM. Match that style when editing CRM components. Tailwind is only meaningful in
   `app/root.tsx` / `app/welcome/`.

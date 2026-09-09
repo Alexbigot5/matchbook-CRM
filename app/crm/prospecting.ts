@@ -532,10 +532,13 @@ export type Prospect = {
  *
  * Status is always "New" — a prospect has by definition never been contacted,
  * and letting the panel choose would put a machine-found row straight into
- * "Replied". `source` carries the Loop 2 community/event when one was given; the
- * job title is not mapped anywhere, because `contacts` has no title column and
- * inventing one for this feature would be a schema change the CRM hasn't asked
- * for. It stays visible in the review list, which is where it earns its keep.
+ * "Replied". `source` carries the Loop 2 community/event when one was given.
+ *
+ * The job title used to be dropped here, with a note that `contacts` had no
+ * column to put it in. Migration 0025 added one — for the CSV/XLSX importer,
+ * which was throwing the same field away — so it is carried through now. Nothing
+ * about this function changed except that a fact the agent already reported
+ * stops being discarded on the way in.
  */
 export function toContactRow(
   prospect: Prospect,
@@ -551,6 +554,12 @@ export function toContactRow(
     // format-checked — a scraped number arrives in every shape there is.
     phone: prospect.phone,
     linkedin: prospect.linkedin,
+    jobTitle: prospect.title,
+    // Not `prospect.sourceUrl`: that is the page the agent found this person
+    // ON — a directory listing or a press piece — which is a different fact
+    // from the company's own address and would render as one in the detail
+    // panel. The agent reports no website, so there is none to carry.
+    website: null,
     loops: [opts.loop],
     owner: opts.owner,
     status: "New",

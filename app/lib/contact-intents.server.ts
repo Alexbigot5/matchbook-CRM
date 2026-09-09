@@ -177,6 +177,8 @@ export async function handleContactIntent(
           email: form.get("email")?.toString(),
           phone: form.get("phone")?.toString(),
           linkedin: form.get("linkedin")?.toString(),
+          website: form.get("website")?.toString(),
+          jobTitle: form.get("jobTitle")?.toString(),
           loops: parseLoopsField(form.get("loops")),
           owner: form.get("owner")?.toString(),
           status: form.get("status")?.toString(),

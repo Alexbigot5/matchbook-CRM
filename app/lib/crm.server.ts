@@ -138,6 +138,8 @@ type ContactRow = {
   email: string | null;
   phone: string | null;
   linkedin: string | null;
+  website: string | null;
+  job_title: string | null;
   owner: string | null;
   status: string;
   loops: string;
@@ -191,11 +193,11 @@ export async function listContacts(
   const [contactsRes, notesRes, touchesRes, tagsRes, engagementRes] = await Promise.all([
     (limit === null
       ? db.prepare(
-          "SELECT id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
+          "SELECT id, name, company, company_id, email, phone, linkedin, website, job_title, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC",
         )
       : db
           .prepare(
-            "SELECT id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT id, name, company, company_id, email, phone, linkedin, website, job_title, owner, status, loops, source, category, arr, follow_up_at, resumed_to_loop1_at, dead_reason, created_at FROM contacts ORDER BY created_at DESC LIMIT ? OFFSET ?",
           )
           .bind(limit, offset)
     ).all<ContactRow>(),
@@ -328,6 +330,8 @@ export async function listContacts(
       email: row.email ?? null,
       phone: row.phone ?? null,
       linkedin: row.linkedin ?? null,
+      website: row.website ?? null,
+      jobTitle: row.job_title ?? null,
       loops: parseLoops(row.loops),
       owner: row.owner ?? null,
       status: row.status,
@@ -358,6 +362,8 @@ export type NewContactInput = {
   email?: string | null;
   phone?: string | null;
   linkedin?: string | null;
+  website?: string | null;
+  jobTitle?: string | null;
   loops?: number[];
   owner?: string | null;
   status?: string;
@@ -621,11 +627,13 @@ function insertContactStmt(
   const email = str(input.email) || null;
   const phone = str(input.phone) || null;
   const linkedin = str(input.linkedin) || null;
+  const website = str(input.website) || null;
+  const jobTitle = str(input.jobTitle) || null;
   const category = str(input.category) || null;
   const arr = str(input.arr) || null;
   return db
     .prepare(
-      "INSERT INTO contacts (id, name, company, company_id, email, phone, linkedin, owner, status, loops, source, follow_up_at, category, arr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO contacts (id, name, company, company_id, email, phone, linkedin, website, job_title, owner, status, loops, source, follow_up_at, category, arr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       id,
@@ -635,6 +643,8 @@ function insertContactStmt(
       email,
       phone,
       linkedin,
+      website,
+      jobTitle,
       str(input.owner) || null,
       str(input.status) || "New",
       JSON.stringify(normalizeLoops(input.loops)),

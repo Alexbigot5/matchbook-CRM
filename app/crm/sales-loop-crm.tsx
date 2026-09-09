@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useFetcher } from "react-router";
+import { buildImportRows, splitCsvLine } from "./import-map";
 import {
   ago,
   buildNameIndex,
@@ -92,43 +93,14 @@ import {
  * spanning multiple lines are still unsupported; contact exports don't produce
  * them, and the caller splits on newlines before reaching here.)
  */
-function splitCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let field = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (inQuotes) {
-      if (c === '"') {
-        // A doubled quote inside a quoted field is a literal quote.
-        if (line[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += c;
-      }
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === "," || c === "\t") {
-      out.push(field.trim());
-      field = "";
-    } else {
-      field += c;
-    }
-  }
-  out.push(field.trim());
-  return out;
-}
-
 type FormState = {
   name: string;
   company: string;
   email: string;
   phone: string;
   linkedin: string;
+  website: string;
+  jobTitle: string;
   loops: number[];
   owner: string;
   status: string;
@@ -164,6 +136,16 @@ type State = {
   pendingDeadId: string | null;
   form: FormState;
   csvText: string;
+  /**
+   * A dropped .xlsx already split into rows, or null when the pending file is a
+   * .csv (which stays as text in `csvText` and is split at import time).
+   *
+   * Two slots rather than one because the two formats genuinely differ in what
+   * they are: keeping CSV as text means that path is unchanged, and a workbook
+   * has no honest text form to keep. Exactly one of them is ever set — whichever
+   * file was dropped last wins, and both are cleared together.
+   */
+  csvRows: string[][] | null;
   csvError: string;
   csvDragging: boolean;
   csvFileName: string;
@@ -251,6 +233,8 @@ const blankForm = (loops?: number[]): FormState => ({
   email: "",
   phone: "",
   linkedin: "",
+  website: "",
+  jobTitle: "",
   loops: loops || [1],
   owner: "Tom",
   status: "New",
@@ -323,6 +307,7 @@ export function SalesLoopCRM({
     pendingDeadId: null,
     form: blankForm([1]),
     csvText: "",
+    csvRows: null,
     csvError: "",
     csvDragging: false,
     csvFileName: "",
@@ -393,8 +378,8 @@ export function SalesLoopCRM({
       patch((s) =>
         s.modal
           ? notice
-            ? { csvText: "", csvError: notice, actionError: "", deleteIds: [] }
-            : { modal: null, csvText: "", csvError: "", actionError: "", deleteIds: [], pendingDeadId: null }
+            ? { csvText: "", csvRows: null, csvError: notice, actionError: "", deleteIds: [] }
+            : { modal: null, csvText: "", csvRows: null, csvError: "", actionError: "", deleteIds: [], pendingDeadId: null }
           : {},
       );
     } else {
@@ -661,6 +646,7 @@ export function SalesLoopCRM({
     patch({
       modal: "csv",
       csvText: "",
+      csvRows: null,
       csvError: "",
       actionError: "",
       csvDragging: false,
@@ -763,18 +749,30 @@ export function SalesLoopCRM({
     submit({ intent: "deleteContacts", ids: JSON.stringify(S.deleteIds) });
   };
 
-  // Read a dropped/selected .csv into the paste textarea, then the existing
-  // importCsv parser handles it. FileReader only runs in these browser event
-  // handlers (never during SSR), so there's no hydration concern.
-  const readCsvFile = (file: File | null | undefined) => {
+  /**
+   * Read a dropped/selected .csv or .xlsx, and hand importCsv something to parse.
+   *
+   * The two formats diverge for exactly one step. A .csv is text, so it is kept
+   * as text and split at import time, byte-for-byte as it always was. An .xlsx
+   * is a zip of XML and cannot be — SheetJS turns the first sheet into the same
+   * array-of-rows the CSV splitter produces, and both then go through one
+   * column mapper. Nothing about which column means what is decided here.
+   *
+   * FileReader only runs in these browser event handlers (never during SSR), so
+   * there's no hydration concern.
+   */
+  const readImportFile = (file: File | null | undefined) => {
     if (!file) return;
+    const isXlsx =
+      /\.xlsx$/i.test(file.name) ||
+      file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     const isCsv =
       /\.csv$/i.test(file.name) ||
       file.type === "text/csv" ||
       file.type === "application/vnd.ms-excel" ||
       file.type === "text/plain";
-    if (!isCsv) {
-      patch({ csvError: "That doesn’t look like a .csv file.", csvDragging: false });
+    if (!isXlsx && !isCsv) {
+      patch({ csvError: "That doesn’t look like a .csv or .xlsx file.", csvDragging: false });
       return;
     }
     // Bounded before reading. The whole file is held in component state and
@@ -788,20 +786,78 @@ export function SalesLoopCRM({
       return;
     }
     const reader = new FileReader();
-    reader.onload = () =>
-      patch({
-        csvText: typeof reader.result === "string" ? reader.result : "",
-        csvError: "",
-        csvDragging: false,
-        csvFileName: file.name,
-      });
     reader.onerror = () =>
       patch({ csvError: "Couldn’t read that file.", csvDragging: false });
-    reader.readAsText(file);
+
+    if (!isXlsx) {
+      reader.onload = () =>
+        patch({
+          csvText: typeof reader.result === "string" ? reader.result : "",
+          csvRows: null,
+          csvError: "",
+          csvDragging: false,
+          csvFileName: file.name,
+        });
+      reader.readAsText(file);
+      return;
+    }
+
+    reader.onload = async () => {
+      try {
+        // Imported on use, not at module scope: the parser is by far the
+        // largest thing this page could depend on, and the contacts table is
+        // the app's landing screen. Nobody who never opens this modal should
+        // download a spreadsheet engine to look at their list.
+        const XLSX = await import("xlsx");
+        const workbook = XLSX.read(new Uint8Array(reader.result as ArrayBuffer), {
+          type: "array",
+        });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        if (!sheet) {
+          patch({ csvError: "That workbook has no sheets.", csvDragging: false });
+          return;
+        }
+        const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+          // Rows as positional arrays, exactly what splitCsvLine produces.
+          header: 1,
+          // The one option this cannot be wrong about. A spreadsheet stores no
+          // cell for an empty value, so without `defval` a row whose Email is
+          // blank comes back SHORT and every column after it slides left by one
+          // — the same off-by-N corruption, arriving through a different door.
+          // In the file this was written for, 59 of 99 rows have no email.
+          defval: "",
+          // Formatted text rather than raw values, so a numeric ARR arrives as
+          // "8321000" and a date as what the sheet displays. Every field this
+          // importer writes is a string.
+          raw: false,
+          blankrows: false,
+        });
+        const table = rows.map((row) =>
+          (Array.isArray(row) ? row : []).map((v) => (v == null ? "" : String(v).trim())),
+        );
+        if (!table.length) {
+          patch({ csvError: "That sheet is empty.", csvDragging: false });
+          return;
+        }
+        patch({
+          csvRows: table,
+          csvText: "",
+          csvError: "",
+          csvDragging: false,
+          csvFileName: file.name,
+        });
+      } catch {
+        patch({
+          csvError: "Couldn’t read that spreadsheet. Try exporting it as .csv.",
+          csvDragging: false,
+        });
+      }
+    };
+    reader.readAsArrayBuffer(file);
   };
   const onCsvDrop = (e: any) => {
     e.preventDefault();
-    readCsvFile(e.dataTransfer?.files?.[0]);
+    readImportFile(e.dataTransfer?.files?.[0]);
   };
   const onCsvDragOver = (e: any) => {
     e.preventDefault();
@@ -812,7 +868,7 @@ export function SalesLoopCRM({
     patch({ csvDragging: false });
   };
   const onCsvFileInput = (e: any) => {
-    readCsvFile(e.target.files?.[0]);
+    readImportFile(e.target.files?.[0]);
     e.target.value = ""; // allow re-selecting the same file
   };
   const setForm = (p: Partial<FormState>) =>
@@ -834,6 +890,8 @@ export function SalesLoopCRM({
       email: (f.email || "").trim(),
       phone: (f.phone || "").trim(),
       linkedin: (f.linkedin || "").trim(),
+      website: (f.website || "").trim(),
+      jobTitle: (f.jobTitle || "").trim(),
       loops: JSON.stringify(f.loops.length ? f.loops : [1]),
       owner: f.owner === "Unassigned" ? "" : f.owner,
       status: f.status || "New",
@@ -842,76 +900,33 @@ export function SalesLoopCRM({
   };
   const importCsv = () => {
     const raw = (S.csvText || "").trim();
-    if (!raw) {
-      patch({ csvError: "Drop a .csv file first." });
-      return;
-    }
-    const rows = raw
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const parseLoops = (v: string) => {
-      const s = (v || "").toLowerCase();
-      const out: number[] = [];
-      if (/\b1\b|loop\s*1|general|outbound/.test(s)) out.push(1);
-      if (/\b2\b|loop\s*2|event|blitz|community/.test(s)) out.push(2);
-      return out.length ? out : [S.view === "loop2" ? 2 : 1];
-    };
-    const parseOwner = (v: string) => {
-      const s = (v || "").trim().toLowerCase();
-      if (s.startsWith("t")) return "Tom";
-      if (s.startsWith("b")) return "Britton";
-      return null;
-    };
-    const parseStatus = (v: string) => {
-      const s = (v || "").trim().toLowerCase();
-      const hit = STATUSES.find((x) => x.id.toLowerCase() === s);
-      return hit ? hit.id : "New";
-    };
-    if (rows.length > MAX_IMPORT_ROWS + 1) {
+    // Two sources, one parser. A .csv arrives as text and is split here; an
+    // .xlsx was turned into the same array-of-rows by SheetJS at drop time (see
+    // readImportFile). Everything after this is ./import-map.ts's job, which is
+    // why the column mapping has one implementation and no UI in it.
+    const table: string[][] =
+      S.csvRows ??
+      (raw
+        ? raw
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .map(splitCsvLine)
+        : []);
+    if (table.length > MAX_IMPORT_ROWS + 1) {
       patch({
         csvError: `That file has too many rows (max ${MAX_IMPORT_ROWS}). Split it and import in batches.`,
       });
       return;
     }
-    let start = 0;
-    const first = rows[0].toLowerCase();
-    if (
-      /name/.test(first) &&
-      /company|loop|owner|source|community|event|email|phone|linkedin|category|arr|revenue/.test(
-        first,
-      )
-    )
-      start = 1;
-    const made = [];
-    for (let i = start; i < rows.length; i++) {
-      const cols = splitCsvLine(rows[i]);
-      if (!cols[0]) continue;
-      const loops = parseLoops(cols[2]);
-      made.push({
-        name: cols[0],
-        company: cols[1] || "",
-        loops,
-        owner: parseOwner(cols[3]),
-        status: parseStatus(cols[4]),
-        source: loops.includes(2) ? cols[5] || "" : "",
-        email: cols[6] || "",
-        phone: cols[7] || "",
-        linkedin: cols[8] || "",
-        // Optional trailing columns: a nine-column file predating them imports
-        // exactly as before, with both left empty rather than guessed at.
-        category: cols[9] || "",
-        arr: cols[10] || "",
-      });
-    }
-    if (!made.length) {
-      patch({
-        csvError:
-          "Couldn’t read any contacts. Use: Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn, Category, ARR",
-      });
+    // The loop an unlabelled row falls back to is the one being looked at, so
+    // importing while filtered to Loop 2 lands the file in Loop 2.
+    const parsed = buildImportRows(table, { defaultLoop: S.view === "loop2" ? 2 : 1 });
+    if (!parsed.ok) {
+      patch({ csvError: parsed.error });
       return;
     }
-    submit({ intent: "importContacts", rows: JSON.stringify(made) });
+    submit({ intent: "importContacts", rows: JSON.stringify(parsed.rows) });
   };
 
   // ---- derived ----
@@ -2063,6 +2078,16 @@ export function SalesLoopCRM({
                       <Box as="input" value={f.phone} maxLength={LIMITS.phone} onChange={(e: any) => setForm({ phone: e.target.value })} placeholder="+1 (555) 000-0000" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
                     </label>
                   </div>
+                  <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
+                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Job title</span>
+                      <Box as="input" value={f.jobTitle} maxLength={LIMITS.jobTitle} onChange={(e: any) => setForm({ jobTitle: e.target.value })} placeholder="Head of Marketing" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                    </label>
+                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Website</span>
+                      <Box as="input" value={f.website} maxLength={LIMITS.website} onChange={(e: any) => setForm({ website: e.target.value })} placeholder="acme.com" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
+                    </label>
+                  </div>
                   <label style={css("display:flex; flex-direction:column; gap:6px;")}>
                     <span style={css("font-size:12px; font-weight:500; color:#575753;")}>LinkedIn</span>
                     <Box as="input" value={f.linkedin} maxLength={LIMITS.linkedin} onChange={(e: any) => setForm({ linkedin: e.target.value })} placeholder="linkedin.com/in/handle" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
@@ -2132,17 +2157,17 @@ export function SalesLoopCRM({
                     )}
                     hover={css("background:#f4f4f1; border-color:#c9c9c3;")}
                   >
-                    <input type="file" accept=".csv,text/csv" onChange={onCsvFileInput} style={css("display:none;")} />
+                    <input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onCsvFileInput} style={css("display:none;")} />
                     <span style={css("width:34px; height:34px; border-radius:9px; background:#eeeee9; color:#75756f; display:flex; align-items:center; justify-content:center;")}>
                       <IconUpload />
                     </span>
                     <div style={css("font-size:13px; font-weight:500; color:#3a3a38;")}>
-                      {S.csvFileName ? `Loaded ${S.csvFileName}` : "Drag & drop a .csv, or click to browse"}
+                      {S.csvFileName ? `Loaded ${S.csvFileName}` : "Drag & drop a .csv or .xlsx, or click to browse"}
                     </div>
                     <div style={css("font-size:11.5px; color:#a3a39d; line-height:1.5;")}>
                       {S.csvFileName
                         ? "Click Import contacts to finish - or drop another file."
-                        : "One contact per line: Name, Company, Loop, Owner, Status, Source, Email, Phone, LinkedIn"}
+                        : "With a header row, columns can be in any order and extra ones are ignored: Name, Company, Website, Job Title, Loop, Owner, Status, Source, Email, Phone, LinkedIn, Category, ARR. Without one, rows are read in that order minus Website and Job Title."}
                     </div>
                   </Box>
                   {(S.csvError || S.actionError) && (
