@@ -47,7 +47,7 @@
 // of the emails WE sent, and one real send plus one autoresponder trips the
 // two-unanswered-emails threshold after a single step of the sequence.
 
-import { REPLY_NOTE_PREFIX } from "./campaigns";
+import { REPLY_NOTE_PREFIX, SEND_NOTE_PREFIX } from "./campaigns";
 import type { Contact, Touch } from "./data";
 
 export const TODO_KINDS = [
@@ -239,6 +239,40 @@ function lastOutboundOn(c: Contact, ch: string): number | null {
   return null;
 }
 
+/**
+ * True when a touchpoint was written by the Smartlead sync rather than logged by
+ * a person.
+ *
+ * The third reader of the note prefix, alongside `isInbound` above and
+ * /analytics' campaign tab — and the same contract, which is why the constant is
+ * imported from ./campaigns.ts rather than spelled again. A touchpoint has no
+ * source column, so `recordContactSends`' "Sent by …" / "Sent step N of …" is
+ * the only thing separating a campaign's send from a rep pressing "Log touch".
+ *
+ * It gets one thing wrong, and in the safe direction: a rep whose hand-typed
+ * note happens to start with "Sent " ("Sent the deck over") reads as a campaign
+ * send, so the immediate rule below waits out SILENT_DAYS instead of firing.
+ * Later rather than wrongly, the same trade `isInbound` documents.
+ */
+function isCampaignSend(t: Touch): boolean {
+  return t.note.startsWith(SEND_NOTE_PREFIX);
+}
+
+/** How many emails a PERSON logged here by hand, rather than the campaign. */
+function countHandLoggedEmails(c: Contact): number {
+  let n = 0;
+  for (const t of c.touches) {
+    if (t.ch === "email" && !isInbound(t) && !isCampaignSend(t)) n++;
+  }
+  return n;
+}
+
+/** Days since the newest campaign send, or null if no campaign has sent here. */
+function lastCampaignSend(c: Contact): number | null {
+  for (const t of c.touches) if (t.ch === "email" && isCampaignSend(t)) return t.daysAgo;
+  return null;
+}
+
 /** How many times WE have used `ch`. Replies arriving on it do not count. */
 function countOutboundOn(c: Contact, ch: string): number {
   let n = 0;
@@ -402,7 +436,40 @@ export function nextTodo(c: Contact): TodoItem | null {
   // than one — see EMAILS_BEFORE_LINKEDIN — because one email is the first step
   // of a sequence, not a sequence, and the answer to silence after it is the
   // second email, which the campaign sends on its own.
-  const emailsIgnored = emailCount >= EMAILS_BEFORE_LINKEDIN && emailSilent;
+  const sequenceIgnored = emailCount >= EMAILS_BEFORE_LINKEDIN && emailSilent;
+
+  // TWO EMAILS SOMEBODY LOGGED BY HAND, and the wait does not apply to them.
+  //
+  // SILENT_DAYS exists for one stated reason: a campaign's steps are a few days
+  // apart, so acting sooner tells a rep to break into a sequence whose next
+  // email has not gone out yet. That reason is about the CAMPAIGN. A
+  // hand-logged email is not a step of anything — nothing is scheduled behind
+  // it, and there is no next send for a LinkedIn nudge to collide with. A rep
+  // who has personally written twice and heard nothing already knows the channel
+  // is not working; making them wait five days to be told so is the list lagging
+  // behind what its user can plainly see.
+  //
+  // The one thing the wait still protects is preserved exactly: if a campaign
+  // HAS sent recently, its sequence really is in flight, and this path stays
+  // shut until that goes quiet like any other. So the immediate rule only
+  // applies where the original rationale doesn't.
+  //
+  // `Meeting booked` is excluded for the same reason the open rule above
+  // excludes it, and it is the same property that forces the check: a rule with
+  // NO silence requirement fires the moment its inputs appear, so without this
+  // a rep who emails a contact twice on the day of their call is told to chase
+  // them on LinkedIn over the top of a meeting already in the calendar. The
+  // silence path below keeps firing on those contacts, deliberately — a booked
+  // meeting that has gone quiet for a week is still worth a nudge, which is a
+  // different situation from one that has not gone quiet at all.
+  const campaignDaysAgo = lastCampaignSend(c);
+  const sequenceInFlight = campaignDaysAgo !== null && campaignDaysAgo < SILENT_DAYS;
+  const handEmailsIgnored =
+    countHandLoggedEmails(c) >= EMAILS_BEFORE_LINKEDIN &&
+    !sequenceInFlight &&
+    c.status !== "Meeting booked";
+
+  const emailsIgnored = sequenceIgnored || handEmailsIgnored;
 
   if (openedDeep && linkedinCount === 0 && (c.linkedin || "").trim()) {
     return {
