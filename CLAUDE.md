@@ -129,6 +129,19 @@ over a shared shell:
   group is smaller than the open count on /analytics' campaign tab — the two figures are
   answering different questions and are not meant to match. Missing engagement is **unknown,
   never zero**: a contact no campaign has emailed has `openedStep` null.
+  **Two hand-logged emails skip the silence wait.** `SILENT_DAYS` exists for one stated
+  reason — a campaign's steps are days apart, so acting sooner tells a rep to break into a
+  sequence whose next email hasn't gone out. That reason is about the *campaign*: a
+  hand-logged email has nothing scheduled behind it, so there is no next send to collide
+  with, and a rep who has personally written twice already knows the channel isn't working.
+  `isCampaignSend` (the `SEND_NOTE_PREFIX` again — third reader of that constant) separates
+  the two. The original guard is preserved exactly where it still applies: if a campaign HAS
+  sent within `SILENT_DAYS` the sequence really is in flight and this path stays shut, and
+  `Meeting booked` is excluded for the same reason the `opened` rule excludes it — a rule
+  with **no silence requirement** fires the instant its inputs appear, so without that check
+  emailing someone twice on the day of their call tells you to chase them on LinkedIn over
+  the top of it. The silence path still nudges a booked meeting that has genuinely gone
+  quiet, which is a different situation.
   **Every count and every silence figure the ladder uses is OUTBOUND ONLY**, via `isInbound`
   — the `REPLY_NOTE_PREFIX` on the touchpoint note, imported from `campaigns.ts` because a
   touchpoint has no direction and no source column. An out-of-office autoresponder is filed
