@@ -11,12 +11,31 @@
 
 import { useEffect, useState } from "react";
 import { useFetcher } from "react-router";
-import type { CampaignChoice, LoopView, SenderView } from "../routes/smartlead";
+import type {
+  CampaignChoice,
+  LoopView,
+  OneOffAudience,
+  OneOffCampaign,
+  OneOffLoad,
+  OneOffTemplate,
+  SenderView,
+} from "../routes/smartlead";
 import type { Contact, Viewer } from "./data";
 import type { SequencePreview, SmartleadSender, WarmupTone } from "./smartlead-map";
 import { warmupTone } from "./smartlead-map";
 import { Sidebar, buildOwnerTabs, buildViewTabs } from "./sidebar";
-import { Box, GLOBAL_CSS, IconClose, IconPencil, IconPlus, IconWarn, MONO, css } from "./ui";
+import {
+  Box,
+  GLOBAL_CSS,
+  IconChevronRight,
+  IconClose,
+  IconPencil,
+  IconPlus,
+  IconUpload,
+  IconWarn,
+  MONO,
+  css,
+} from "./ui";
 // The client imports the same bounds the action enforces, so the wait box's
 // spinner and the copy editor's maxLength stop where the server would refuse —
 // the arrangement validate.ts documents for the CSV caps.
@@ -31,6 +50,8 @@ type ActionResult =
       campaigns?: CampaignChoice[];
       closed?: "editor";
       senders?: SenderView;
+      oneOffLoad?: OneOffLoad;
+      closedOneOff?: true;
     }
   | { ok: false; error: string };
 
@@ -87,6 +108,26 @@ type State = {
   /** Which loop's sequence-upload confirm is open. */
   confirmLoop: number | null;
   /**
+   * Which loop cards are collapsed, keyed by loop. Absent means COLLAPSED — the
+   * default is closed for both, so the page opens on the thing someone came here
+   * to do rather than on two screens of a sequence nobody is editing.
+   */
+  collapsed: Record<number, boolean>;
+  /** The one-off draft, or closed. See OneOffCampaigns below. */
+  oneOffOpen: boolean;
+  oneOffName: string;
+  /** The chosen email as "<templateId>|<slot>" — a one-off sends one variant. */
+  oneOffTemplate: string;
+  /** The chosen audience: a saved view's id, or "" for everyone. */
+  oneOffAudience: string;
+  /**
+   * What the server counted for that audience, or null for "not loaded yet".
+   *
+   * Cleared whenever the audience changes, so the figure above the Create button
+   * always belongs to the list currently selected.
+   */
+  oneOffLoad: OneOffLoad | null;
+  /**
    * Sequence-builder UI state, all keyed "<loop>:<step token>" so both cards
    * share one flat map — see stepKey() below.
    */
@@ -132,12 +173,18 @@ const stepKey = (loop: number, token: string) => `${loop}:${token}`;
 export function SmartleadPage({
   contacts,
   loops,
+  oneOffs,
+  oneOffTemplates,
+  oneOffAudiences,
   configured,
   maxLeadPush,
   viewer,
 }: {
   contacts: Contact[];
   loops: LoopView[];
+  oneOffs: OneOffCampaign[];
+  oneOffTemplates: OneOffTemplate[];
+  oneOffAudiences: OneOffAudience[];
   configured: boolean;
   maxLeadPush: number;
   viewer: Viewer;
@@ -153,6 +200,12 @@ export function SmartleadPage({
     newName: {},
     schedule: { 1: { ...DEFAULT_SCHEDULE }, 2: { ...DEFAULT_SCHEDULE } },
     confirmLoop: null,
+    collapsed: {},
+    oneOffOpen: false,
+    oneOffName: "",
+    oneOffTemplate: "",
+    oneOffAudience: "",
+    oneOffLoad: null,
     expanded: {},
     delayDrafts: {},
     addPick: {},
@@ -189,6 +242,20 @@ export function SmartleadPage({
         // A fetch that returned campaigns replaces the list; every other
         // successful action leaves it alone.
         ...(result.campaigns ? { campaigns: result.campaigns } : {}),
+        // Same discriminated arrangement as `closed: "editor"`: only the load
+        // that asked for a count sets one, and only the create that succeeded
+        // clears the draft — so a builder edit elsewhere on the page can't wipe
+        // a half-filled one-off form.
+        ...(result.oneOffLoad ? { oneOffLoad: result.oneOffLoad } : {}),
+        ...(result.closedOneOff
+          ? {
+              oneOffOpen: false,
+              oneOffName: "",
+              oneOffTemplate: "",
+              oneOffAudience: "",
+              oneOffLoad: null,
+            }
+          : {}),
       });
       // Merged, not replaced, and through the functional form: this is one
       // loop's answer, and the other card's list has to survive it.
@@ -237,7 +304,7 @@ export function SmartleadPage({
               Smartlead
             </div>
             <div style={css(MUTED + "margin-top:2px;")}>
-              One campaign per loop: contacts in, copy up, schedule set.
+              An always-on sequence per loop, plus one-off campaigns you send yourself.
             </div>
           </div>
         </div>
@@ -281,10 +348,52 @@ export function SmartleadPage({
 
         <div style={css("flex:1; overflow-y:auto; padding:16px 24px 40px;")}>
           <div style={css("display:flex; flex-direction:column; gap:16px; max-width:820px;")}>
+            {/*
+              Above the loops, because a one-off is the thing someone comes here
+              to do TODAY and the sequences are the thing that is already
+              running — which is also why both loop cards start collapsed.
+            */}
+            <OneOffCampaigns
+              campaigns={oneOffs}
+              templates={oneOffTemplates}
+              audiences={oneOffAudiences}
+              open={S.oneOffOpen}
+              name={S.oneOffName}
+              template={S.oneOffTemplate}
+              audience={S.oneOffAudience}
+              load={S.oneOffLoad}
+              disabled={!configured || pending}
+              pending={pending}
+              onOpen={(open) =>
+                patch({
+                  oneOffOpen: open,
+                  actionError: "",
+                  notice: "",
+                  // A cancelled draft is discarded whole; leaving the name and
+                  // the loaded count behind would offer them again beside a
+                  // Create button next time the panel opened.
+                  ...(open ? {} : { oneOffName: "", oneOffTemplate: "", oneOffAudience: "", oneOffLoad: null }),
+                })
+              }
+              onName={(oneOffName) => patch({ oneOffName })}
+              onTemplate={(oneOffTemplate) => patch({ oneOffTemplate })}
+              onAudience={(oneOffAudience) => patch({ oneOffAudience, oneOffLoad: null })}
+              onSubmit={submit}
+            />
+
             {shown.map((loopView) => (
               <LoopCard
                 key={loopView.loop}
                 view={loopView}
+                collapsed={S.collapsed[loopView.loop] ?? true}
+                onToggle={() =>
+                  patch({
+                    collapsed: {
+                      ...S.collapsed,
+                      [loopView.loop]: !(S.collapsed[loopView.loop] ?? true),
+                    },
+                  })
+                }
                 configured={configured}
                 pending={pending}
                 maxLeadPush={maxLeadPush}
@@ -348,6 +457,8 @@ export function SmartleadPage({
 
 function LoopCard({
   view,
+  collapsed,
+  onToggle,
   configured,
   pending,
   maxLeadPush,
@@ -378,6 +489,8 @@ function LoopCard({
   onConfirmUpload,
 }: {
   view: LoopView;
+  collapsed: boolean;
+  onToggle: () => void;
   configured: boolean;
   pending: boolean;
   maxLeadPush: number;
@@ -429,40 +542,82 @@ function LoopCard({
           "padding:14px 18px; display:flex; align-items:center; justify-content:space-between; gap:12px;",
         )}
       >
-        <div>
-          <div style={css("font-size:13.5px; font-weight:600;")}>
-            Loop {loop}{" "}
-            <span style={css("font-weight:450; color:#9a9a95;")}>· {loopName}</span>
-          </div>
-          <div style={css(MUTED + "margin-top:3px;")}>
-            {binding ? (
-              <>
-                {binding.campaignName || "Untitled campaign"}{" "}
-                <span style={css(MONO)}>#{binding.campaignId}</span>
-              </>
-            ) : (
-              "Not linked to a campaign yet."
+        {/*
+          The header is the disclosure control for the whole card. A real
+          <button> rather than a click handler on the div, so it is reachable by
+          keyboard and announces its state — the same reason lifecycle-page.tsx
+          keeps a "Move to" menu beside its drag-and-drop.
+        */}
+        <Box
+          as="button"
+          type="button"
+          onClick={onToggle}
+          aria-expanded={!collapsed}
+          style={css(
+            "flex:1; min-width:0; display:flex; align-items:flex-start; gap:10px; padding:0; border:0; background:none; text-align:left; font-family:inherit; color:inherit; cursor:pointer;",
+          )}
+          hover={css("opacity:0.72;")}
+        >
+          <span
+            style={css(
+              "flex:0 0 auto; display:flex; color:#9a9a95; margin-top:1px; transition:transform 120ms ease;" +
+                (collapsed ? "" : "transform:rotate(90deg);"),
             )}
+          >
+            <IconChevronRight />
+          </span>
+          <span style={css("min-width:0;")}>
+            <span style={css("display:block; font-size:13.5px; font-weight:600;")}>
+              Loop {loop}{" "}
+              <span style={css("font-weight:450; color:#9a9a95;")}>· {loopName}</span>
+            </span>
+            <span style={css(MUTED + "display:block; margin-top:3px;")}>
+              {binding ? (
+                <>
+                  {binding.campaignName || "Untitled campaign"}{" "}
+                  <span style={css(MONO)}>#{binding.campaignId}</span>
+                </>
+              ) : (
+                "Not linked to a campaign yet."
+              )}
+            </span>
+          </span>
+        </Box>
+        {collapsed ? (
+          // What the card would say if it were open, in one line: how long the
+          // sequence is and how many people are waiting to enter it. Those are
+          // the two figures that decide whether it is worth opening.
+          <div style={css(MONO + "flex:0 0 auto; font-size:11.5px; color:#9a9a95;")}>
+            {sequence.stepCount} step{sequence.stepCount === 1 ? "" : "s"} ·{" "}
+            {leads.eligible} ready to push
           </div>
-        </div>
-        {binding && (
-          <div style={css("display:flex; gap:6px; flex:0 0 auto;")}>
-            {(["START", "PAUSED", "STOPPED"] as const).map((status) => (
-              <Box
-                as="button"
-                key={status}
-                disabled={disabled}
-                onClick={() => post({ intent: "setCampaignStatus", status })}
-                style={css(GHOST)}
-                hover={css("background:#f4f4f1;")}
-              >
-                {status === "START" ? "Start" : status === "PAUSED" ? "Pause" : "Stop"}
-              </Box>
-            ))}
-          </div>
+        ) : (
+          binding && (
+            <div style={css("display:flex; gap:6px; flex:0 0 auto;")}>
+              {(["START", "PAUSED", "STOPPED"] as const).map((status) => (
+                <Box
+                  as="button"
+                  key={status}
+                  disabled={disabled}
+                  onClick={() => post({ intent: "setCampaignStatus", status })}
+                  style={css(GHOST)}
+                  hover={css("background:#f4f4f1;")}
+                >
+                  {status === "START" ? "Start" : status === "PAUSED" ? "Pause" : "Stop"}
+                </Box>
+              ))}
+            </div>
+          )
         )}
       </div>
 
+      {/*
+        Collapsed hides the sections rather than rendering them behind a height
+        of zero: the sequence builder holds a drag-and-drop list and an open copy
+        editor, and neither should be tabbable while the card reads as shut.
+      */}
+      {collapsed ? null : (
+        <>
       {/* --- Campaign binding ------------------------------------------- */}
       <div style={css(SECTION)}>
         <div style={css(COL_LABEL)}>Campaign</div>
@@ -817,6 +972,8 @@ function LoopCard({
           <div style={css(MUTED + "margin-top:5px;")}>{binding.lastResult}</div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }
@@ -826,6 +983,357 @@ function Stat({ label, value }: { label: string; value: number }) {
     <span style={css("font-size:12px; color:#575753;")}>
       <span style={css(MONO + "font-weight:500; color:#1a1a1a;")}>{value}</span> {label}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// One-off campaigns
+// ---------------------------------------------------------------------------
+
+const CHIP =
+  "padding:6px 11px; border:1px solid #e2e2dd; background:#fff; border-radius:8px; font-size:12px; color:#3a3a38; cursor:pointer; font-family:inherit;";
+const CHIP_ON =
+  "padding:6px 11px; border:1px solid #1a1a1a; background:#1a1a1a; border-radius:8px; font-size:12px; color:#fff; cursor:pointer; font-family:inherit;";
+
+/**
+ * One sentence naming everyone the load left out.
+ *
+ * Printed beside the count rather than instead of it. "97 leads loaded" on its
+ * own is a number nobody can check; the same number with its arithmetic shown is
+ * what catches an audience that is quietly half the size it should be.
+ */
+function exclusionNote(load: OneOffLoad): string {
+  const parts: string[] = [];
+  if (load.noEmail) parts.push(`${load.noEmail} with no email on file`);
+  if (load.duplicates) parts.push(`${load.duplicates} sharing an address with someone else`);
+  for (const [status, count] of Object.entries(load.excluded)) {
+    parts.push(`${count} marked ${status}`);
+  }
+  if (!parts.length) return "Leads with no email on file are excluded.";
+  return `Excluded: ${parts.join(", ")}.`;
+}
+
+/**
+ * Create and track campaigns that are not a sequence.
+ *
+ * A one-off is one email to a loaded list, sent once — an event invite, a launch
+ * note, a "we'll be at the show" — and it does not fit the loop cards below,
+ * which model an always-on sequence bound to a loop by schema (migration 0009).
+ * See migration 0024 for why it is a separate object rather than a loop
+ * temporarily re-pointed at a throwaway campaign.
+ *
+ * The draft is a three-step form, in this order, each step refused until the one
+ * before it is answered:
+ *
+ *   1. a name, which is what the campaign is called in Smartlead;
+ *   2. the email, picked per VARIANT rather than per template — an A/B template
+ *      holds two different emails and a blast sends exactly one of them;
+ *   3. the audience, loaded by pressing a button.
+ *
+ * That third step is a real round trip, not a client-side count. The chips carry
+ * the loader's figures, which are as old as the page — someone importing a CSV
+ * in another tab makes them wrong — and the number this prints sits directly
+ * above a button that emails real people. Loading re-asks the server, which
+ * resolves the audience exactly as the create will.
+ *
+ * Nothing here sends. Creating uploads the copy, sets a schedule and loads the
+ * leads, then stops — the same rule pushSequence follows, for a stronger reason:
+ * one button that created and sent would put the check on the copy after the
+ * send.
+ */
+function OneOffCampaigns({
+  campaigns,
+  templates,
+  audiences,
+  open,
+  name,
+  template,
+  audience,
+  load,
+  disabled,
+  pending,
+  onOpen,
+  onName,
+  onTemplate,
+  onAudience,
+  onSubmit,
+}: {
+  campaigns: OneOffCampaign[];
+  templates: OneOffTemplate[];
+  audiences: OneOffAudience[];
+  open: boolean;
+  name: string;
+  template: string;
+  audience: string;
+  load: OneOffLoad | null;
+  disabled: boolean;
+  pending: boolean;
+  onOpen: (open: boolean) => void;
+  onName: (value: string) => void;
+  onTemplate: (value: string) => void;
+  onAudience: (value: string) => void;
+  onSubmit: (fields: Record<string, string>) => void;
+}) {
+  const chosen = templates.find((t) => `${t.templateId}|${t.slot}` === template) ?? null;
+  // A count belongs to the audience it was asked about. Changing the chips
+  // clears it in the page's state; this guard is the second half of that rule,
+  // so a stale figure can never be the one the Create button is pressed under.
+  const staged = load && load.audienceId === audience ? load : null;
+  const canCreate = Boolean(name.trim() && chosen && staged && staged.count > 0 && !disabled);
+
+  return (
+    <div style={css(CARD)}>
+      <div
+        style={css(
+          "padding:14px 18px; display:flex; align-items:center; justify-content:space-between; gap:12px;",
+        )}
+      >
+        <div>
+          <div style={css("font-size:13.5px; font-weight:600;")}>One-off campaigns</div>
+          <div style={css(MUTED + "margin-top:3px;")}>
+            A single email to a loaded list of leads, sent once.
+          </div>
+        </div>
+        <Box
+          as="button"
+          disabled={disabled && !open}
+          onClick={() => onOpen(!open)}
+          style={css(PRIMARY + "display:inline-flex; align-items:center; gap:6px; flex:0 0 auto;")}
+          hover={css("background:#333;")}
+        >
+          {open ? <IconClose size={13} /> : <IconPlus size={13} />}
+          {open ? "Cancel" : "New campaign"}
+        </Box>
+      </div>
+
+      {open && (
+        <div style={css(SECTION)}>
+          <label style={css("display:block;")}>
+            <span style={css(FIELD_LABEL)}>Campaign name</span>
+            <input
+              value={name}
+              maxLength={LIMITS.campaignName}
+              placeholder="Expo West one-off blast"
+              disabled={disabled}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => onName(e.target.value)}
+              style={css(INPUT)}
+            />
+          </label>
+
+          <label style={css("display:block; margin-top:11px;")}>
+            <span style={css(FIELD_LABEL)}>Email to send</span>
+            <select
+              value={template}
+              disabled={disabled || !templates.length}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onTemplate(e.target.value)}
+              style={css(INPUT)}
+            >
+              <option value="">
+                {templates.length ? "Choose a template…" : "No template has copy written yet"}
+              </option>
+              {templates.map((t) => (
+                <option key={`${t.templateId}|${t.slot}`} value={`${t.templateId}|${t.slot}`}>
+                  {t.name} · {t.slot} · Loop {t.loop}
+                  {t.status === "concluded" ? " · concluded" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          {chosen && (
+            // The subject line, because two variants of one template are
+            // otherwise told apart only by a letter.
+            <div style={css(MUTED + "margin-top:5px;")}>
+              Subject: {chosen.subject || "(no subject written)"}
+            </div>
+          )}
+
+          <div
+            style={css(
+              "margin-top:13px; display:flex; align-items:center; justify-content:space-between; gap:8px;",
+            )}
+          >
+            <div style={css(FIELD_LABEL + "margin-bottom:0;")}>Who it goes to</div>
+            <Box
+              as="button"
+              disabled={disabled}
+              onClick={() => onSubmit({ intent: "loadOneOffLeads", viewId: audience })}
+              style={css(GHOST + "display:inline-flex; align-items:center; gap:6px;")}
+              hover={css("background:#f4f4f1;")}
+            >
+              <IconUpload />
+              Import leads
+            </Box>
+          </div>
+
+          <div style={css("margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;")}>
+            {audiences.map((option) => (
+              <Box
+                as="button"
+                key={option.id || "all"}
+                disabled={disabled}
+                onClick={() => onAudience(option.id)}
+                style={css(option.id === audience ? CHIP_ON : CHIP)}
+                hover={css(option.id === audience ? "background:#333;" : "background:#f4f4f1;")}
+              >
+                {option.name} ({option.eligible})
+              </Box>
+            ))}
+          </div>
+          {audiences.length === 1 && (
+            <div style={css(MUTED + "margin-top:6px;")}>
+              Save a view on Contacts to reuse it here.
+            </div>
+          )}
+        </div>
+      )}
+
+      {open && staged && (
+        <>
+          <div
+            style={css(
+              SECTION +
+                "display:flex; align-items:center; justify-content:space-between; gap:12px;",
+            )}
+          >
+            <div>
+              <div style={css(MONO + "font-size:13px; color:#1a1a1a;")}>
+                {staged.count} lead{staged.count === 1 ? "" : "s"} loaded
+              </div>
+              <div style={css(MUTED + "margin-top:3px;")}>
+                {staged.audienceName}. {exclusionNote(staged)}
+              </div>
+            </div>
+            <Box
+              as="button"
+              disabled={!canCreate || pending}
+              onClick={() => {
+                if (!chosen) return;
+                onSubmit({
+                  intent: "createOneOff",
+                  name: name.trim(),
+                  templateId: chosen.templateId,
+                  slot: chosen.slot,
+                  viewId: audience,
+                });
+              }}
+              style={css(PRIMARY + "flex:0 0 auto;")}
+              hover={css("background:#333;")}
+            >
+              Create campaign
+            </Box>
+          </div>
+          <div style={css("padding:0 18px 14px;")}>
+            <div style={css(MUTED)}>
+              Creating uploads the copy, loads the leads and sets a weekday 9–5 ET
+              schedule — and stops there. Assign a mailbox in Smartlead, check the email,
+              then press Start.
+            </div>
+          </div>
+        </>
+      )}
+
+      {campaigns.map((campaign) => (
+        <OneOffRow
+          key={campaign.id}
+          campaign={campaign}
+          disabled={disabled}
+          onSubmit={onSubmit}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * One campaign this page created, and the three things that can still be done to
+ * it: start or pause it, read back what it sent, and stop listing it.
+ *
+ * There is no mailbox control here, unlike the loop cards' SENDERS section. That
+ * section is written against a loop's binding and a one-off has no loop, so
+ * assigning a mailbox to one is done in Smartlead — which the create message
+ * says out loud, rather than leaving a Start button that quietly does nothing.
+ */
+function OneOffRow({
+  campaign,
+  disabled,
+  onSubmit,
+}: {
+  campaign: OneOffCampaign;
+  disabled: boolean;
+  onSubmit: (fields: Record<string, string>) => void;
+}) {
+  return (
+    <div style={css(SECTION)}>
+      <div
+        style={css(
+          "display:flex; align-items:flex-start; justify-content:space-between; gap:12px;",
+        )}
+      >
+        <div style={css("min-width:0;")}>
+          <div style={css("font-size:13px; font-weight:600;")}>
+            {campaign.campaignName || "Untitled campaign"}{" "}
+            <span style={css(MONO + "font-weight:450; color:#9a9a95;")}>
+              #{campaign.campaignId}
+            </span>
+          </div>
+          <div style={css(MUTED + "margin-top:3px;")}>
+            {campaign.leadCount} lead{campaign.leadCount === 1 ? "" : "s"} ·{" "}
+            {campaign.audience}
+            {campaign.createdLabel ? ` · created ${campaign.createdLabel}` : ""}
+            {campaign.createdBy ? ` by ${campaign.createdBy}` : ""}
+            {campaign.statsSyncedLabel
+              ? ` · synced ${campaign.statsSyncedLabel}`
+              : " · never synced"}
+          </div>
+        </div>
+        <div
+          style={css(
+            "display:flex; gap:6px; flex:0 0 auto; flex-wrap:wrap; justify-content:flex-end;",
+          )}
+        >
+          {(["START", "PAUSED"] as const).map((status) => (
+            <Box
+              as="button"
+              key={status}
+              disabled={disabled}
+              onClick={() =>
+                onSubmit({
+                  intent: "setOneOffStatus",
+                  campaignId: campaign.campaignId,
+                  status,
+                })
+              }
+              style={css(GHOST)}
+              hover={css("background:#f4f4f1;")}
+            >
+              {status === "START" ? "Start" : "Pause"}
+            </Box>
+          ))}
+          <Box
+            as="button"
+            disabled={disabled}
+            onClick={() => onSubmit({ intent: "syncOneOff", campaignId: campaign.campaignId })}
+            style={css(GHOST)}
+            hover={css("background:#f4f4f1;")}
+          >
+            Sync
+          </Box>
+          <Box
+            as="button"
+            disabled={disabled}
+            onClick={() => onSubmit({ intent: "forgetOneOff", oneOffId: campaign.id })}
+            title="Stop listing it here. Nothing in Smartlead is deleted."
+            style={css(GHOST)}
+            hover={css("background:#f4f4f1;")}
+          >
+            Forget
+          </Box>
+        </div>
+      </div>
+      {campaign.lastResult && (
+        <div style={css(MUTED + "margin-top:6px;")}>{campaign.lastResult}</div>
+      )}
+    </div>
   );
 }
 

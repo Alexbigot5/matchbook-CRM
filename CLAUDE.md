@@ -68,11 +68,13 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    campaign bindings and the sequence-builder steps against one `now`, and **makes no
    Smartlead calls**: a loader that reaches a third party makes the page 500 whenever that
    party is down, and every operation here is a manual button anyway. Its `action` has
-   twenty intents (see "Smartlead" below) and is the only session-gated action carrying a
-   rate limiter — two of them, in fact: the seven builder/copy-editor intents touch nothing
-   but D1 and are metered on their own far looser bucket (`SMARTLEAD_BUILDER_RULE`), listed in
-   the `BUILDER_INTENTS` set. Add a builder intent without adding it there and ordinary
-   editing burns the push budget.
+   twenty-five intents (see "Smartlead" below) and is the only session-gated action carrying a
+   rate limiter — two of them, in fact: the nine builder/copy-editor/one-off-draft intents touch
+   nothing but D1 and are metered on their own far looser bucket (`SMARTLEAD_BUILDER_RULE`),
+   listed in the `BUILDER_INTENTS` set. Add a builder intent without adding it there and
+   ordinary editing burns the push budget. A second set, `ONE_OFF_INTENTS`, lists the five that
+   address a campaign by its own id rather than by loop and so must skip the "pick a loop
+   first" guard.
 
 9. `app/routes/settings.tsx` — the `/settings` loader reads contacts (sidebar counts only),
    the stored Unipile sync state and the unread-reply count, and — like `/smartlead`'s —
@@ -289,9 +291,27 @@ over a shared shell:
   loop's campaign — `loops` is not exclusive (`resumeToLoop1` keeps Loop 2 while
   adding Loop 1), so without that guard a resumed contact gets two concurrent
   sequences. Variant key names are in the single `SEQ_VARIANT_KEYS` const.
-- **`smartlead-page.tsx`** — the `/smartlead` UI, same one-client-component idiom. One
-  card per loop: campaign binding, the mailboxes it sends from, the sequence builder,
-  contact eligibility, schedule, stats. The builder (`SequenceBuilder`) is a reorderable step list — native HTML5 drag
+  `planOneOffLeads`/`buildOneOffStep` are the one-off half, and the first differs from
+  `planLeads` on purpose: a one-off excludes only `Dead` (`ONE_OFF_EXCLUDED_STATUSES`, not
+  `PUSHABLE_STATUSES`), because "we'll be at the show" is exactly what you send to someone
+  who already replied or bought, while an unsubscribe must never be mailed. It also excludes
+  a **duplicate address** — two contact rows sharing one inbox is common after a CSV import
+  and a blast that mails it twice is the visible half of the mistake — and it does **not**
+  exclude contacts already in a loop campaign, since a one-off alongside a running sequence
+  is the normal case.
+- **`smartlead-page.tsx`** — the `/smartlead` UI, same one-client-component idiom. A
+  **one-off card** on top, then one card per loop: campaign binding, the mailboxes it sends
+  from, the sequence builder, contact eligibility, schedule, stats. **Both loop cards start
+  collapsed** — the sequences are what is already running, the one-off is what someone came
+  here to do today — and the collapsed header carries the two figures that decide whether to
+  open it (step count, leads ready to push). The header is a real `<button>` with
+  `aria-expanded`, and a collapsed card renders `null` rather than hiding at height zero, so
+  the builder's drag list and copy editor aren't tabbable behind a closed card.
+  `OneOffCampaigns` is a three-step draft (name → email → audience) where **loading the
+  audience is a server round trip, not the loader's chip count**: the chips are as old as the
+  page and the number printed above the Create button emails real people. The staged count is
+  discarded the moment the audience chips change, and guarded again at render by
+  `load.audienceId === audience`. The builder (`SequenceBuilder`) is a reorderable step list — native HTML5 drag
   plus ↑/↓ buttons as the **keyboard path**, the same pairing `lifecycle-page.tsx`
   documents — with a per-step variant chip, an editable wait, an expandable copy preview
   and a template picker. The expanded preview also carries an **Edit** button per variant,
@@ -561,6 +581,39 @@ is the only one of the five that never leaves D1.
   hand-entered figure. If the campaign has more rows than the page budget the sync writes
   **nothing**: these are absolute totals, so a partial aggregate reads as a collapse in
   performance rather than as missing data.
+- **`migrations/0024_smartlead_one_offs.sql` — a campaign that isn't a sequence.** 0009 made
+  "one campaign per loop" a schema fact, which is right for an always-on sequence and cannot
+  model the other thing an operator does: one email to a list, once ("we're at Expo West next
+  week"). Through a loop binding that would mean re-pointing Loop 2 at a throwaway, wiping its
+  sequence, blasting and putting it all back — losing the loop's own history on the way. So a
+  one-off is **its own row, not keyed on loop**, and there can be as many as someone sends.
+  - **`smartlead_leads` and `smartlead_email_events` are shared, deliberately.** Both are
+    keyed on `campaign_id` and know nothing about loops, so `listCampaignLeadState`,
+    `recordContactSends` and `upsertEmailEvents` work unchanged — which is what makes a
+    one-off's sends land on contact timelines like any other. The unique
+    `(contact_id, campaign_id)` index also means a contact can be in a one-off *and* a loop
+    campaign at once, which is the point.
+  - **The template counters are the one thing NOT shared.** `syncOneOff` runs two of
+    `syncStats`' three halves and skips `recordVariantStats`: those are absolute lifetime
+    totals per (template, slot), and a one-off usually reuses copy a loop campaign is also
+    sending, so writing the blast's numbers there would replace the sequence's with the
+    blast's. Same failure `duplicateStatKeys` prevents, from a different direction. The
+    result line says so, rather than leaving someone wondering why /templates didn't move.
+  - **The row is written the instant Smartlead returns an id** — before the sequence upload,
+    the schedule and the leads, all of which can fail. A campaign that exists upstream with no
+    row here is one the operator can't see and would create a second copy of on the next press.
+  - **Creating never sends.** It uploads the copy, sets a schedule (weekday business hours,
+    `max_new_leads_per_day` = the list size, since pacing one announcement at 40/day spreads
+    "we're at the show next week" over a fortnight) and loads the leads, then stops. Same rule
+    as `pushSequence`, for a stronger reason: one button that created and sent would put the
+    check on the copy *after* the send. **Mailboxes are not assignable per one-off** — the
+    SENDERS section is written against a loop's binding — so the create message says to assign
+    one in Smartlead rather than leaving a Start button that quietly does nothing.
+  - **An audience larger than `MAX_LEAD_PUSH` is refused, not truncated.** A loop's push
+    reports a remainder and is pressed again; pressing Create again would make a *second*
+    campaign, so a silently truncated one-off is a blast that missed half its list.
+  - **"Forget" drops the row only.** Nothing in Smartlead is touched and the `smartlead_leads`
+    rows stay, for exactly the reason `unbindCampaign` keeps them.
 - **Nothing was added to `/api/hyperagent`.** The same rule that keeps template copy off
   that bearer token applies harder to a token that could re-point or start a campaign.
 

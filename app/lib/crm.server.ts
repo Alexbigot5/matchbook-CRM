@@ -1832,6 +1832,185 @@ export async function recordPushedLeads(
 }
 
 // ---------------------------------------------------------------------------
+// One-off campaigns
+//
+// See migrations/0024_smartlead_one_offs.sql. A one-off is a whole campaign per
+// row rather than a binding, so none of the readers above apply to it — but
+// everything BELOW this section does, because the leads it pushes land in
+// `smartlead_leads` and its sends come back through the same per-campaign path
+// a loop's do.
+// ---------------------------------------------------------------------------
+
+export type OneOffCampaign = {
+  id: string;
+  campaignId: string;
+  campaignName: string;
+  /** What was uploaded as the single step, for the row's caption. */
+  templateId: string | null;
+  variantSlot: string | null;
+  /** How the recipients were chosen, e.g. "All contacts" or a view's name. */
+  audience: string;
+  leadCount: number;
+  /** "Jul 20"-style labels, precomputed here so no Date runs during render. */
+  createdLabel: string | null;
+  statsSyncedLabel: string | null;
+  lastResult: string | null;
+  createdBy: string | null;
+};
+
+type OneOffRow = {
+  id: string;
+  campaign_id: string;
+  campaign_name: string;
+  template_id: string | null;
+  variant_slot: string | null;
+  audience: string | null;
+  lead_count: number;
+  stats_synced_at: string | null;
+  last_result: string | null;
+  created_by: string | null;
+  created_at: string | null;
+};
+
+function oneOffLabel(raw: string | null): string | null {
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? null : dateLabel(ms);
+}
+
+/**
+ * Every one-off, newest first.
+ *
+ * `created_at` carries the column default, which SQLite writes as
+ * 'YYYY-MM-DD HH:MM:SS' with no timezone designator — parsed here as UTC, which
+ * is what it is. That is safe for a "Jul 20" label and would not be for a time of
+ * day, which is why none is rendered.
+ */
+export async function listOneOffCampaigns(
+  db: D1Database,
+  now: number,
+): Promise<OneOffCampaign[]> {
+  const res = await db
+    .prepare(
+      `SELECT id, campaign_id, campaign_name, template_id, variant_slot, audience,
+              lead_count, stats_synced_at, last_result, created_by, created_at
+         FROM smartlead_one_offs
+        ORDER BY created_at DESC, id DESC`,
+    )
+    .all<OneOffRow>();
+
+  void now; // Accepted for symmetry with the other readers; labels are absolute.
+  return (res.results ?? []).map((row) => ({
+    id: row.id,
+    campaignId: row.campaign_id,
+    campaignName: row.campaign_name ?? "",
+    templateId: row.template_id,
+    variantSlot: row.variant_slot,
+    audience: row.audience ?? "",
+    leadCount: Number(row.lead_count) || 0,
+    createdLabel: oneOffLabel(row.created_at ? `${row.created_at.replace(" ", "T")}Z` : null),
+    statsSyncedLabel: oneOffLabel(row.stats_synced_at),
+    lastResult: row.last_result,
+    createdBy: row.created_by,
+  }));
+}
+
+/** One one-off by its Smartlead campaign id, or null. */
+export async function getOneOffCampaign(
+  db: D1Database,
+  campaignId: string,
+): Promise<OneOffCampaign | null> {
+  const all = await listOneOffCampaigns(db, Date.now());
+  return all.find((row) => row.campaignId === campaignId) ?? null;
+}
+
+/**
+ * Record a campaign this CRM just created in Smartlead.
+ *
+ * Called the instant Smartlead hands back an id — BEFORE the sequence is
+ * uploaded and before a single lead is pushed. The order matters: every step
+ * after this one can fail, and a campaign that exists upstream with no row here
+ * is one the operator cannot see, cannot sync and will create a second copy of
+ * on the next press. `INSERT OR IGNORE` on the unique campaign_id makes a retry
+ * that re-adopts the same campaign a no-op rather than a constraint error.
+ */
+export async function createOneOffCampaign(
+  db: D1Database,
+  input: {
+    campaignId: string;
+    campaignName: string;
+    templateId: string;
+    variantSlot: string;
+    audience: string;
+    createdBy: string;
+  },
+): Promise<string> {
+  const id = crypto.randomUUID();
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO smartlead_one_offs
+         (id, campaign_id, campaign_name, template_id, variant_slot, audience, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      input.campaignId,
+      str(input.campaignName),
+      input.templateId,
+      input.variantSlot,
+      str(input.audience).slice(0, 120),
+      str(input.createdBy),
+    )
+    .run();
+  return id;
+}
+
+/**
+ * Update what a one-off has done: leads pushed, the last result sentence, and
+ * optionally the sync stamp.
+ *
+ * `leadCount` is written with MAX() rather than assigned, for the same reason
+ * the Unipile watermark is: a second push adds to a campaign that already holds
+ * leads, and a failed re-push reporting 0 must not erase the record of the
+ * first. The stamp is an ISO string from JS — see the section header above.
+ */
+export async function recordOneOffResult(
+  db: D1Database,
+  campaignId: string,
+  update: { leadCount?: number; result: string; stampSync?: boolean },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE smartlead_one_offs
+          SET lead_count = MAX(lead_count, ?1),
+              last_result = ?2,
+              stats_synced_at = CASE WHEN ?3 = 1 THEN ?4 ELSE stats_synced_at END
+        WHERE campaign_id = ?5`,
+    )
+    .bind(
+      Math.max(0, update.leadCount ?? 0),
+      update.result.slice(0, 300),
+      update.stampSync ? 1 : 0,
+      new Date().toISOString(),
+      campaignId,
+    )
+    .run();
+}
+
+/**
+ * Forget a one-off.
+ *
+ * Nothing in Smartlead is touched and the `smartlead_leads` rows are kept, for
+ * exactly the reason unbindCampaign() keeps them: they record that those
+ * contacts were handed to that campaign and which of its sends have already been
+ * logged onto their timelines, both of which stay true after the CRM stops
+ * listing it.
+ */
+export async function deleteOneOffCampaign(db: D1Database, id: string): Promise<void> {
+  await db.prepare("DELETE FROM smartlead_one_offs WHERE id = ?").bind(id).run();
+}
+
+// ---------------------------------------------------------------------------
 // Smartlead sends -> contacts
 // ---------------------------------------------------------------------------
 //

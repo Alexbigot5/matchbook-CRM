@@ -1243,3 +1243,155 @@ export function planContactSends(
 
   return updates;
 }
+
+// ---------------------------------------------------------------------------
+// One-off campaigns
+// ---------------------------------------------------------------------------
+//
+// A one-off is a campaign with exactly one step, created for one send and never
+// edited again — "we're at Expo West next week", not an always-on sequence. See
+// migrations/0024_smartlead_one_offs.sql for why it is its own object rather
+// than a loop binding pointed at a throwaway campaign.
+//
+// Everything below is the same translation the sequence path does, narrowed to
+// the single-step case. It goes through the same `toHtmlBody` and the same
+// flattened-step shape (note 3 in the header), because a one-off is a normal
+// Smartlead campaign in every respect except that nobody will add a step two.
+
+/**
+ * Statuses a one-off must never be sent to.
+ *
+ * Deliberately NOT `PUSHABLE_STATUSES`. A cold sequence is refused to anyone
+ * mid-conversation because a second cold intro on top of a live thread is the
+ * embarrassment that set exists to prevent — but a one-off announcement is the
+ * opposite case: "we'll be at the show" is exactly what you send to the people
+ * who already replied, booked, or bought. So Replied / Meeting booked / Won stay
+ * in, and only `Dead` is held back, because that status is where an unsubscribe
+ * and a "never contact us again" land, and emailing those is the difference
+ * between a bug and a legal problem.
+ */
+export const ONE_OFF_EXCLUDED_STATUSES: ReadonlySet<string> = new Set(["Dead"]);
+
+export type OneOffLeadPlan = {
+  leads: SmartleadLeadPayload[];
+  /** Contact ids, index-aligned with `leads`, for recording the push. */
+  contactIds: string[];
+  /** Contacts considered, before any exclusion. */
+  total: number;
+  noEmail: number;
+  /** Held back by status, counted per status so the page can say which. */
+  excluded: Record<string, number>;
+  /** Second and later contacts sharing one address — one send, not two. */
+  duplicates: number;
+};
+
+/**
+ * Decide who a one-off goes to, and shape them as leads.
+ *
+ * `contacts` is already the chosen audience (every contact, or a saved view's
+ * members resolved server-side — the client names a segment, never a recipient
+ * list; the same rule pushContacts states). Three exclusions apply, and each is
+ * reported rather than silently applied:
+ *
+ *   * no email on file — there is nothing to send to;
+ *   * `Dead` — see ONE_OFF_EXCLUDED_STATUSES;
+ *   * a duplicate address — two contact rows sharing one inbox is common after a
+ *     CSV import, and a blast that mails that inbox twice is the visible half of
+ *     the mistake. The first contact wins, so the send still lands on somebody's
+ *     timeline.
+ *
+ * Note what is NOT excluded: contacts already in a loop campaign. planLeads()
+ * holds those back because two concurrent COLD SEQUENCES from two mailboxes is a
+ * double-send; a one-off announcement alongside a running sequence is the normal
+ * case, and refusing it would make the feature useless for the audience it
+ * exists for.
+ */
+export function planOneOffLeads(contacts: Contact[]): OneOffLeadPlan {
+  const leads: SmartleadLeadPayload[] = [];
+  const contactIds: string[] = [];
+  const excluded: Record<string, number> = {};
+  const seen = new Set<string>();
+  let noEmail = 0;
+  let duplicates = 0;
+
+  for (const contact of contacts) {
+    if (ONE_OFF_EXCLUDED_STATUSES.has(contact.status)) {
+      excluded[contact.status] = (excluded[contact.status] ?? 0) + 1;
+      continue;
+    }
+    const email = (contact.email ?? "").trim();
+    if (!email) {
+      noEmail++;
+      continue;
+    }
+    const key = email.toLowerCase();
+    if (seen.has(key)) {
+      duplicates++;
+      continue;
+    }
+    seen.add(key);
+
+    const { first, last } = splitName(contact.name);
+    const custom: Record<string, string> = {
+      crm_id: contact.id,
+      crm_loop: contact.loops.join(","),
+    };
+    if (contact.source) custom.crm_source = contact.source;
+    if (contact.owner) custom.crm_owner = contact.owner;
+
+    const lead: SmartleadLeadPayload = {
+      email,
+      first_name: first,
+      last_name: last,
+      company_name: contact.company ?? "",
+      custom_fields: custom,
+    };
+    // Omitted rather than sent empty, for the reason planLeads gives.
+    if (contact.phone) lead.phone_number = contact.phone;
+    if (contact.linkedin) lead.linkedin_profile = contact.linkedin;
+
+    leads.push(lead);
+    contactIds.push(contact.id);
+  }
+
+  return { leads, contactIds, total: contacts.length, noEmail, excluded, duplicates };
+}
+
+/**
+ * The one email a one-off sends, as the `sequences` payload.
+ *
+ * Always exactly one step, always `delay_in_days: 0`, always flattened onto the
+ * step — a one-off is by definition a single variant, so the A/B shape never
+ * applies and neither does the distribution arithmetic.
+ *
+ * `slot` is required rather than defaulted to "whatever has copy": an A/B
+ * template has two subject lines, and picking one for the operator would send
+ * real people copy nobody chose. The picker on the page offers one option per
+ * usable variant for exactly this reason.
+ */
+export function buildOneOffStep(
+  template: EmailTemplate,
+  slot: string,
+): { ok: true; step: SequenceStep; subject: string } | { ok: false; error: string } {
+  const variant = template.variants.find((v) => v.slot === slot);
+  if (!variant) {
+    return { ok: false, error: `“${template.name}” has no variant ${slot}.` };
+  }
+  if (!isUsable(variant)) {
+    return {
+      ok: false,
+      error: `“${template.name}” variant ${slot} has no subject or body written yet.`,
+    };
+  }
+  return {
+    ok: true,
+    subject: variant.subject,
+    step: {
+      id: null,
+      seq_number: 1,
+      seq_delay_details: { delay_in_days: 0 },
+      subject: variant.subject,
+      email_body: toHtmlBody(variant.body),
+    },
+  };
+}
