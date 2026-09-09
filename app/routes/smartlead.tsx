@@ -140,6 +140,16 @@ export type OneOffTemplate = {
   status: string;
   /** Shown under the picker so the chosen copy can be recognised before sending. */
   subject: string;
+  /**
+   * The copy itself, for the picker's Preview.
+   *
+   * `variantId` travels for the same reason it does on `SequencePreview`: the
+   * preview's Edit button writes back through the *same* saveVariant the
+   * Templates page and the sequence builder use. The copy has one home
+   * (`template_variants`) and this is a third door onto it, not a third store.
+   */
+  variantId: string;
+  body: string;
 };
 
 /**
@@ -333,6 +343,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
           loop: template.loop,
           status: template.status,
           subject: v.subject,
+          variantId: v.id,
+          body: v.body,
         })),
     );
 
