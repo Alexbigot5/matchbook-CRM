@@ -128,6 +128,15 @@ type State = {
    */
   oneOffLoad: OneOffLoad | null;
   /**
+   * Whether the chosen email's copy is open under the picker.
+   *
+   * Its own flag rather than a member of `expanded` (which is keyed by loop and
+   * step token) because a one-off has neither. It survives changing the
+   * template, so flipping between A and B compares two emails without pressing
+   * Preview twice.
+   */
+  oneOffPreview: boolean;
+  /**
    * Sequence-builder UI state, all keyed "<loop>:<step token>" so both cards
    * share one flat map — see stepKey() below.
    */
@@ -206,6 +215,7 @@ export function SmartleadPage({
     oneOffTemplate: "",
     oneOffAudience: "",
     oneOffLoad: null,
+    oneOffPreview: false,
     expanded: {},
     delayDrafts: {},
     addPick: {},
@@ -254,6 +264,7 @@ export function SmartleadPage({
               oneOffTemplate: "",
               oneOffAudience: "",
               oneOffLoad: null,
+              oneOffPreview: false,
             }
           : {}),
       });
@@ -362,6 +373,10 @@ export function SmartleadPage({
               template={S.oneOffTemplate}
               audience={S.oneOffAudience}
               load={S.oneOffLoad}
+              preview={S.oneOffPreview}
+              editing={S.editing}
+              editSubject={S.editSubject}
+              editBody={S.editBody}
               disabled={!configured || pending}
               pending={pending}
               onOpen={(open) =>
@@ -372,12 +387,34 @@ export function SmartleadPage({
                   // A cancelled draft is discarded whole; leaving the name and
                   // the loaded count behind would offer them again beside a
                   // Create button next time the panel opened.
-                  ...(open ? {} : { oneOffName: "", oneOffTemplate: "", oneOffAudience: "", oneOffLoad: null }),
+                  ...(open
+                    ? {}
+                    : {
+                        oneOffName: "",
+                        oneOffTemplate: "",
+                        oneOffAudience: "",
+                        oneOffLoad: null,
+                        oneOffPreview: false,
+                        editing: null,
+                      }),
                 })
               }
               onName={(oneOffName) => patch({ oneOffName })}
-              onTemplate={(oneOffTemplate) => patch({ oneOffTemplate })}
+              // Picking a different email closes the copy editor: it was open on
+              // the variant that is no longer selected, and a half-typed body
+              // saved from there would land on the email nobody is sending.
+              onTemplate={(oneOffTemplate) => patch({ oneOffTemplate, editing: null })}
+              onPreview={(oneOffPreview) => patch({ oneOffPreview, editing: null })}
               onAudience={(oneOffAudience) => patch({ oneOffAudience, oneOffLoad: null })}
+              onEdit={(variant) =>
+                patch({
+                  editing: variant ? variant.variantId : null,
+                  editSubject: variant?.subject ?? "",
+                  editBody: variant?.body ?? "",
+                  actionError: "",
+                })
+              }
+              onEditField={(field) => patch(field)}
               onSubmit={submit}
             />
 
@@ -1050,12 +1087,19 @@ function OneOffCampaigns({
   template,
   audience,
   load,
+  preview,
+  editing,
+  editSubject,
+  editBody,
   disabled,
   pending,
   onOpen,
   onName,
   onTemplate,
+  onPreview,
   onAudience,
+  onEdit,
+  onEditField,
   onSubmit,
 }: {
   campaigns: OneOffCampaign[];
@@ -1066,12 +1110,19 @@ function OneOffCampaigns({
   template: string;
   audience: string;
   load: OneOffLoad | null;
+  preview: boolean;
+  editing: string | null;
+  editSubject: string;
+  editBody: string;
   disabled: boolean;
   pending: boolean;
   onOpen: (open: boolean) => void;
   onName: (value: string) => void;
   onTemplate: (value: string) => void;
+  onPreview: (open: boolean) => void;
   onAudience: (value: string) => void;
+  onEdit: (variant: SequencePreview | null) => void;
+  onEditField: (field: { editSubject?: string; editBody?: string }) => void;
   onSubmit: (fields: Record<string, string>) => void;
 }) {
   const chosen = templates.find((t) => `${t.templateId}|${t.slot}` === template) ?? null;
@@ -1120,13 +1171,36 @@ function OneOffCampaigns({
             />
           </label>
 
-          <label style={css("display:block; margin-top:11px;")}>
-            <span style={css(FIELD_LABEL)}>Email to send</span>
+          <div style={css("margin-top:11px;")}>
+            <div
+              style={css(
+                "display:flex; align-items:center; justify-content:space-between; gap:8px;",
+              )}
+            >
+              {/*
+                An `htmlFor` pairing rather than a wrapping <label> like the
+                fields around it: the Preview button sits on this row, and a
+                button inside a label steals its own click to focus the select.
+              */}
+              <label htmlFor="oneoff-email" style={css(FIELD_LABEL + "margin-bottom:0;")}>
+                Email to send
+              </label>
+              <Box
+                as="button"
+                disabled={disabled || !chosen}
+                onClick={() => onPreview(!preview)}
+                style={css(GHOST + "display:inline-flex; align-items:center; gap:5px;")}
+                hover={css("background:#f4f4f1;")}
+              >
+                {preview ? "Hide preview" : "Preview"}
+              </Box>
+            </div>
             <select
+              id="oneoff-email"
               value={template}
               disabled={disabled || !templates.length}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onTemplate(e.target.value)}
-              style={css(INPUT)}
+              style={css(INPUT + "margin-top:4px;")}
             >
               <option value="">
                 {templates.length ? "Choose a template…" : "No template has copy written yet"}
@@ -1138,14 +1212,61 @@ function OneOffCampaigns({
                 </option>
               ))}
             </select>
-          </label>
-          {chosen && (
-            // The subject line, because two variants of one template are
-            // otherwise told apart only by a letter.
-            <div style={css(MUTED + "margin-top:5px;")}>
-              Subject: {chosen.subject || "(no subject written)"}
-            </div>
-          )}
+          </div>
+
+          {chosen &&
+            (preview ? (
+              /*
+                The same StepCopy the sequence builder expands under a step, and
+                deliberately so — this is a blast that cannot be edited after it
+                goes out, which makes reading the copy before pressing Create
+                more load-bearing here than it is there, not less.
+
+                Its Edit writes through the same saveVariant the Templates page
+                uses, so the copy still has exactly one home. The `loop` posted
+                with it is the TEMPLATE's loop: the intent is metered and
+                validated per loop, and the template belongs to one whether or
+                not this campaign does. Saving revalidates the loader, so the
+                copy this draft will upload is the copy just saved.
+              */
+              <div
+                style={css(
+                  "margin-top:9px; padding:11px 12px; background:#fafaf8; border:1px solid #ededea; border-radius:10px;",
+                )}
+              >
+                <StepCopy
+                  variant={{
+                    variantId: chosen.variantId,
+                    slot: chosen.slot,
+                    subject: chosen.subject,
+                    body: chosen.body,
+                  }}
+                  showSlot
+                  disabled={disabled}
+                  editing={editing === chosen.variantId}
+                  subject={editSubject}
+                  body={editBody}
+                  onEdit={onEdit}
+                  onField={onEditField}
+                  onSave={() =>
+                    onSubmit({
+                      intent: "saveVariant",
+                      loop: String(chosen.loop),
+                      templateId: chosen.templateId,
+                      variantId: chosen.variantId,
+                      subject: editSubject,
+                      body: editBody,
+                    })
+                  }
+                />
+              </div>
+            ) : (
+              // Collapsed, the subject alone — two variants of one template are
+              // otherwise told apart only by a letter.
+              <div style={css(MUTED + "margin-top:5px;")}>
+                Subject: {chosen.subject || "(no subject written)"}
+              </div>
+            ))}
 
           <div
             style={css(
