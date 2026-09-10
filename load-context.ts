@@ -13,6 +13,7 @@ type IntegrationEnv = {
   RESEND_API_KEY?: string;
   AUTH_EMAIL_FROM?: string;
   SMARTLEAD_API_KEY?: string;
+  SMARTLEAD_WEBHOOK_SECRET?: string;
   ORIGAMI_API_KEY?: string;
   ORIGAMI_PROJECT_ID?: string;
   UNIPILE_API_KEY?: string;
@@ -44,6 +45,12 @@ export function getLoadContext(env: Env, request: Request) {
     // Smartlead (app/lib/smartlead.server.ts). Same "" = disabled convention:
     // /smartlead renders and explains itself rather than erroring.
     SMARTLEAD_API_KEY: e.SMARTLEAD_API_KEY ?? "",
+    // The shared secret Smartlead's webhooks must carry (?token=…) to reach
+    // POST /api/smartlead/webhook — the Replies inbox's only way in. Smartlead
+    // does not sign deliveries, so this IS the authentication. "" = the endpoint
+    // refuses everything (503), never "accept unauthenticated". Trimmed for the
+    // reason UNIPILE_API_KEY is below: a whitespace-only secret must read as unset.
+    SMARTLEAD_WEBHOOK_SECRET: (e.SMARTLEAD_WEBHOOK_SECRET ?? "").trim(),
     // The prospecting agent (app/lib/origami.server.ts). Same "" = disabled
     // convention again: the panel opens and explains itself rather than
     // erroring, and this key must NOT join REQUIRED_BINDINGS in workers/app.ts —

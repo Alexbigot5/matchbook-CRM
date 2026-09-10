@@ -41,7 +41,9 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    derived per request; `getAuth()` is lazy so non-auth requests don't construct better-auth.
 3. `app/routes.ts` — route table: index → `routes/home.tsx`, `/lifecycle`, `/analytics`,
    `/templates`, `/smartlead`, `/settings`, plus `/login`, `/logout`, `/api/auth/*`
-   (better-auth's handler) and `/api/hyperagent`.
+   (better-auth's handler), `/api/hyperagent`, `/api/prospect`, the `/api/replies/*` JSON
+   routes behind /analytics' Replies tab, and `/api/smartlead/webhook` (see "Smartlead
+   Replies inbox" below).
 4. `app/root.tsx` — HTML document shell (`Layout`), root `Outlet`, and `ErrorBoundary`.
 5. `app/routes/home.tsx` — the index route's `loader` requires a session then reads contacts
    from D1 (`listContacts`), the `action` re-checks the session and delegates to
@@ -59,8 +61,11 @@ generates `./+types/*` route type modules that routes import (e.g. `./+types/hom
    **bound** loop (a second round trip, because it needs the bindings from the first; an
    unbound loop is skipped rather than scanned for a guaranteed empty answer). Like
    /smartlead's, this loader **makes no Smartlead calls** — it reads D1 only, so a vendor
-   outage doesn't 500 the page. **No `action`** — the page is read-only; all writes live
-   on `/`.
+   outage doesn't 500 the page. It also returns the Replies tab's counts (caught, so a
+   deploy ahead of migration 0026 loses the badge rather than the page) and `initialTab`
+   from `?tab=`. **No `action`** — the Replies tab writes through `/api/replies/*` with
+   plain `fetch()`, because a route action would revalidate this loader (every contact)
+   on each click.
 7. `app/routes/templates.tsx` — the `/templates` loader reads `listTemplates` **and**
    `listContacts` (the latter only feeds the shared sidebar's OWNER counts) against one `now`.
    It has its own `action` with nine intents. Being a named route, its POSTs need no `?index`.
@@ -226,10 +231,13 @@ over a shared shell:
   touchpoint — see "Replies" below), but this metric deliberately still reads the status:
   it counts contacts *at* the replied stage, not replies received, and someone who answered
   and then booked belongs in the later bucket only. Bookings still have no event at all.
-- **`analytics-page.tsx`** — the `/analytics` UI. Read-only (no fetcher, no action). Charts are
+- **`analytics-page.tsx`** — the `/analytics` UI. Charts are
   plain divs with percentage widths/heights — there is no charting dependency, deliberately.
-  It renders **two tabs over one shell**: *Pipeline* (everything `analytics.ts` computes) and
-  *Email campaigns* (`campaigns-panel.tsx`). Tabs rather than two routes because both share
+  It renders **three tabs over one shell**: *Pipeline* (everything `analytics.ts` computes),
+  *Email campaigns* (`campaigns-panel.tsx`), and *Replies* (`replies-panel.tsx`, the only
+  tab that writes — see "Smartlead Replies inbox"; it ignores both rails). The active tab
+  is mirrored into `?tab=` with `history.replaceState`, not a router navigation, which
+  would re-run the loader. Tabs rather than two routes because both share
   the sidebar, the OWNER filter and the loader's single `now`. The **two rails agree on the
   loop**: a sidebar Loop row moves the campaign tab's switch and the switch writes the
   sidebar view back, so they can never contradict each other on screen. "All contacts" keeps
@@ -494,8 +502,9 @@ the sequence out of templates from the Templates page, pushing
 contacts in as leads, uploading that sequence as the campaign's steps, setting the sending
 schedule, and a manual sync that reads back what the campaign actually sent — onto the
 template variant counters, and onto the contacts it emailed. There is
-deliberately **no cron and no inbound webhook** — every operation is a button. The builder
-is the only one of the five that never leaves D1.
+deliberately **no cron**, and every operation on this page is a button. The builder
+is the only one of the five that never leaves D1. (The one inbound webhook in the app
+feeds the Replies inbox, not this page — see "Smartlead Replies inbox" below.)
 
 - **`app/lib/smartlead.server.ts`** — the HTTP client, shaped like `origami.server.ts` and
   `unipile.server.ts` (never throws, returns a result, empty key = disabled). Two things to keep: **the API
@@ -677,8 +686,8 @@ The inbound half. Everything this CRM *sent* was already visible; nothing told i
 somebody answered. `/settings` connects the team's mailboxes and LinkedIn through
 **Unipile** (unipile.com — one key across every provider), and a **Sync replies** button
 reads what has arrived, matches it to contacts, and files it. There is deliberately **no
-cron and no inbound webhook** — the same rule Smartlead follows, and it is why there is no
-public unauthenticated endpoint to defend.
+cron and no inbound webhook** here — the same rule /smartlead follows. (The Smartlead
+Replies inbox below is the one exception in the app, and shares nothing with this.)
 
 Where a reply ends up: a card on the contacts page's **New replies** strip, a touchpoint on
 the contact's timeline, and a status move to `Replied` for anyone still at `New` or
@@ -788,6 +797,100 @@ the contact's timeline, and a status move to `Replied` for anyone still at `New`
 - **Nothing was added to `/api/hyperagent`**, for the reason Smartlead added nothing: a
   bearer token that could read the team's inbox is not a thing to hang off a shared key.
 
+## Smartlead Replies inbox
+
+/analytics' **Replies** tab: Smartlead campaign replies in a two-pane inbox — Positive /
+Negative tabs with live counts, the thread, a Respond box that sends a real email through
+Smartlead, and a Meeting booked toggle. **Smartlead only**: no channel column, no channel
+badge, no LinkedIn. It is not the Unipile strip above and shares no code with it.
+
+- **`migrations/0026_smartlead_replies.sql`** — `smartlead_reply_leads` (unique
+  `(campaign_id, email)`, `sentiment` ∈ positive/negative/neutral/NULL), `smartlead_threads`
+  (one per lead; `is_read`, `meeting_booked`, `last_reply_at`, the stats id and Message-ID
+  a reply is addressed with) and `smartlead_messages` (plain-text bodies, unique
+  `(thread_id, dedupe_key)`, `origin` smartlead/crm, `delivery` sending/sent/confirmed, a
+  partial unique `(thread_id, client_key)`). **No `contact_id`**: a Smartlead lead need not
+  be a contact; the contact is matched at read time on the lowercased address, and only when
+  exactly one contact holds it. A thread with no REPLY message (`last_reply_at` NULL) is
+  never listed.
+- **This is the app's first inbound webhook, on purpose.** An inbox that fills only when
+  someone presses Sync leaves replies unread over a weekend. `POST /api/smartlead/webhook`
+  (`routes/api.smartlead.webhook.ts`) is authenticated by **`SMARTLEAD_WEBHOOK_SECRET` in
+  the URL** (`?token=`), because Smartlead does not sign deliveries; empty secret = every
+  delivery refused (503). Only failed-secret attempts are rate-limited
+  (`SMARTLEAD_WEBHOOK_FAIL_RULE`) — throttling real deliveries would drop replies. Unused
+  events and unusable payloads answer **200 `ignored`** (Smartlead retries non-2xx, and
+  retrying cannot fix them); a D1 failure answers **500** so it *is* retried. Nothing there
+  logs `request.url` — the secret is in it.
+- **Register it in Smartlead** (per campaign or account-wide) as
+  `https://<host>/api/smartlead/webhook?token=<secret>` for `EMAIL_REPLY` and
+  `LEAD_CATEGORY_UPDATED`; `EMAIL_SENT` optionally, which confirms CRM-sent replies sooner
+  at the cost of one delivery per campaign send. Nothing in the app registers it for you.
+- **`app/crm/replies.ts`** — pure, no `Date`: the API shapes, HTML→text (`messageBodyText`
+  cuts quote containers in the HTML, then the same text markers `toSnippet` uses; output is
+  always rendered as a text node, never markup), and `planWebhook`. The payload readers
+  are **deliberately tolerant**: Smartlead's documented examples and live deliveries use
+  different field names (`reply_body`/`time_replied` vs `reply_message{…}`, `stats_id`,
+  `sl_email_lead_id`), so each field is read from every spelling seen. **Only
+  `LEAD_CATEGORY_UPDATED` may clear a category** — a reply payload's `lead_category: null`
+  often arrives after the category event and would wipe the sentiment. `EMAIL_SENT` never
+  creates a thread.
+- **Sentiment** comes from the payload's `category.sentiment_type`; a category named without
+  one is resolved through `GET /leads/fetch-categories` (`categorySentimentsByName`), and if
+  that fails the lead stays NULL — in neither tab, and **counted** as `uncategorized` under
+  the list so a real reply is never silently invisible.
+- **`recordWebhookEvent` (crm.server.ts) is retry-safe by construction.** Dedupe key is
+  direction + send time to the second — *not* Message-ID, which the two events don't both
+  carry (keying on it stored every reply twice); a duplicate that brings ids the stored copy
+  lacked backfills them. "New reply → unread again" compares a fresh REPLY count with the
+  stored `reply_count` — not this delivery's own inserts — so a retried delivery can't
+  re-unread a read thread, *and* a delivery that stored a reply then died before the thread
+  UPDATE still flags it on the retry. The same condition stamps `last_received_at` (our clock,
+  at the write). Thread summary columns are **re-derived from messages** each time, so
+  out-of-order deliveries converge. `latest_email_stats_id` prefers the newest REPLY's stats
+  id (the campaign email being answered). An unresolved sentiment for the **same** category
+  name keeps the stored one; a different or cleared category replaces it. A SENT message is
+  checked against its dedupe key **before** being paired with a CRM send, and only CRM sends
+  dated no later than it (+2 min) can pair — otherwise a repeat could confirm or delete a
+  different real send whose text is a prefix of it.
+- **Sending (`POST /api/replies/:id/send`) — real email, so the order is the safety.**
+  Validate → resolve the stats id (falling back to `message-history` by lead id) → **reserve**
+  a hidden `sending` row under the browser's per-draft `clientKey` (the partial unique index
+  is the double-send guard) → call `reply-email-thread` once, never retried → only on a
+  **4xx** delete the row; on success mark it `sent`. **No HTTP answer or a 5xx keeps the
+  reservation** and is reported as "may have been sent — check Smartlead", because either
+  may have sent; a D1 failure *after* Smartlead accepted is reported as sent-but-unrecorded.
+  A reservation still `sending` after `STUCK_SEND_MS` is **shown** in the thread as "outcome
+  unknown" rather than hidden, so nobody retypes an email that may have gone.
+  A later SENT message whose text starts with ours (`isSameSentText`) **confirms** the row
+  instead of adding a second copy. Metered on `SMARTLEAD_RULE`; the D1-only ops on
+  `REPLIES_RULE`.
+- **Meeting booked** sets `threads.meeting_booked` and, when turned **on**, moves the uniquely
+  matched contact to `Meeting booked` from `MEETING_PROMOTES_FROM` (New/Contacted/Replied)
+  only, guard in the WHERE clause. Turning it off never moves a contact back. The page sends
+  the desired value (`{booked}`); a body-less call flips.
+- **Mark all read** takes `before` = the list's `listedAt` (a server instant taken before the
+  read, 5s early) and compares it with `last_received_at`, **not** Smartlead's message times:
+  a reply written at 10:00 but delivered at 10:20 is newer than a 10:15 list and stays
+  unread. The panel refuses the button while the rows on screen belong to another tab.
+- **`/api/replies/*` are JSON resource routes** (`app/lib/replies-api.server.ts`): 401 JSON
+  instead of `requireUser`'s redirect (fetch would follow it into login HTML), and writes
+  require a same-origin `Origin` when present plus `application/json`, which a cross-site
+  form cannot send without a preflight. `GET /api/replies/:id` never marks read — the panel
+  polls it; opening is a separate POST.
+- **`replies-panel.tsx`** — never auto-opens a thread (opening marks read); the text being
+  typed lives in `RespondBox`, but the draft, the **send key, the in-flight flag and the
+  outcome are kept per thread by the panel** — the box unmounts when another thread opens,
+  and a key that died with it let a return visit send the same words again under a new key.
+  A finished draft clears by remounting the box (`draftEpoch`). A send that got no JSON back
+  keeps its key, so pressing Send again is safe by construction; only a 401/redirect is
+  reported as an expired session. Polls counts/list/open thread every 30s while visible;
+  optimistic send bubble and meeting toggle with rollback; errors inline.
+  Layout breakpoint is a **container query**, since the fixed sidebar makes viewport width
+  meaningless.
+- **What a reply here does NOT do**: write a touchpoint, move a contact to `Replied`, or feed
+  /analytics' metrics. Those still come from the Smartlead stats sync and Unipile.
+
 Security headers (CSP, `X-Frame-Options`, `Referrer-Policy`, HSTS on https, etc.) are set in
 `workers/app.ts`, wrapping every dynamic response. They do **not** apply under
 `npm run dev` (the Vite dev server doesn't route through the Worker entry) — use
@@ -799,8 +902,9 @@ Gotchas:
   the Smartlead sync, and `recordReplies` from the Unipile sync. The first three only
   reflect activity logged in-app; the last two backfill, and only for campaigns this CRM
   pushed to and mailboxes connected to Unipile — so the analytics channel and activity
-  panels still start sparse for anything sent or received elsewhere. The two sync writers
-  are the only ones that can move a contact's status as a side effect, and they move it in
+  panels still start sparse for anything sent or received elsewhere. (One non-touchpoint
+  path also moves status as a side effect: the Replies tab's Meeting booked toggle.) The two sync writers
+  are the only touchpoint writers that move a contact's status, and they move it in
   opposite directions along the same guarded edge: `Contacted` on a send, `Replied` on a
   reply, each with the promotable set spelled out in SQL. The touch-based `hasConflict`/`peopleInvolved` still rarely fire; the
   live conflict flag remains the name-based `hasNameConflict`/`conflictOwners`.
@@ -889,7 +993,8 @@ but access is restricted to five hardcoded addresses.
   production build if unset), `RESEND_API_KEY` and `SMARTLEAD_API_KEY` (optional — empty
   disables `/smartlead`; never a `[vars]` entry, since it travels in request URLs),
   `ORIGAMI_API_KEY` and `UNIPILE_API_KEY` (optional — empty disables the Prospect panel and
-  the reply sync respectively). `AUTH_EMAIL_FROM`, `ORIGAMI_PROJECT_ID` and `UNIPILE_DSN`
+  the reply sync respectively), and `SMARTLEAD_WEBHOOK_SECRET` (optional — empty makes
+  `/api/smartlead/webhook` refuse every delivery, so the Replies inbox receives nothing). `AUTH_EMAIL_FROM`, `ORIGAMI_PROJECT_ID` and `UNIPILE_DSN`
   are `[vars]` entries, not secrets: the first must have a Resend-verified domain, and the
   last two only *scope* a request rather than authorise one.
 - **`migrations/0004_auth_tables.sql` is generated, not hand-written** — produced by

@@ -1,5 +1,7 @@
-// The /analytics view. Read-only: it defines no fetcher and no action, and every
-// figure comes from computeAnalytics over the loader's contacts.
+// The /analytics view. The Pipeline and Email campaigns tabs are read-only: no
+// fetcher, no action, every figure from computeAnalytics/computeCampaigns over the
+// loader's data. The Replies tab (see below) is the one that writes, and it does so
+// through its own JSON routes rather than a route action.
 //
 // Charts are plain divs — the repo has no charting dependency and this page didn't
 // warrant adding one. Bars are percentage widths/heights over a fixed-size track,
@@ -16,14 +18,22 @@
 // campaign belongs to exactly one loop (migration 0009) — so "All contacts" there
 // means "keep the loop I last chose", and the switch always shows which one that
 // is. The OWNER filter is orthogonal and applies on both tabs.
+//
+// THE THIRD TAB, "Replies", is ./replies-panel.tsx: the Smartlead reply inbox. It
+// is the odd one out on purpose — it reads nothing from this loader but its
+// counts, fetches its own data from /api/replies, and ignores both rails
+// (replies are not scoped by loop or owner). The tab is mirrored into `?tab=` so a
+// refresh comes back to it; the loader reads that, so SSR renders the same tab.
 
 import { useState } from "react";
 import { computeAnalytics, type AnalyticsLabels } from "./analytics";
 import { computeCampaigns, type CampaignLoopInput } from "./campaigns";
 import { CampaignsPanel } from "./campaigns-panel";
 import { loopBadge, type Contact, type Viewer } from "./data";
+import { EMPTY_REPLY_COUNTS, type ReplyCounts } from "./replies";
+import { RepliesPanel } from "./replies-panel";
 import { buildOwnerTabs, buildViewTabs, Sidebar } from "./sidebar";
-import { Box, css, GLOBAL_CSS, IconChart, IconMail, MONO } from "./ui";
+import { Box, css, GLOBAL_CSS, IconChart, IconMail, IconReply, MONO } from "./ui";
 import type { ReactNode } from "react";
 
 const CARD = "border:1px solid #ededea; border-radius:11px; background:#fff;";
@@ -129,21 +139,55 @@ const SOURCE_COLS =
 const TABS = [
   { key: "pipeline", label: "Pipeline", Icon: IconChart },
   { key: "campaigns", label: "Email campaigns", Icon: IconMail },
+  { key: "replies", label: "Replies", Icon: IconReply },
 ] as const;
+
+export type AnalyticsTab = (typeof TABS)[number]["key"];
+
+export function isAnalyticsTab(value: unknown): value is AnalyticsTab {
+  return TABS.some((t) => t.key === value);
+}
 
 export function AnalyticsPage({
   contacts,
   viewer,
   labels,
   campaigns,
+  replyCounts,
+  initialTab,
 }: {
   contacts: Contact[];
   viewer: Viewer;
   labels: AnalyticsLabels;
   campaigns: CampaignLoopInput[];
+  /** null when the loader couldn't read them (e.g. migration 0026 not applied yet). */
+  replyCounts: ReplyCounts | null;
+  initialTab: AnalyticsTab;
 }) {
-  const [S, setS] = useState({ view: "all", owner: "all", tab: "pipeline", loop: 1 });
+  const [S, setS] = useState<{ view: string; owner: string; tab: AnalyticsTab; loop: number }>({
+    view: "all",
+    owner: "all",
+    tab: initialTab,
+    loop: 1,
+  });
   const patch = (u: Partial<typeof S>) => setS((s) => ({ ...s, ...u }));
+  // Kept here rather than in the panel so the tab pill stays current after the
+  // panel unmounts; the panel refreshes it from /api/replies/counts.
+  const [replies, setReplies] = useState<ReplyCounts>(replyCounts ?? EMPTY_REPLY_COUNTS);
+
+  const selectTab = (tab: AnalyticsTab) => {
+    patch({ tab });
+    // replaceState, not a navigation: a router navigation would re-run the loader
+    // (the whole contact book) just to change a query string.
+    try {
+      const url = new URL(window.location.href);
+      if (tab === "pipeline") url.searchParams.delete("tab");
+      else url.searchParams.set("tab", tab);
+      window.history.replaceState(window.history.state, "", url);
+    } catch {
+      // A browser that refuses replaceState only loses refresh persistence.
+    }
+  };
 
   // Same predicates as the contacts page, so the two rails filter identically.
   const byView = (c: Contact) =>
@@ -180,7 +224,9 @@ export function AnalyticsPage({
     ownerScope,
   ].filter(Boolean);
   const headerSub =
-    S.tab === "campaigns"
+    S.tab === "replies"
+      ? `Smartlead replies · as of ${A.asOf}`
+      : S.tab === "campaigns"
       ? [`Sequence performance · as of ${A.asOf}`, `Loop ${S.loop}`, ownerScope]
           .filter(Boolean)
           .join(" · ")
@@ -220,7 +266,7 @@ export function AnalyticsPage({
                 key={t.key}
                 as="button"
                 type="button"
-                onClick={() => patch({ tab: t.key })}
+                onClick={() => selectTab(t.key)}
                 aria-pressed={active}
                 style={css(
                   "display:inline-flex; align-items:center; gap:7px; padding:6px 12px; border-radius:8px; font-size:12.5px; font-family:inherit; cursor:pointer; border:1px solid transparent;" +
@@ -232,6 +278,17 @@ export function AnalyticsPage({
               >
                 <t.Icon style={css("flex:0 0 auto;")} />
                 {t.label}
+                {t.key === "replies" && replies.unread > 0 && (
+                  <span
+                    title={`${replies.unread} unread`}
+                    style={css(
+                      MONO +
+                        "font-size:11px; font-weight:500; padding:1px 6px; border-radius:5px; background:#e4f3ea; color:#1f7a4d;",
+                    )}
+                  >
+                    {replies.unread}
+                  </span>
+                )}
               </Box>
             );
           })}
@@ -243,7 +300,9 @@ export function AnalyticsPage({
               "padding:18px 24px 48px; display:flex; flex-direction:column; gap:18px; max-width:1180px;",
             )}
           >
-            {S.tab === "campaigns" ? (
+            {S.tab === "replies" ? (
+              <RepliesPanel counts={replies} onCounts={setReplies} viewerName={viewer.name} />
+            ) : S.tab === "campaigns" ? (
               <CampaignsPanel
                 view={campaignView}
                 loop={S.loop}

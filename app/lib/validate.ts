@@ -84,6 +84,9 @@ export const LIMITS = {
   // provider-supplied, so they are bounded on the way in rather than trusted.
   title: 200,
   sourceUrl: 500,
+  // A reply typed into the Replies tab and sent through Smartlead. Same bound as
+  // a template body: it is an email, and cutting one short would send half of it.
+  reply: 10_000,
 } as const;
 
 /** Maximum rows accepted in one CSV / API import. */
@@ -1448,4 +1451,35 @@ export function validateProspectRows(raw: unknown):
   }
 
   return { ok: true, rows, skipped, firstError };
+}
+
+// ---------------------------------------------------------------------------
+// Smartlead Replies inbox (/api/replies)
+// ---------------------------------------------------------------------------
+
+/**
+ * A thread id from a URL segment. Our own UUIDs; bounded and charset-checked
+ * anyway, since it arrives from the address bar.
+ */
+export function isValidThreadId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9-]{1,64}$/.test(value);
+}
+
+/**
+ * The reply a rep typed. Not trimmed for storage beyond the ends — line breaks
+ * inside are the email's paragraphs — and refused when empty or over
+ * LIMITS.reply rather than truncated: this text is about to be mailed.
+ */
+export function validateReplyText(raw: unknown): { ok: true; text: string } | { ok: false; error: string } {
+  const text = asString(raw);
+  if (!text) return { ok: false, error: "Write a reply first." };
+  if (text.length > LIMITS.reply) {
+    return { ok: false, error: `Replies must be ${LIMITS.reply} characters or fewer.` };
+  }
+  return { ok: true, text };
+}
+
+/** The browser's per-draft idempotency key (a UUID). */
+export function isValidClientKey(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9-]{16,64}$/.test(value);
 }

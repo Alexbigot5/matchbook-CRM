@@ -30,6 +30,16 @@ RESEND_API_KEY=""
 #   wrangler secret put SMARTLEAD_API_KEY
 SMARTLEAD_API_KEY=""
 
+# Shared secret for Smartlead's webhooks, which feed the Replies tab on
+# /analytics. Smartlead does not sign deliveries, so the secret travels in the
+# webhook URL you register in Smartlead:
+#   https://<your-host>/api/smartlead/webhook?token=<this value>
+# with the EMAIL_REPLY and LEAD_CATEGORY_UPDATED events (EMAIL_SENT optionally,
+# to confirm replies sent from the CRM sooner). Generate a long random value:
+#   openssl rand -hex 32 | wrangler secret put SMARTLEAD_WEBHOOK_SECRET
+# Leave blank to disable: the endpoint then refuses every delivery.
+SMARTLEAD_WEBHOOK_SECRET=""
+
 # --- Origami (the prospecting agent) ------------------------------------------
 # Drives the Prospect panel on the contacts page: you describe who you want in
 # plain English, an Origami agent researches them and builds a table, and the
