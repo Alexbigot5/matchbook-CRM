@@ -345,6 +345,29 @@ export function createSmartleadClient(apiKey: string) {
       return call<unknown>("GET", `/campaigns/${safe}/leads/${safeLead}/message-history`);
     },
 
+    /**
+     * One page of the master inbox: replied conversations across every campaign.
+     *
+     * The Replies tab's "Sync from Smartlead" backfill. `fetchHistory` asks for
+     * each conversation's messages inline, which is what keeps a page to ONE
+     * subrequest instead of one per lead. Typed `unknown` and unwrapped by
+     * inboxItemsOf(): the documented and live envelopes differ.
+     */
+    listInboxReplies(
+      body: {
+        offset: number;
+        limit: number;
+        sortBy: "REPLY_TIME_DESC" | "SENT_TIME_DESC";
+        filters: { emailStatus?: string; replyTimeBetween?: [string, string] };
+      },
+      fetchHistory: boolean,
+    ) {
+      return call<unknown>("POST", "/master-inbox/inbox-replies", {
+        body,
+        query: { fetch_message_history: fetchHistory ? "true" : "false" },
+      });
+    },
+
     /* --- Email accounts (the mailboxes a campaign sends from) ------------ *
      *
      * Read-and-assign only. Nothing here buys, creates or reconnects a mailbox:

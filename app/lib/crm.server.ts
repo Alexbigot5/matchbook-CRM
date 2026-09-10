@@ -4049,6 +4049,13 @@ export async function recordWebhookEvent(
   db: D1Database,
   plan: Extract<WebhookPlan, { kind: "apply" }>,
   receivedAt: string,
+  /**
+   * `smartleadRead`: the sync's copy of Smartlead's own read flag. `true` marks
+   * the thread read after writing — someone already saw the conversation in
+   * Smartlead's inbox, so a backfill must not flag a month of handled replies as
+   * New. `false`/null leave the webhook rule (new reply → unread) in charge.
+   */
+  opts: { smartleadRead?: boolean | null } = {},
 ): Promise<WebhookWriteResult> {
   const result: WebhookWriteResult = { threadId: null, storedMessages: 0, newReplies: 0, confirmedSends: 0 };
   const now = new Date().toISOString();
@@ -4223,17 +4230,20 @@ export async function recordWebhookEvent(
     if (inserted?.id) {
       result.storedMessages++;
       if (m.direction === "REPLY") result.newReplies++;
-    } else if (m.messageId || m.statsId) {
+    } else if (m.messageId || m.statsId || m.body) {
       // Already stored — typically from a category event's history, which carries
-      // no Message-ID. This delivery's ids are what let a reply thread under the
-      // lead's message, so they fill the gaps rather than being dropped.
+      // no Message-ID, or from a sync that could only date a reply, not read it.
+      // This copy's ids are what let a reply thread under the lead's message and
+      // its text is what the thread shows, so they fill the gaps rather than
+      // being dropped. Only gaps: nothing already stored is overwritten.
       await db
         .prepare(
           `UPDATE smartlead_messages
-              SET message_id = COALESCE(message_id, ?), stats_id = COALESCE(stats_id, ?)
+              SET message_id = COALESCE(message_id, ?), stats_id = COALESCE(stats_id, ?),
+                  body = CASE WHEN body = '' THEN ? ELSE body END
             WHERE thread_id = ? AND dedupe_key = ?`,
         )
-        .bind(m.messageId?.slice(0, 500) ?? null, m.statsId?.slice(0, 64) ?? null, threadId, key)
+        .bind(m.messageId?.slice(0, 500) ?? null, m.statsId?.slice(0, 64) ?? null, m.body, threadId, key)
         .run();
     }
   }
@@ -4285,7 +4295,59 @@ export async function recordWebhookEvent(
     .bind(threadId, plan.statsId.slice(0, 64), new Date().toISOString())
     .run();
 
+  if (opts.smartleadRead === true) {
+    await db.prepare("UPDATE smartlead_threads SET is_read = 1 WHERE id = ?").bind(threadId).run();
+  }
+
   return result;
+}
+
+/**
+ * What the sync needs to know to skip a conversation: when it last had a reply,
+ * its category, and whether it holds any SENT message — a thread created by a
+ * bare EMAIL_REPLY webhook has the lead's words but not the email they answered,
+ * and is worth one history fill even though its newest reply is current.
+ */
+export type ThreadSyncState = { lastReplyAt: string | null; category: string | null; hasSent: boolean };
+
+/**
+ * The stored state of up to a page of conversations, keyed `${campaignId}|${email}`.
+ *
+ * One query per inbox page, so a sync walking a month of conversations it
+ * already holds costs a read per twenty of them rather than a write per one.
+ */
+export async function listThreadSyncState(
+  db: D1Database,
+  keys: { campaignId: string; email: string }[],
+): Promise<Map<string, ThreadSyncState>> {
+  const out = new Map<string, ThreadSyncState>();
+  const emails = [...new Set(keys.map((k) => k.email))];
+  if (!emails.length) return out;
+  const res = await db
+    .prepare(
+      `SELECT l.campaign_id, l.email, l.category, t.last_reply_at,
+              EXISTS (SELECT 1 FROM smartlead_messages m
+                       WHERE m.thread_id = t.id AND m.direction = 'SENT') AS has_sent
+         FROM smartlead_reply_leads l
+         JOIN smartlead_threads t ON t.lead_id = l.id
+        WHERE l.email IN (${emails.map(() => "?").join(", ")})`,
+    )
+    .bind(...emails)
+    .all<{
+      campaign_id: string;
+      email: string;
+      category: string | null;
+      last_reply_at: string | null;
+      has_sent: number;
+    }>();
+  for (const row of res.results ?? []) {
+    out.set(`${row.campaign_id}|${row.email}`, {
+      lastReplyAt: row.last_reply_at,
+      category: row.category,
+      hasSent: Number(row.has_sent) === 1,
+    });
+  }
+  return out;
 }
 
 /** The tab pills' counts, and the Analytics tab's unread badge. See ReplyCounts. */

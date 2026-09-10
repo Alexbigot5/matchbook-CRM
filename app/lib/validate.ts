@@ -1483,3 +1483,66 @@ export function validateReplyText(raw: unknown): { ok: true; text: string } | { 
 export function isValidClientKey(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9-]{16,64}$/.test(value);
 }
+
+/**
+ * How far back "Sync from Smartlead" may look, in days. A closed set, and capped
+ * at 90 for the reason UNIPILE_FIRST_SYNC_DAYS is bounded: the inbox is about the
+ * outbound running now, and a year of old conversations marked unread is noise.
+ */
+export const REPLY_SYNC_WINDOWS = [7, 30, 90] as const;
+export const DEFAULT_REPLY_SYNC_DAYS = 30;
+
+/** Conversations per master-inbox page; Smartlead's own maximum. */
+export const REPLY_SYNC_PAGE = 20;
+
+/*
+ * The per-press budgets. Every bound is a platform limit in disguise: a Worker
+ * invocation gets a finite number of subrequests (50 on the free plan) and of
+ * D1 queries. Pages cost one subrequest each; the message-history fallback one
+ * per conversation; a conversation WRITE costs roughly twenty D1 queries (lead,
+ * thread, a few per message, the thread summary). A press that reaches any of
+ * them stops, keeps what it stored — every write is idempotent — and hands back
+ * a cursor so "Continue" resumes exactly there. Conversations already up to date
+ * cost no write at all, which is what makes a repeat press cheap.
+ */
+export const REPLY_SYNC_MAX_PAGES = 15;
+export const REPLY_SYNC_MAX_HISTORY_LOOKUPS = 25;
+export const REPLY_SYNC_MAX_WRITES = 30;
+
+export type ReplySyncCursor = { since: string; until: string; offset: number };
+
+/**
+ * The sync request: a window from the closed set, and optionally the cursor a
+ * previous press returned. The cursor's instants are re-parsed and its window
+ * re-checked, since it comes back from the browser.
+ */
+export function validateReplySync(raw: Record<string, unknown>):
+  | { ok: true; days: number; cursor: ReplySyncCursor | null }
+  | { ok: false; error: string } {
+  const days = Number(raw.days ?? DEFAULT_REPLY_SYNC_DAYS);
+  if (!(REPLY_SYNC_WINDOWS as readonly number[]).includes(days)) {
+    return { ok: false, error: `days must be one of ${REPLY_SYNC_WINDOWS.join(", ")}.` };
+  }
+  if (raw.cursor === undefined || raw.cursor === null) return { ok: true, days, cursor: null };
+  const c = raw.cursor as Record<string, unknown>;
+  const since = typeof c?.since === "string" ? Date.parse(c.since) : NaN;
+  const until = typeof c?.until === "string" ? Date.parse(c.until) : NaN;
+  const offset = Number(c?.offset);
+  const maxSpan = (Math.max(...REPLY_SYNC_WINDOWS) + 1) * 86_400_000;
+  if (
+    !Number.isFinite(since) ||
+    !Number.isFinite(until) ||
+    until <= since ||
+    until - since > maxSpan ||
+    !Number.isInteger(offset) ||
+    offset < 0 ||
+    offset > 100_000
+  ) {
+    return { ok: false, error: "That sync can’t be continued. Start a new sync." };
+  }
+  return {
+    ok: true,
+    days,
+    cursor: { since: new Date(since).toISOString(), until: new Date(until).toISOString(), offset },
+  };
+}

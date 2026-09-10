@@ -25,6 +25,7 @@ export default [
   route("api/replies", "routes/api.replies.ts"),
   route("api/replies/counts", "routes/api.replies.counts.ts"),
   route("api/replies/mark-all-read", "routes/api.replies.mark-all-read.ts"),
+  route("api/replies/sync", "routes/api.replies.sync.ts"),
   route("api/replies/:threadId", "routes/api.replies.$threadId.ts"),
   route("api/replies/:threadId/:op", "routes/api.replies.$threadId.$op.ts"),
   // Smartlead's webhook deliveries into that inbox. NOT session-gated — it is
