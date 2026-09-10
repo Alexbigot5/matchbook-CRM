@@ -192,7 +192,10 @@ over a shared shell:
   takes a contact out of a "Calls to make" view. `tags` asks about *presence* (`None`/`Any`),
   not which tag — filtering by name is the sidebar's TAGS group, and the thing that group
   cannot express (it only lists names that exist) is the absence of all of them, i.e. the
-  untagged contacts.
+  untagged contacts. `category` offers every `CATEGORY_GROUPS` label plus **Other**
+  (`OTHER_CATEGORY` / `hasOtherCategory`): a contact with any category segment no group
+  covers, per segment like the groups, and never a blank category. A new spelling of a known
+  vertical lands in Other too until `CATEGORY_GROUP_BY_RAW` learns it.
 - **`ui.tsx`** — presentation primitives. `css(string)` parses an inline CSS **string** into a
   React style object (the app keeps the original template's style strings verbatim). `Box` is
   a polymorphic element (`as=...`, any element type — the sidebar passes `Link`) that adds

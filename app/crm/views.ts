@@ -39,8 +39,13 @@
 //   * Recognition is per segment, so it degrades partially rather than totally.
 //     A contact with one spelling the table knows and one it does not still
 //     matches on the half it knows. Only a contact where NO segment is mapped —
-//     or that has no category at all — is in no group and matches no category
-//     condition, deliberately; see the note on categoryGroup.
+//     or that has no category at all — is in no group, deliberately; see the
+//     note on categoryGroup.
+//   * `category is Other` is the leftover bucket: a contact with ANY segment no
+//     group covers (hasOtherCategory in ./data.ts). Per segment like the groups,
+//     so a half-mapped compound value is in its group AND in Other. A blank
+//     category is in neither. A new spelling of a known vertical also lands in
+//     Other until the grouping table learns it.
 //   * `category is not Food & Beverage` therefore MATCHES a contact with no
 //     category at all, which is most of the book. Same reading as `owner is
 //     not Tom` above, and the same trap: pair it with another condition. Note
@@ -80,7 +85,14 @@
 //     hand-edited row — and showing everything is the safer failure than showing
 //     nothing, which reads as data loss.
 
-import { CATEGORY_GROUPS, categoryGroup, STATUSES, type Contact } from "./data";
+import {
+  CATEGORY_GROUPS,
+  categoryGroup,
+  hasOtherCategory,
+  OTHER_CATEGORY,
+  STATUSES,
+  type Contact,
+} from "./data";
 import { nextTodo, TODO_KINDS, TODO_META } from "./todo";
 
 export type ViewOp = "is" | "isNot";
@@ -177,7 +189,8 @@ export const VIEW_FIELDS: ViewField[] = [
     // spelling that matches nothing.
     key: "category",
     label: "Category",
-    options: CATEGORY_GROUPS.map((g) => ({ value: g, label: g })),
+    // Other last, after every named group, since it means "none of the above".
+    options: [...CATEGORY_GROUPS, OTHER_CATEGORY].map((g) => ({ value: g, label: g })),
   },
   {
     // Presence, not identity: "does this contact have industry tags at all",
@@ -278,7 +291,9 @@ function satisfies(c: Contact, field: string, value: string): boolean {
       // Groups, not raw string — see the header. `includes`, not equality: a
       // compound category resolves to one group per recognized segment and the
       // clause holds on any of them. A contact with no category, or none whose
-      // spelling is mapped, resolves to [] and matches nothing.
+      // spelling is mapped, resolves to [] and matches no group — Other is the
+      // one value that asks about the unmapped segments instead.
+      if (value === OTHER_CATEGORY) return hasOtherCategory(c.category);
       return categoryGroup(c.category).includes(value);
     case "tags":
       // `?.length`, not a null check: `tags` is optional on Contact, but
