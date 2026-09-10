@@ -1202,6 +1202,19 @@ export const UNIPILE_MESSAGE_MAX_PAGES = 5;
 export const UNIPILE_MAX_CHATS = 40;
 
 /**
+ * LinkedIn profile lookups one account's sync will make.
+ *
+ * A chat attendee's `profile_url` carries LinkedIn's internal member id, not the
+ * public slug contacts store, so each distinct sender costs one `GET /users/{id}`
+ * to be matchable on their profile at all (see isLinkedinMemberId in
+ * app/crm/unipile-map.ts). Senders are cached per sync, so a 1:1 chat is one
+ * lookup and this matches UNIPILE_MAX_CHATS; group chats with several senders
+ * are what could exceed it. Past the budget the rest are left to the name rule
+ * and the watermark holds, so the next press looks them up.
+ */
+export const UNIPILE_MAX_PROFILE_LOOKUPS = 40;
+
+/**
  * How far back the FIRST sync of an account reads, in days.
  *
  * Bounded rather than "everything", and this is a correctness bound rather than a

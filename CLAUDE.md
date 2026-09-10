@@ -718,9 +718,19 @@ the contact's timeline, and a status move to `Replied` for anyone still at `New`
   calls return our own outbound, which then matches the contact it was addressed to and is
   logged as their reply. `ownAddresses` closes the third case: mail from one connected
   mailbox to another.
-- **LinkedIn costs three calls, not one.** A message carries a `sender_attendee_id` and
-  nothing else about the person; only the chat's attendee list turns that into a name and a
-  profile URL. Hence `UNIPILE_MAX_CHATS`, and hence chats being resolved newest-first.
+- **LinkedIn costs three calls, not one — plus a fourth per sender.** A message carries a
+  `sender_attendee_id` and nothing else about the person; only the chat's attendee list turns
+  that into a name and a profile URL. Hence `UNIPILE_MAX_CHATS`, and hence chats being
+  resolved newest-first. **And that attendee `profile_url` is not the one contacts store**:
+  Unipile builds it from LinkedIn's internal member id (`/in/ACoAAB…`), never the public
+  vanity slug, so the slug rule matched nobody and every LinkedIn reply fell to the name
+  rule — while the disagreement guard read the member id as a *different* profile and refused
+  even an exact name. The sync now looks each sender up (`getUserProfile` →
+  `public_identifier`, cached per sync, bounded by `UNIPILE_MAX_PROFILE_LOOKUPS`), and
+  `matchLinkedin` compares **like with like** (`isLinkedinMemberId`): vanity against vanity,
+  member id against a stored member id, and no disagreement verdict across the two. A
+  transient lookup failure holds the watermark; a 404/422 does not, or one deleted profile
+  would pin the account forever.
 - **Unmatched replies are counted, not stored — but the sync now says WHO and WHY.** The
   count alone distinguishes a quiet inbox from a broken matcher, and nothing more: a real
   incident had two test contacts saved as "Mike" and "mike" holding the same profile slug,
@@ -738,7 +748,10 @@ the contact's timeline, and a status move to `Replied` for anyone still at `New`
   `MatchOutcome.handle` is now whatever the rules actually looked at. `no-profile-url` is the
   reason for a message Unipile hands over with no readable profile URL: the strong slug rule
   cannot run at all, everything falls to the name, and that is a fact about the provider's
-  payload rather than about the contact book — no amount of tidying contacts fixes it. "Present but
+  payload rather than about the contact book — no amount of tidying contacts fixes it.
+  `profile-unresolved` is its sibling: a member id arrived but the public-slug lookup didn't
+  answer. The handle is the **vanity slug only** — a lowercased member id is what made the
+  first line unreadable, so with none the line shows the name alone. "Present but
   ambiguous" needed no index change — `put()` already stores `null` for a contested key,
   so it was always distinguishable from absent.
   **"Counted, not stored" still holds exactly.** The names go in the sentence handed back to

@@ -105,6 +105,24 @@ export type UnipileAttendee = {
   picture_url?: string;
 };
 
+/**
+ * A LinkedIn profile from `GET /users/{identifier}`, narrowed to what the reply
+ * matcher needs.
+ *
+ * This exists because an attendee's `profile_url` is NOT the profile URL a person
+ * would copy: Unipile builds it from LinkedIn's internal member id
+ * (`linkedin.com/in/ACoAAB…`), and the CRM's `linkedin` column holds the public
+ * vanity slug (`linkedin.com/in/mike-hennessey-…`). The two never compare equal.
+ * `public_identifier` is that vanity slug, and this is the only call that has it.
+ */
+export type UnipileUserProfile = {
+  provider_id?: string;
+  public_identifier?: string | null;
+  public_profile_url?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+};
+
 /** One address on an email. Unipile calls the address field `identifier`. */
 export type UnipileEmailAttendee = { display_name?: string; identifier?: string };
 
@@ -428,6 +446,22 @@ export function createUnipileClient(apiKey: string, dsn: string) {
       const safe = safeId(chatId);
       if (!safe) return Promise.resolve(badId<UnipileList<UnipileAttendee>>("chat"));
       return call<UnipileList<UnipileAttendee>>("GET", `/api/v1/chats/${safe}/attendees`);
+    },
+
+    /**
+     * One LinkedIn profile, looked up by the attendee's provider id — the fourth
+     * call, and the one that turns `ACoAAB…` into the public slug a contact's
+     * stored URL can be compared against. See UnipileUserProfile.
+     *
+     * `account_id` is required: Unipile performs the lookup AS that LinkedIn
+     * session, so it has to be the account the chat was read from.
+     */
+    getUserProfile(identifier: string, accountId: string) {
+      const safe = safeId(identifier);
+      if (!safe) return Promise.resolve(badId<UnipileUserProfile>("profile"));
+      return call<UnipileUserProfile>("GET", `/api/v1/users/${safe}`, {
+        query: { account_id: accountId },
+      });
     },
   };
 }

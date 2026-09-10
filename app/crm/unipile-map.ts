@@ -15,9 +15,12 @@
 //   1. **Email address** — exact, case-insensitive, against `contacts.email`.
 //      The only rule with no ambiguity in it, and the one that handles the bulk
 //      of replies, since the outbound half of this CRM is email.
-//   2. **LinkedIn profile slug** — the `/in/<slug>` segment of the attendee's
-//      profile URL against the same segment of `contacts.linkedin`. Also exact:
-//      the slug is LinkedIn's own stable public identifier.
+//   2. **LinkedIn profile slug** — the attendee's public `/in/<slug>` against the
+//      same segment of `contacts.linkedin`. Also exact: the slug is LinkedIn's
+//      own stable public identifier. NOTE it is not the slug in the attendee's
+//      `profile_url`, which Unipile builds from LinkedIn's internal member id
+//      (`/in/ACoAAB…`) — the sync resolves the public one separately. See
+//      isLinkedinMemberId.
 //   3. **Name** — case- and punctuation-insensitive, and ONLY when the name
 //      resolves to exactly one contact. This is a real fallback rather than a
 //      nicety, because a LinkedIn chat with an older connection can carry no
@@ -213,6 +216,42 @@ export function linkedinSlug(raw: string | null | undefined): string {
 }
 
 /**
+ * True for a slug that is LinkedIn's internal member id rather than a public
+ * vanity slug: `ACoAA…` for a member, `ACwAA…` / `AEMAA…` in Sales Navigator.
+ *
+ * The two identify the same person and never compare equal, and that is not a
+ * theoretical mismatch. Unipile's chat attendees carry a `profile_url` built
+ * from the member id, so the slug rule compared `acoaabnnerkbex…` against
+ * contacts storing `/in/mike-hennessey-…` and matched nobody — every LinkedIn
+ * reply fell through to the name rule, and a contact saved under any other
+ * spelling of the name was reported as "not in the CRM". Worse, the name rule's
+ * disagreement guard read a member id against a stored vanity slug as a
+ * DIFFERENT profile, so even an exact name was refused.
+ *
+ * Case-insensitive because linkedinSlug lowercases. A vanity slug is letters,
+ * digits and hyphens chosen by a person; one that happens to begin with one of
+ * these prefixes and run twenty-plus characters without a hyphen does not occur.
+ */
+export function isLinkedinMemberId(slug: string | null | undefined): boolean {
+  return /^(acoaa|acwaa|aemaa)[a-z0-9_-]{20,}$/i.test(slug ?? "");
+}
+
+/**
+ * The comparison slug for a `public_identifier` from Unipile's profile lookup.
+ *
+ * Built into a URL rather than lowercased directly so it goes through the same
+ * decoding as a stored URL — an accented slug has to produce the same key on
+ * both sides. "" when the provider handed back a member id in that field too,
+ * since that is not a public slug whatever the field is called.
+ */
+export function publicSlug(raw: string | null | undefined): string {
+  const v = (raw ?? "").trim();
+  if (!v) return "";
+  const slug = linkedinSlug(v.includes("/") ? v : `linkedin.com/in/${encodeURIComponent(v)}`);
+  return isLinkedinMemberId(slug) ? "" : slug;
+}
+
+/**
  * Flatten a message body to the snippet the card shows.
  *
  * Quoted history is cut at the first quote marker, not left in: a reply to a
@@ -325,7 +364,12 @@ export type UnmatchedReason =
   // strong one — could not run at all and everything fell to the name. Worth its
   // own reason because it is a fact about the PROVIDER's payload, not about the
   // contact book, and no amount of tidying contacts will fix it.
-  | "no-profile-url";
+  | "no-profile-url"
+  // The message DID carry a profile, but only as LinkedIn's internal member id,
+  // and the lookup that turns that into a public slug did not answer. Same
+  // consequence as no-profile-url — only the name could be tried — but a
+  // different fix: this one is usually gone on the next sync.
+  | "profile-unresolved";
 
 /** One sender the sync could not file, and what stopped it. */
 export type UnmatchedSender = {
@@ -342,8 +386,9 @@ export type MatchOutcome = {
   /** Null exactly when `match` is set. */
   reason: UnmatchedReason | null;
   /**
-   * The key the matcher actually COMPARED — the email address, or the LinkedIn
-   * slug read out of the message's profile URL. Empty when there was none.
+   * The key the matcher actually COMPARED — the email address, or the sender's
+   * public LinkedIn slug. Empty when there was none (including when LinkedIn's
+   * internal member id was all there was; see matchLinkedin).
    *
    * It travels out of the matcher for the same reason `reason` does, and the
    * first version of this got it wrong in exactly the way that argument
@@ -381,6 +426,8 @@ export function unmatchedReasonText(reason: UnmatchedReason): string {
       return "a contact has that name but a different LinkedIn on file";
     case "no-profile-url":
       return "the message carried no LinkedIn profile URL, so only the name could be matched";
+    case "profile-unresolved":
+      return "LinkedIn’s public profile URL couldn’t be looked up, so only the name could be matched";
     default:
       return "not in the CRM";
   }
@@ -417,26 +464,42 @@ export function matchEmail(candidate: ReplyCandidate, index: ContactIndex): Matc
  * opaque provider id (which is what Unipile addresses the sender by and what a
  * future "open this chat" needs), while the slug is what a human-entered CRM
  * field can be compared against.
+ *
+ * A profile has TWO slugs, and each is compared only against its own kind — see
+ * isLinkedinMemberId. `publicIdentifier` is the vanity slug from the sync's
+ * profile lookup; `profileUrl` is the attendee's own URL, which in practice
+ * carries the member id. A member id is still worth trying against the index
+ * (a URL copied out of LinkedIn messaging or Sales Navigator is stored in that
+ * form), but it is never read as disagreeing with a stored vanity slug.
  */
 export function matchLinkedin(
   candidate: ReplyCandidate,
   index: ContactIndex,
-  attendee: { name?: string; profileUrl?: string },
+  attendee: { name?: string; profileUrl?: string; publicIdentifier?: string },
 ): MatchOutcome {
-  const slug = linkedinSlug(attendee.profileUrl);
-  const bySlug = unique(index.bySlug, slug);
+  const fromUrl = linkedinSlug(attendee.profileUrl);
+  const memberId = isLinkedinMemberId(fromUrl) ? fromUrl : "";
+  const vanity = publicSlug(attendee.publicIdentifier) || (memberId ? "" : fromUrl);
+
+  // Vanity first: it is what people paste onto a contact.
+  const bySlug = unique(index.bySlug, vanity) ?? unique(index.bySlug, memberId);
   if (bySlug) {
     return {
       match: { ...candidate, contactId: bySlug, matchedOn: "linkedin-profile" },
       reason: null,
-      handle: slug,
+      handle: vanity,
     };
   }
   // Captured before falling through to the name rule, and reported in
   // preference to whatever that rule concludes: a shared profile URL is the
   // most specific thing that can be wrong here and the easiest to act on.
-  const slugAmbiguous = isAmbiguous(index.bySlug, slug);
+  const slugAmbiguous =
+    isAmbiguous(index.bySlug, vanity) || isAmbiguous(index.bySlug, memberId);
 
+  // The handle is the VANITY slug only. The member id was compared too, but it
+  // is lowercased here, recognisable to nobody, and printing it is precisely
+  // what made the first "Mike Hennessey · acoaabnner…" line unreadable. With no
+  // vanity slug the line shows the name alone and the reason says why.
   const nameId = nameKey(attendee.name);
   const byName = unique(index.byName, nameId);
   if (!byName) {
@@ -444,32 +507,38 @@ export function matchLinkedin(
       match: null,
       // Ordered by how much each tells the operator. A shared profile is the
       // most specific and the easiest to fix; a shared name next; "we never got
-      // a profile URL" next, because it explains why the strong rule never ran;
-      // and only then the genuine stranger.
+      // a public profile URL" next, because it explains why the strong rule
+      // never ran; and only then the genuine stranger.
       reason: slugAmbiguous
         ? "ambiguous-profile"
         : isAmbiguous(index.byName, nameId)
           ? "ambiguous-name"
-          : !slug
-            ? "no-profile-url"
+          : !vanity
+            ? memberId
+              ? "profile-unresolved"
+              : "no-profile-url"
             : "unknown",
-      handle: slug,
+      handle: vanity,
     };
   }
 
   // The disagreement refusal. A contact whose stored profile points somewhere
   // else is positive evidence of a different person with the same name — the
-  // slug rule above would already have matched them otherwise.
+  // slug rule above would already have matched them otherwise. Compared like
+  // for like: a stored member id against the attendee's member id, a stored
+  // vanity slug against the attendee's vanity slug, and no verdict at all when
+  // the attendee lacks the kind that is stored.
   const stored = index.slugById.get(byName);
-  if (slug && stored && stored !== slug) {
+  const comparable = stored ? (isLinkedinMemberId(stored) ? memberId : vanity) : "";
+  if (comparable && stored !== comparable) {
     return {
       match: null,
       reason: slugAmbiguous ? "ambiguous-profile" : "profile-disagrees",
-      handle: slug,
+      handle: vanity,
     };
   }
 
-  return { match: { ...candidate, contactId: byName, matchedOn: "name" }, reason: null, handle: slug };
+  return { match: { ...candidate, contactId: byName, matchedOn: "name" }, reason: null, handle: vanity };
 }
 
 /**
