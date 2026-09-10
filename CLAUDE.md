@@ -814,7 +814,8 @@ badge, no LinkedIn. It is not the Unipile strip above and shares no code with it
   exactly one contact holds it. A thread with no REPLY message (`last_reply_at` NULL) is
   never listed.
 - **This is the app's first inbound webhook, on purpose.** An inbox that fills only when
-  someone presses Sync leaves replies unread over a weekend. `POST /api/smartlead/webhook`
+  someone presses Sync leaves replies unread over a weekend (the Sync button below exists
+  only to backfill). `POST /api/smartlead/webhook`
   (`routes/api.smartlead.webhook.ts`) is authenticated by **`SMARTLEAD_WEBHOOK_SECRET` in
   the URL** (`?token=`), because Smartlead does not sign deliveries; empty secret = every
   delivery refused (503). Only failed-secret attempts are rate-limited
@@ -888,6 +889,29 @@ badge, no LinkedIn. It is not the Unipile strip above and shares no code with it
   optimistic send bubble and meeting toggle with rollback; errors inline.
   Layout breakpoint is a **container query**, since the fixed sidebar makes viewport width
   meaningless.
+- **"Sync from Smartlead" is the backfill, not a second inbox path.** The webhook is how
+  replies arrive; the button (`POST /api/replies/sync`, `app/lib/smartlead-reply-sync.server.ts`)
+  catches up on conversations from before the webhook was registered or while it was down.
+  It pages `POST /master-inbox/inbox-replies` (replied conversations, newest first, history
+  inline so a page is one subrequest) over a 7/30/90-day window, turns each item into the
+  **same plan a webhook produces** (`planInboxItem`) and writes it through
+  `recordWebhookEvent`, so a reply seen both ways is stored once and a repeat press writes
+  nothing. Rules worth keeping:
+  - **Skip = newest reply held AND a SENT message held AND same category**
+    (`listThreadSyncState`, one read per page). The SENT clause matters: a thread a bare
+    `EMAIL_REPLY` created lacks the email being answered and gets one history fill.
+  - **Budgets, not "everything"** (`REPLY_SYNC_MAX_PAGES` / `_HISTORY_LOOKUPS` / `_WRITES` in
+    validate.ts — subrequests and D1 queries per invocation). Hitting one returns a cursor
+    `{since, until, offset}`; **`until` is pinned at the first press** so replies landing
+    mid-backfill can't shift the offsets Continue resumes from.
+  - Items without inline history fall back to `message-history` by lead id; a failed lookup
+    still stores the dated reply with empty text, and a later copy of the same message
+    **fills empty text and missing ids** without overwriting anything stored.
+  - Smartlead's own read flag is honoured on write (`smartleadRead: true` → read), so a
+    backfill doesn't flag a month of handled replies as New. Opaque inbox message ids are
+    dropped — only RFC Message-IDs (containing `@`) are kept for threading replies.
+  - An unnameable `lead_category_id` (category list unreadable) leaves the stored category
+    alone; an explicit "no category" clears it. Metered on `SMARTLEAD_REPLY_SYNC_RULE`.
 - **What a reply here does NOT do**: write a touchpoint, move a contact to `Replied`, or feed
   /analytics' metrics. Those still come from the Smartlead stats sync and Unipile.
 

@@ -234,6 +234,20 @@ export const REPLIES_RULE: RateLimitRule = {
 };
 
 /**
+ * "Sync from Smartlead" on the Replies tab.
+ *
+ * Tight, like UNIPILE_SYNC_RULE and for the same reason: one press is dozens of
+ * Smartlead calls and hundreds of D1 queries, where a Send is one of each. Enough
+ * for someone pressing Continue through a long backlog; not enough to hammer the
+ * account's API budget from a stuck client.
+ */
+export const SMARTLEAD_REPLY_SYNC_RULE: RateLimitRule = {
+  bucket: "smartlead:reply-sync",
+  limit: 8,
+  windowMs: 60 * 1000,
+};
+
+/**
  * Deliveries to /api/smartlead/webhook that failed the secret check, per IP.
  *
  * Only FAILURES are metered. Smartlead can fire bursts of legitimate deliveries

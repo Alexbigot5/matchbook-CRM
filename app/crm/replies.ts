@@ -329,14 +329,7 @@ export function isSameSentText(ours: string, reported: string): boolean {
  * strings, falling back to the last entry, since the list is chronological.
  */
 export function newestStatsId(data: unknown): string {
-  const envelope = asObj(data);
-  const list = Array.isArray(data)
-    ? data
-    : Array.isArray(envelope.history)
-      ? envelope.history
-      : Array.isArray(envelope.messages)
-        ? envelope.messages
-        : [];
+  const list = historyEntriesOf(data);
   let best = "";
   let bestTime = "";
   for (const raw of list) {
@@ -443,6 +436,57 @@ function message(direction: ReplyDirection, body: string, sentAt: string, messag
   };
 }
 
+/**
+ * The array of conversation entries inside a history-bearing response, whatever
+ * Smartlead wrapped it in: a bare array, `history` (live message-history and
+ * category webhooks), `messages` (the documented example), `message_history`
+ * (the master inbox).
+ */
+export function historyEntriesOf(data: unknown): unknown[] {
+  if (Array.isArray(data)) return data;
+  const envelope = asObj(data);
+  for (const key of ["history", "message_history", "messages", "data"]) {
+    if (Array.isArray(envelope[key])) return envelope[key] as unknown[];
+  }
+  return [];
+}
+
+/**
+ * Conversation entries as messages, in either vocabulary Smartlead uses:
+ * `type: SENT | REPLY` with `time`, or `direction: outbound | inbound` with
+ * `sent_at` / `received_at`.
+ *
+ * An entry with no time is SKIPPED: it cannot be keyed, so storing it would add
+ * it again on every retry or re-sync. The conversation's other entries still land.
+ */
+export function historyMessages(entries: unknown[]): WebhookMessage[] {
+  const out: WebhookMessage[] = [];
+  for (const raw of entries) {
+    const h = asObj(raw);
+    const kind = (text(h.type) || text(h.direction)).toUpperCase();
+    const direction: ReplyDirection | null =
+      kind === "REPLY" || kind === "INBOUND" || kind === "INCOMING" || kind === "RECEIVED"
+        ? "REPLY"
+        : kind === "SENT" || kind === "OUTBOUND" || kind === "OUTGOING"
+          ? "SENT"
+          : null;
+    if (!direction) continue;
+    const time =
+      direction === "REPLY"
+        ? first(h.time, h.received_at, h.reply_time, h.sent_at)
+        : first(h.time, h.sent_at, h.sent_time);
+    const m = message(
+      direction,
+      rawBody(h.email_body, h.body, h.html, h.text),
+      time,
+      first(h.message_id, h.messageId),
+      first(h.stats_id, h.email_stats_id),
+    );
+    if (m?.sentAt) out.push(m);
+  }
+  return out;
+}
+
 /** The category a payload reports, or null when it reports none at all. */
 function readCategory(p: Obj, leadData: Obj): { name: string | null; sentiment: StoredSentiment | null } | null {
   const nested = asObj(leadData.category);
@@ -524,23 +568,8 @@ export function planWebhook(payload: unknown): WebhookPlan {
   } else if (event === "LEAD_CATEGORY_UPDATED") {
     const history = Array.isArray(p.history) ? p.history : [];
     const entries = history.length ? history : p.lastReply ? [p.lastReply] : [];
-    for (const raw of entries) {
-      const h = asObj(raw);
-      const type = text(h.type).toUpperCase();
-      const direction: ReplyDirection | null = type === "REPLY" ? "REPLY" : type === "SENT" ? "SENT" : null;
-      if (!direction) continue;
-      const m = message(
-        direction,
-        rawBody(h.email_body, h.html, h.text),
-        first(h.time, h.sent_time),
-        first(h.message_id, h.messageId),
-        first(h.stats_id),
-      );
-      // A history entry with no time cannot be keyed, so storing it would add it
-      // again on every retry. Skipped; the conversation's other entries still land.
-      if (m?.sentAt) messages.push(m);
-      if (!subject) subject = first(h.subject);
-    }
+    messages.push(...historyMessages(entries));
+    if (!subject) subject = first(...entries.map((h) => asObj(h).subject));
   } else {
     const m = message(
       "SENT",
@@ -572,5 +601,153 @@ export function planWebhook(payload: unknown): WebhookPlan {
     subject: subject.slice(0, 300),
     statsId: first(p.stats_id),
     messages,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Sync from Smartlead (POST /master-inbox/inbox-replies)
+// ---------------------------------------------------------------------------
+//
+// The backfill behind the Replies tab's "Sync from Smartlead" button. Each item
+// of the master inbox is one replied conversation; it becomes the SAME plan a
+// webhook produces, so recordWebhookEvent() stores it with every idempotency
+// guarantee the webhook path already has. The readers are tolerant for the same
+// reason as the webhook's: the documented response (`lead{}`, `campaign{}`,
+// `last_message{}`, `message_history[]`) and older live responses
+// (`lead_email`, `email_campaign_id`, `email_lead_id`, `last_reply_time`) use
+// different names.
+
+/** The items of an inbox-replies response, whatever envelope they came in. */
+export function inboxItemsOf(data: unknown): unknown[] {
+  if (Array.isArray(data)) return data;
+  const envelope = asObj(data);
+  for (const key of ["messages", "data", "replies", "results"]) {
+    if (Array.isArray(envelope[key])) return envelope[key] as unknown[];
+  }
+  return [];
+}
+
+/**
+ * Category names and sentiments from GET /leads/fetch-categories, by id and by
+ * name — inbox items often carry only a `lead_category_id`.
+ */
+export type CategoryLookup = {
+  nameById: Map<string, string>;
+  sentimentByName: Map<string, StoredSentiment | null>;
+};
+
+export function categoryLookup(rows: { id?: unknown; name?: unknown; sentiment_type?: unknown }[]): CategoryLookup {
+  const nameById = new Map<string, string>();
+  for (const row of rows) {
+    const id = text(row?.id);
+    const name = typeof row?.name === "string" ? row.name.trim() : "";
+    if (id && name) nameById.set(id, name);
+  }
+  return { nameById, sentimentByName: categorySentimentsByName(rows) };
+}
+
+export type InboxSyncItem = {
+  plan: Extract<WebhookPlan, { kind: "apply" }>;
+  /** Smartlead's lead id, for the message-history fallback. "" when absent. */
+  leadId: string;
+  /** Smartlead's time of the newest reply, unparsed. "" when absent. */
+  lastReplyAt: string;
+  /** Whether the item carried its own conversation history. */
+  hasHistory: boolean;
+  /** Smartlead's own read flag for the conversation, when it reports one. */
+  smartleadRead: boolean | null;
+};
+
+/**
+ * One master-inbox item as a plan, or null when it lacks a campaign or address.
+ *
+ * `categories` null means the category list could not be read: an item that
+ * names its category is still stored, but one that carries only a category id
+ * leaves the stored category alone rather than clearing it.
+ *
+ * Message ids are kept only when they look like RFC Message-IDs (contain "@").
+ * The inbox also has its own opaque message ids, and passing one of those to
+ * reply-email-thread as `reply_message_id` would thread a reply under nothing.
+ */
+export function planInboxItem(raw: unknown, categories: CategoryLookup | null): InboxSyncItem | null {
+  const item = asObj(raw);
+  const lead = asObj(item.lead);
+  const campaign = asObj(item.campaign);
+  const last = asObj(item.last_message);
+  const reply = asObj(item.reply_message);
+
+  const campaignId = first(campaign.id, item.email_campaign_id, item.campaign_id);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(campaignId)) return null;
+  const email = first(lead.email, item.lead_email, item.email).toLowerCase();
+  if (!email || email.length > 320 || !email.includes("@")) return null;
+
+  const leadId = first(lead.id, item.email_lead_id, item.lead_id);
+  const lastReplyAt = first(last.received_at, item.last_reply_time, reply.time, asObj(item.stats).last_activity);
+
+  const entries = [item.message_history, item.history].find((v) => Array.isArray(v) && v.length) as
+    | unknown[]
+    | undefined;
+  let messages = entries ? historyMessages(entries) : [];
+  const hasHistory = messages.length > 0;
+  if (!hasHistory) {
+    // No conversation attached: the newest reply alone, when the item dates it.
+    const m = message(
+      "REPLY",
+      rawBody(last.body, last.html, reply.html, reply.text, item.reply_body),
+      first(last.received_at, reply.time, item.last_reply_time),
+      first(last.message_id, reply.message_id),
+      first(item.email_stats_id),
+    );
+    if (m?.sentAt) messages = [m];
+  }
+  messages = messages.map((m) => (m.messageId && !m.messageId.includes("@") ? { ...m, messageId: null } : m));
+
+  // Category: this is Smartlead's CURRENT state for the lead, so an explicit
+  // "no category" does clear it — but an id we cannot name leaves it alone.
+  const catObj = asObj(item.category);
+  const hasCategoryField = "category" in item || "lead_category_id" in item || "lead_category" in item;
+  let category: { name: string | null; sentiment: StoredSentiment | null } | null = null;
+  if (hasCategoryField) {
+    const id = first(catObj.id, item.lead_category_id);
+    const name = first(catObj.name, typeof item.lead_category === "string" ? item.lead_category : "", id ? categories?.nameById.get(id) : "");
+    if (name) {
+      const sentiment =
+        sentimentFromType(first(catObj.sentiment_type)) ?? categories?.sentimentByName.get(name.toLowerCase()) ?? null;
+      category = { name, sentiment };
+    } else if (!id) {
+      category = { name: null, sentiment: null };
+    }
+  }
+
+  const readFlag =
+    typeof item.is_read === "boolean"
+      ? item.is_read
+      : typeof item.has_new_unread_email === "boolean"
+        ? !item.has_new_unread_email
+        : null;
+
+  return {
+    plan: {
+      kind: "apply",
+      event: "SYNC",
+      campaignId,
+      email,
+      createsThread: true,
+      lead: {
+        smartleadLeadId: leadId,
+        firstName: first(lead.first_name, item.lead_first_name),
+        lastName: first(lead.last_name, item.lead_last_name),
+        companyName: first(lead.company, lead.company_name, item.lead_company_name, item.company_name),
+      },
+      category,
+      emailAccountId: first(asObj(item.email_account).id, item.email_account_id),
+      subject: first(last.subject, item.subject).slice(0, 300),
+      statsId: first(item.email_stats_id, last.stats_id),
+      messages,
+    },
+    leadId,
+    lastReplyAt,
+    hasHistory,
+    smartleadRead: readFlag,
   };
 }

@@ -36,8 +36,31 @@ import {
   type ReplySentiment,
   type ReplyThreadDetail,
 } from "./replies";
-import { Box, css, IconCheck, IconReply, MONO } from "./ui";
-import { LIMITS, safeMailto } from "../lib/validate";
+import { Box, css, IconCheck, IconClose, IconReply, MONO } from "./ui";
+import {
+  DEFAULT_REPLY_SYNC_DAYS,
+  LIMITS,
+  REPLY_SYNC_WINDOWS,
+  safeMailto,
+  type ReplySyncCursor,
+} from "../lib/validate";
+
+/** Two arrows in a circle; turns while a sync runs. */
+function IconSync({ spinning }: { spinning: boolean }) {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      style={spinning ? { animation: "slcrm-spin 0.9s linear infinite" } : undefined}
+    >
+      <path d="M20 12a8 8 0 0 1-14.3 4.9M4 12a8 8 0 0 1 14.3-4.9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M18.5 3v4.2h-4.2M5.5 21v-4.2h4.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 /** How often an open tab re-reads counts, list and thread to pick up webhook deliveries. */
 const POLL_MS = 30_000;
@@ -58,6 +81,7 @@ const SENTIMENT_TONE: Record<ReplySentiment, { dot: string; label: string }> = {
 // A CONTAINER query, not a media query: the CRM's sidebar is a fixed rail, so the
 // viewport width says little about how much room this panel actually has.
 const PANEL_CSS = `
+  @keyframes slcrm-spin { to { transform: rotate(360deg); } }
   .slcrm-replies-shell { container-type:inline-size; }
   .slcrm-replies-grid { display:grid; grid-template-columns:300px minmax(0,1fr); height:min(760px, calc(100vh - 230px)); min-height:460px; }
   .slcrm-replies-list { border-right:1px solid #f0f0ec; overflow-y:auto; overflow-x:hidden; min-height:0; }
@@ -172,6 +196,15 @@ export function RepliesPanel({
   const [pending, setPending] = useState<Record<string, ShownMessage[]>>({});
   const [markAll, setMarkAll] = useState({ busy: false, error: "" });
   const [meeting, setMeeting] = useState({ busy: false, error: "", note: "" });
+  // "Sync from Smartlead". `cursor` is set only while a press stopped early, and
+  // is dropped when the window changes — a cursor belongs to the window it read.
+  const [sync, setSync] = useState<{
+    busy: boolean;
+    days: number;
+    message: string;
+    error: string;
+    cursor: ReplySyncCursor | null;
+  }>({ busy: false, days: DEFAULT_REPLY_SYNC_DAYS, message: "", error: "", cursor: null });
   const [sendState, setSendState] = useState<Record<string, SendState>>({});
   // Bumped to remount a thread's Respond box empty once its draft has gone out.
   const [draftEpoch, setDraftEpoch] = useState<Record<string, number>>({});
@@ -298,6 +331,26 @@ export function RepliesPanel({
     setMarkAll({ busy: false, error: res.ok ? "" : res.error });
     void loadList(list.sentiment, true);
     void refreshCounts();
+  }
+
+  async function runSync(resume: boolean) {
+    if (sync.busy) return;
+    const cursor = resume ? sync.cursor : null;
+    setSync((s) => ({ ...s, busy: true, error: "", message: resume ? s.message : "" }));
+    const res = await api<{ message: string; cursor: ReplySyncCursor | null }>("/api/replies/sync", {
+      days: sync.days,
+      cursor,
+    });
+    if (res.ok) {
+      setSync((s) => ({ ...s, busy: false, message: res.data.message, error: "", cursor: res.data.cursor }));
+    } else {
+      // A failed Continue keeps its cursor, so pressing it again resumes rather than restarts.
+      setSync((s) => ({ ...s, busy: false, error: res.error, cursor: resume ? s.cursor : null }));
+    }
+    // Whatever landed is final, so show it even after a partial failure.
+    void loadList(sentimentRef.current, true);
+    void refreshCounts();
+    if (selectedRef.current) void loadDetail(selectedRef.current, true);
   }
 
   function finishDraft(threadId: string) {
@@ -496,8 +549,38 @@ export function RepliesPanel({
           })}
         </div>
 
-        <div style={css("margin-left:auto; display:flex; align-items:center; gap:10px;")}>
+        <div style={css("margin-left:auto; display:flex; align-items:center; gap:8px; flex-wrap:wrap;")}>
           {markAll.error && <span style={css("font-size:12px; color:#b42318;")}>{markAll.error}</span>}
+          <select
+            aria-label="Sync window"
+            value={sync.days}
+            disabled={sync.busy}
+            onChange={(e) => {
+              const days = Number(e.target.value);
+              setSync((s) => ({ ...s, days, cursor: null, message: "", error: "" }));
+            }}
+            style={css(
+              "padding:7px 8px; border-radius:8px; border:1px solid #e2e2dd; background:#fff; font-family:inherit; font-size:12.5px; color:#1a1a1a;",
+            )}
+          >
+            {REPLY_SYNC_WINDOWS.map((d) => (
+              <option key={d} value={d}>
+                Last {d} days
+              </option>
+            ))}
+          </select>
+          <Box
+            as="button"
+            type="button"
+            onClick={() => runSync(false)}
+            disabled={sync.busy}
+            title="Import replied conversations from Smartlead's inbox that the webhook hasn't delivered"
+            style={css(BTN_SECONDARY + (sync.busy ? "opacity:0.6; cursor:default;" : ""))}
+            hover={sync.busy ? undefined : css("background:#f7f7f4;")}
+          >
+            <IconSync spinning={sync.busy} />
+            {sync.busy ? "Syncing…" : "Sync from Smartlead"}
+          </Box>
           <Box
             as="button"
             type="button"
@@ -510,6 +593,42 @@ export function RepliesPanel({
           </Box>
         </div>
       </div>
+
+      {(sync.message || sync.error) && (
+        <div
+          role={sync.error ? "alert" : "status"}
+          style={css(
+            "display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 14px; border-bottom:1px solid #f0f0ec; background:#fbfbfa; font-size:12px; line-height:1.5;" +
+              (sync.error ? "color:#b42318;" : "color:#57575a;"),
+          )}
+        >
+          <span style={css("min-width:0; flex:1 1 280px;")}>{sync.error || sync.message}</span>
+          {sync.cursor && (
+            <Box
+              as="button"
+              type="button"
+              onClick={() => runSync(true)}
+              disabled={sync.busy}
+              style={css(BTN_SECONDARY + "padding:5px 11px;" + (sync.busy ? "opacity:0.6; cursor:default;" : ""))}
+              hover={sync.busy ? undefined : css("background:#f2f2ee;")}
+            >
+              {sync.busy ? "Syncing…" : "Continue"}
+            </Box>
+          )}
+          {!sync.busy && (
+            <Box
+              as="button"
+              type="button"
+              aria-label="Dismiss"
+              onClick={() => setSync((s) => ({ ...s, message: "", error: "", cursor: null }))}
+              style={css("border:none; background:transparent; color:#a3a39d; cursor:pointer; padding:2px; display:inline-flex;")}
+              hover={css("color:#1a1a1a;")}
+            >
+              <IconClose size={14} />
+            </Box>
+          )}
+        </div>
+      )}
 
       <div className="slcrm-replies-grid">
         {/* LEFT: thread list */}
