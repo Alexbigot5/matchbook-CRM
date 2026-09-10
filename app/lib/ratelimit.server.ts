@@ -219,6 +219,35 @@ export const UNIPILE_RULE: RateLimitRule = {
 };
 
 /**
+ * The Replies tab's D1-only writes: opening a thread, Mark all read, the meeting
+ * toggle.
+ *
+ * Separate from SMARTLEAD_RULE — which is what the tab's Send is metered on,
+ * since that one is a real email through the same metered API — for the reason
+ * SMARTLEAD_BUILDER_RULE is: clicking down a list of forty replies is forty
+ * writes that reach nothing but D1, and must not spend the budget for sending.
+ */
+export const REPLIES_RULE: RateLimitRule = {
+  bucket: "replies:user",
+  limit: 240,
+  windowMs: 60 * 1000,
+};
+
+/**
+ * Deliveries to /api/smartlead/webhook that failed the secret check, per IP.
+ *
+ * Only FAILURES are metered. Smartlead can fire bursts of legitimate deliveries
+ * (every campaign send, when EMAIL_SENT is subscribed), and a limit on those
+ * would drop real replies on the floor — each blocked delivery is a retry at
+ * best. The secret is long and random, so what needs bounding is guessing it.
+ */
+export const SMARTLEAD_WEBHOOK_FAIL_RULE: RateLimitRule = {
+  bucket: "smartlead:webhook-fail",
+  limit: 10,
+  windowMs: 15 * 60 * 1000,
+};
+
+/**
  * Starting a prospecting run.
  *
  * Tight, and per hour rather than per minute, because a run is the only thing in

@@ -37,6 +37,24 @@ import {
   type StoredSequenceStep,
 } from "../crm/smartlead-map";
 import { REPLY_NOTE_PREFIX, SEND_NOTE_PREFIX } from "../crm/campaigns";
+import { ago } from "../crm/data";
+import {
+  avatarInitials,
+  isSameSentText,
+  leadDisplayName,
+  MEETING_PROMOTES_FROM,
+  MEETING_STATUS,
+  previewLine,
+  sentimentLabel,
+  type ReplyCounts,
+  type ReplyListItem,
+  type ReplyMessage,
+  type ReplySentiment,
+  type ReplyTag,
+  type ReplyThreadDetail,
+  type StoredSentiment,
+  type WebhookPlan,
+} from "../crm/replies";
 import { REPLY_PROMOTES_FROM, REPLY_STATUS, type ReplyCard } from "../crm/unipile-map";
 import { parseConditions, type SavedView } from "../crm/views";
 import type { DedupedProspect, Prospect, RunCounts } from "../crm/prospecting";
@@ -3960,4 +3978,735 @@ export async function recordReplies(
   }
 
   return { stored, promoted };
+}
+
+// ---------------------------------------------------------------------------
+// Smartlead Replies inbox (migration 0026)
+//
+// Written by POST /api/smartlead/webhook, read and answered through /api/replies.
+// The payload translation is app/crm/replies.ts; this half normalises the
+// timestamps (the one thing that needs a Date) and owns every statement.
+// ---------------------------------------------------------------------------
+
+/**
+ * A Smartlead timestamp as ISO-with-Z, or null when it won't parse.
+ *
+ * Normalised because `sent_at` is ordered on as text and is half of the
+ * idempotency key: Smartlead has been seen sending the same instant with and
+ * without milliseconds, and two spellings of one instant would both order wrong
+ * and store the message twice.
+ */
+function isoInstant(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/** "today" / "3d ago" for the last week, then "Jul 16". Against the caller's `now`. */
+function replyDayLabel(iso: string, now: number): string {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return "";
+  const days = dayDiff(ms, now);
+  return days < 7 ? ago(days) : dateLabel(ms);
+}
+
+/** Direction plus the instant to the second. See smartlead_messages.dedupe_key. */
+function messageDedupeKey(direction: string, iso: string): string {
+  return `${direction}:${iso.slice(0, 19)}`;
+}
+
+/** Same bound the contact form puts on a name or company. */
+const LIMIT_NAME = 200;
+
+const asSentiment = (raw: string | null): StoredSentiment | null =>
+  raw === "positive" || raw === "negative" || raw === "neutral" ? raw : null;
+
+export type WebhookWriteResult = {
+  /** null when the event had no thread to land in (an EMAIL_SENT to someone who never replied). */
+  threadId: string | null;
+  storedMessages: number;
+  newReplies: number;
+  confirmedSends: number;
+};
+
+/**
+ * Apply one webhook delivery.
+ *
+ * RETRY-SAFE BY CONSTRUCTION, because Smartlead retries anything not answered
+ * 200 in time and the route answers 500 on a D1 failure precisely so it will.
+ * The lead is an upsert on (campaign, email), the thread an upsert on the lead,
+ * every message an INSERT OR IGNORE on (thread, dedupe_key) — and, as
+ * recordReplies() learned, an ignored insert is still a successful statement, so
+ * "is there a new reply" is read off `RETURNING id`, never assumed. That is what
+ * stops a retried EMAIL_REPLY from marking a thread the rep already read as
+ * unread again.
+ *
+ * A SENT message is first offered to the CRM's own unconfirmed sends in the
+ * thread (isSameSentText). A match CONFIRMS that row, taking Smartlead's time and
+ * ids, instead of adding the same email a second time.
+ */
+export async function recordWebhookEvent(
+  db: D1Database,
+  plan: Extract<WebhookPlan, { kind: "apply" }>,
+  receivedAt: string,
+): Promise<WebhookWriteResult> {
+  const result: WebhookWriteResult = { threadId: null, storedMessages: 0, newReplies: 0, confirmedSends: 0 };
+  const now = new Date().toISOString();
+
+  let threadId: string | null = null;
+
+  if (plan.createsThread) {
+    const touchCategory = plan.category ? 1 : 0;
+    const lead = await db
+      .prepare(
+        `INSERT INTO smartlead_reply_leads
+           (id, campaign_id, email, smartlead_lead_id, first_name, last_name, company_name,
+            category, sentiment, updated_at)
+         VALUES (?1, ?2, ?3, NULLIF(?4, ''), ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(campaign_id, email) DO UPDATE SET
+           smartlead_lead_id = COALESCE(excluded.smartlead_lead_id, smartlead_lead_id),
+           first_name = CASE WHEN excluded.first_name <> '' THEN excluded.first_name ELSE first_name END,
+           last_name = CASE WHEN excluded.first_name <> '' OR excluded.last_name <> '' THEN excluded.last_name ELSE last_name END,
+           company_name = CASE WHEN excluded.company_name <> '' THEN excluded.company_name ELSE company_name END,
+           category = CASE WHEN ?11 = 1 THEN excluded.category ELSE category END,
+           -- An unresolved sentiment for the SAME category keeps the stored one:
+           -- a reply payload naming "Interested" without its sentiment_type, when
+           -- the category lookup fails, must not drop a known-positive lead out of
+           -- its tab. A different or cleared category does replace it.
+           sentiment = CASE
+             WHEN ?11 <> 1 THEN sentiment
+             WHEN excluded.sentiment IS NULL AND excluded.category IS NOT NULL
+                  AND LOWER(excluded.category) = LOWER(COALESCE(category, '')) THEN sentiment
+             ELSE excluded.sentiment END,
+           updated_at = excluded.updated_at
+         RETURNING id`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        plan.campaignId,
+        plan.email,
+        plan.lead.smartleadLeadId.slice(0, 64),
+        plan.lead.firstName.slice(0, LIMIT_NAME),
+        plan.lead.lastName.slice(0, LIMIT_NAME),
+        plan.lead.companyName.slice(0, LIMIT_NAME),
+        plan.category?.name?.slice(0, LIMIT_NAME) ?? null,
+        plan.category?.sentiment ?? null,
+        now,
+        touchCategory,
+      )
+      .first<{ id: string }>();
+    if (!lead?.id) throw new Error("smartlead_reply_leads upsert returned no row");
+
+    const thread = await db
+      .prepare(
+        `INSERT INTO smartlead_threads (id, lead_id, campaign_id, email_account_id, subject, updated_at)
+         VALUES (?1, ?2, ?3, NULLIF(?4, ''), ?5, ?6)
+         ON CONFLICT(lead_id) DO UPDATE SET
+           email_account_id = COALESCE(NULLIF(?4, ''), email_account_id),
+           subject = CASE WHEN subject = '' THEN ?5 ELSE subject END
+         RETURNING id`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        lead.id,
+        plan.campaignId,
+        plan.emailAccountId.slice(0, 64),
+        plan.subject,
+        isoInstant(plan.messages[0]?.sentAt) ?? receivedAt,
+      )
+      .first<{ id: string }>();
+    threadId = thread?.id ?? null;
+  } else {
+    const existing = await db
+      .prepare(
+        `SELECT t.id FROM smartlead_threads t
+           JOIN smartlead_reply_leads l ON l.id = t.lead_id
+          WHERE l.campaign_id = ? AND l.email = ?`,
+      )
+      .bind(plan.campaignId, plan.email)
+      .first<{ id: string }>();
+    threadId = existing?.id ?? null;
+  }
+
+  if (!threadId) return result;
+  result.threadId = threadId;
+
+  // Oldest first, so a history delivered in one payload lands in order and the
+  // CRM-send reconciliation below pairs the earliest unconfirmed send first.
+  const messages = plan.messages
+    .map((m) => ({
+      ...m,
+      // A reply with no parseable time is still a reply; it takes the delivery
+      // time. (A retry of that delivery then keys differently — the price of a
+      // payload that gave us nothing better, and still better than dropping it.)
+      iso: isoInstant(m.sentAt) ?? (m.direction === "REPLY" ? receivedAt : null),
+    }))
+    .filter((m): m is typeof m & { iso: string } => m.iso !== null)
+    .sort((a, b) => (a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0));
+
+  type PendingCrmRow = { id: string; body: string; sent_at: string };
+  let pendingCrm: PendingCrmRow[] | null = null;
+
+  for (const m of messages) {
+    const key = messageDedupeKey(m.direction, m.iso);
+
+    if (m.messageId) {
+      const seen = await db
+        .prepare("SELECT 1 AS hit FROM smartlead_messages WHERE thread_id = ? AND message_id = ? LIMIT 1")
+        .bind(threadId, m.messageId.slice(0, 500))
+        .first<{ hit: number }>();
+      if (seen) continue;
+    }
+
+    if (m.direction === "SENT") {
+      // Already stored under this key: a repeat, not a candidate for pairing
+      // with a CRM send. Checked FIRST, because pairing a repeat by text could
+      // otherwise confirm — or delete — a different, real send whose words
+      // happen to be a prefix of this one ("Thanks!").
+      const stored = await db
+        .prepare("SELECT 1 AS hit FROM smartlead_messages WHERE thread_id = ? AND dedupe_key = ? LIMIT 1")
+        .bind(threadId, key)
+        .first<{ hit: number }>();
+      if (!stored) {
+        pendingCrm ??= (
+          await db
+            .prepare(
+              `SELECT id, body, sent_at FROM smartlead_messages
+                WHERE thread_id = ? AND origin = 'crm' AND delivery IN ('sending', 'sent')
+                ORDER BY created_at`,
+            )
+            .bind(threadId)
+            .all<PendingCrmRow>()
+        ).results ?? [];
+        // A CRM send can only be the email Smartlead reports if the CRM sent it
+        // first. Two minutes of slack for the clocks on either side.
+        const latestPossible = new Date(Date.parse(m.iso) + 2 * 60_000).toISOString();
+        const candidates: PendingCrmRow[] = pendingCrm;
+        const match = candidates.find(
+          (row) => row.sent_at <= latestPossible && isSameSentText(row.body, m.body),
+        );
+        if (match) {
+          pendingCrm = candidates.filter((row) => row.id !== match.id);
+          await db
+            .prepare(
+              `UPDATE smartlead_messages
+                  SET delivery = 'confirmed', sent_at = ?, dedupe_key = ?,
+                      message_id = COALESCE(?, message_id), stats_id = COALESCE(?, stats_id)
+                WHERE id = ?`,
+            )
+            .bind(m.iso, key, m.messageId?.slice(0, 500) ?? null, m.statsId?.slice(0, 64) ?? null, match.id)
+            .run();
+          result.confirmedSends++;
+          continue;
+        }
+      }
+    }
+
+    const inserted = await db
+      .prepare(
+        `INSERT OR IGNORE INTO smartlead_messages
+           (id, thread_id, direction, body, sent_at, message_id, stats_id, dedupe_key, origin, delivery)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'smartlead', 'confirmed')
+         RETURNING id`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        threadId,
+        m.direction,
+        m.body,
+        m.iso,
+        m.messageId?.slice(0, 500) ?? null,
+        m.statsId?.slice(0, 64) ?? null,
+        key,
+      )
+      .first<{ id: string }>();
+    if (inserted?.id) {
+      result.storedMessages++;
+      if (m.direction === "REPLY") result.newReplies++;
+    } else if (m.messageId || m.statsId) {
+      // Already stored — typically from a category event's history, which carries
+      // no Message-ID. This delivery's ids are what let a reply thread under the
+      // lead's message, so they fill the gaps rather than being dropped.
+      await db
+        .prepare(
+          `UPDATE smartlead_messages
+              SET message_id = COALESCE(message_id, ?), stats_id = COALESCE(stats_id, ?)
+            WHERE thread_id = ? AND dedupe_key = ?`,
+        )
+        .bind(m.messageId?.slice(0, 500) ?? null, m.statsId?.slice(0, 64) ?? null, threadId, key)
+        .run();
+    }
+  }
+
+  // Re-derive the thread's summary columns from its messages rather than
+  // patching them from this payload, so out-of-order deliveries converge.
+  //
+  // "Is there a reply this thread hasn't counted" is the stored reply_count
+  // against a fresh COUNT, not this delivery's `newReplies` alone: a delivery that
+  // inserted a reply and then died before this UPDATE is retried with its insert
+  // IGNORED, and only the count still notices that reply was never flagged unread.
+  // (SQLite evaluates every SET expression against the row as it was, so the
+  // CASEs below all see the old reply_count.)
+  await db
+    .prepare(
+      `UPDATE smartlead_threads SET
+         is_read = CASE
+           WHEN (SELECT COUNT(*) FROM smartlead_messages WHERE thread_id = ?1 AND direction = 'REPLY') > reply_count
+           THEN 0 ELSE is_read END,
+         last_received_at = CASE
+           WHEN (SELECT COUNT(*) FROM smartlead_messages WHERE thread_id = ?1 AND direction = 'REPLY') > reply_count
+           THEN ?3 ELSE last_received_at END,
+         reply_count = (SELECT COUNT(*) FROM smartlead_messages WHERE thread_id = ?1 AND direction = 'REPLY'),
+         updated_at = COALESCE(
+           (SELECT MAX(sent_at) FROM smartlead_messages WHERE thread_id = ?1 AND delivery <> 'sending'),
+           updated_at),
+         last_reply_at =
+           (SELECT MAX(sent_at) FROM smartlead_messages WHERE thread_id = ?1 AND direction = 'REPLY'),
+         -- The campaign email the lead's newest reply answered, first: that is
+         -- what reply-email-thread means by "the message to reply to". Any other
+         -- message's id (our own sends carry one once echoed) only as a fallback.
+         latest_email_stats_id = COALESCE(
+           (SELECT stats_id FROM smartlead_messages
+             WHERE thread_id = ?1 AND direction = 'REPLY' AND stats_id IS NOT NULL
+             ORDER BY sent_at DESC LIMIT 1),
+           (SELECT stats_id FROM smartlead_messages
+             WHERE thread_id = ?1 AND stats_id IS NOT NULL ORDER BY sent_at DESC LIMIT 1),
+           NULLIF(?2, ''), latest_email_stats_id),
+         latest_reply_message_id = COALESCE(
+           (SELECT message_id FROM smartlead_messages
+             WHERE thread_id = ?1 AND direction = 'REPLY' AND message_id IS NOT NULL
+             ORDER BY sent_at DESC LIMIT 1),
+           latest_reply_message_id)
+       WHERE id = ?1`,
+    )
+    // Stamped now, at the write, rather than when the request arrived: the gap
+    // between the two is exactly the window in which a list could load without
+    // this reply and still read as newer than it.
+    .bind(threadId, plan.statsId.slice(0, 64), new Date().toISOString())
+    .run();
+
+  return result;
+}
+
+/** The tab pills' counts, and the Analytics tab's unread badge. See ReplyCounts. */
+export async function countReplyThreads(db: D1Database): Promise<ReplyCounts> {
+  const row = await db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN l.sentiment = 'positive' THEN 1 ELSE 0 END), 0) AS positive,
+         COALESCE(SUM(CASE WHEN l.sentiment = 'negative' THEN 1 ELSE 0 END), 0) AS negative,
+         COALESCE(SUM(CASE WHEN l.sentiment IN ('positive', 'negative') AND t.is_read = 0 THEN 1 ELSE 0 END), 0) AS unread,
+         COALESCE(SUM(CASE WHEN l.sentiment IS NULL OR l.sentiment = 'neutral' THEN 1 ELSE 0 END), 0) AS uncategorized
+         FROM smartlead_threads t
+         JOIN smartlead_reply_leads l ON l.id = t.lead_id
+        WHERE t.last_reply_at IS NOT NULL`,
+    )
+    .first<{ positive: number; negative: number; unread: number; uncategorized: number }>();
+  return {
+    positive: Number(row?.positive) || 0,
+    negative: Number(row?.negative) || 0,
+    unread: Number(row?.unread) || 0,
+    uncategorized: Number(row?.uncategorized) || 0,
+  };
+}
+
+/**
+ * Rows the list returns at most. The tab counts are exact regardless; past this
+ * the list says it is showing the newest N rather than pretending to be all.
+ */
+export const REPLY_LIST_LIMIT = 500;
+
+/** One tab of the Replies list, newest first. */
+export async function listReplyThreads(
+  db: D1Database,
+  sentiment: ReplySentiment,
+  now: number,
+): Promise<ReplyListItem[]> {
+  const res = await db
+    .prepare(
+      `SELECT t.id, t.is_read, t.meeting_booked, t.updated_at,
+              l.first_name, l.last_name, l.email, l.company_name,
+              (SELECT substr(m.body, 1, 600) FROM smartlead_messages m
+                WHERE m.thread_id = t.id AND m.delivery <> 'sending'
+                ORDER BY m.sent_at DESC LIMIT 1) AS preview
+         FROM smartlead_threads t
+         JOIN smartlead_reply_leads l ON l.id = t.lead_id
+        WHERE l.sentiment = ? AND t.last_reply_at IS NOT NULL
+        ORDER BY t.updated_at DESC
+        LIMIT ?`,
+    )
+    .bind(sentiment, REPLY_LIST_LIMIT)
+    .all<{
+      id: string;
+      is_read: number;
+      meeting_booked: number;
+      updated_at: string;
+      first_name: string;
+      last_name: string;
+      email: string;
+      company_name: string;
+      preview: string | null;
+    }>();
+
+  return (res.results ?? []).map((row) => ({
+    id: row.id,
+    lead: {
+      name: leadDisplayName(row.first_name, row.last_name, row.email),
+      company: row.company_name,
+      avatarInitials: avatarInitials(row.first_name, row.last_name, row.email),
+    },
+    isRead: row.is_read === 1,
+    preview: previewLine(row.preview ?? ""),
+    updatedAt: row.updated_at,
+    updatedLabel: replyDayLabel(row.updated_at, now),
+    meetingBooked: row.meeting_booked === 1,
+  }));
+}
+
+type ContactMatchRow = { id: string; name: string; job_title: string | null; company: string | null; status: string };
+
+/**
+ * The CRM contact holding this address — only when exactly one does.
+ *
+ * Two contacts on one inbox is common after a CSV import, and picking either
+ * would put the booking (or the title shown) on the wrong person; the rule
+ * unipile-map.ts's buildContactIndex() follows. Lowercased on both sides because
+ * contacts.email is stored as typed.
+ */
+async function uniqueContactByEmail(db: D1Database, email: string): Promise<ContactMatchRow | null> {
+  if (!email) return null;
+  const res = await db
+    .prepare("SELECT id, name, job_title, company, status FROM contacts WHERE LOWER(TRIM(email)) = ? LIMIT 2")
+    .bind(email.toLowerCase())
+    .all<ContactMatchRow>();
+  const rows = res.results ?? [];
+  return rows.length === 1 ? rows[0] : null;
+}
+
+/** One thread, with its lead, tags and every visible message in order. */
+export async function getReplyThread(
+  db: D1Database,
+  threadId: string,
+  now: number,
+): Promise<ReplyThreadDetail | null> {
+  const row = await db
+    .prepare(
+      `SELECT t.id, t.is_read, t.meeting_booked, t.subject, t.latest_email_stats_id,
+              l.email, l.first_name, l.last_name, l.company_name, l.category, l.sentiment,
+              l.smartlead_lead_id
+         FROM smartlead_threads t
+         JOIN smartlead_reply_leads l ON l.id = t.lead_id
+        WHERE t.id = ?`,
+    )
+    .bind(threadId)
+    .first<{
+      id: string;
+      is_read: number;
+      meeting_booked: number;
+      subject: string;
+      latest_email_stats_id: string | null;
+      email: string;
+      first_name: string;
+      last_name: string;
+      company_name: string;
+      category: string | null;
+      sentiment: string | null;
+      smartlead_lead_id: string | null;
+    }>();
+  if (!row) return null;
+
+  const [contact, messageRes] = await Promise.all([
+    uniqueContactByEmail(db, row.email),
+    // A `sending` row is hidden while its request may still be in flight, and
+    // SHOWN once it is old enough that the request cannot be — as "outcome
+    // unknown". Hiding it forever would show a thread with nothing sent, and a
+    // rep would type the reply again.
+    db
+      .prepare(
+        `SELECT id, direction, body, sent_at, origin, delivery, sent_by
+           FROM smartlead_messages
+          WHERE thread_id = ? AND (delivery <> 'sending' OR sent_at < ?)
+          ORDER BY sent_at, created_at`,
+      )
+      .bind(threadId, new Date(now - STUCK_SEND_MS).toISOString())
+      .all<{
+        id: string;
+        direction: string;
+        body: string;
+        sent_at: string;
+        origin: string;
+        delivery: string;
+        sent_by: string | null;
+      }>(),
+  ]);
+
+  const name = leadDisplayName(row.first_name, row.last_name, row.email);
+  const sentiment = asSentiment(row.sentiment);
+  const tags: ReplyTag[] = [{ kind: "sentiment", label: sentimentLabel(sentiment) }];
+  if (row.meeting_booked === 1) tags.push({ kind: "meeting", label: MEETING_STATUS });
+
+  return {
+    id: row.id,
+    isRead: row.is_read === 1,
+    meetingBooked: row.meeting_booked === 1,
+    subject: row.subject,
+    lead: {
+      name,
+      email: row.email,
+      company: row.company_name || contact?.company || "",
+      title: contact?.job_title ?? "",
+      avatarInitials: avatarInitials(row.first_name, row.last_name, row.email),
+      category: row.category,
+      sentiment,
+    },
+    contact: contact ? { id: contact.id, name: contact.name, status: contact.status } : null,
+    tags,
+    messages: (messageRes.results ?? []).map((m) => toReplyMessage(m, name, now)),
+    canReply: Boolean(row.latest_email_stats_id || row.smartlead_lead_id),
+  };
+}
+
+function toReplyMessage(
+  m: { id: string; direction: string; body: string; sent_at: string; origin: string; delivery: string; sent_by: string | null },
+  leadName: string,
+  now: number,
+): ReplyMessage {
+  const direction = m.direction === "SENT" ? "SENT" : "REPLY";
+  return {
+    id: m.id,
+    direction,
+    body: m.body,
+    sentAt: m.sent_at,
+    sentLabel: replyDayLabel(m.sent_at, now),
+    author: direction === "REPLY" ? leadName : m.origin === "crm" ? m.sent_by || "You" : "Sent via Smartlead",
+    delivery: m.delivery === "sent" ? "sent" : m.delivery === "sending" ? "unknown" : "confirmed",
+  };
+}
+
+/**
+ * How long a reserved send may stay `sending` before the thread shows it as
+ * "outcome unknown". Well past the Smartlead client's 10s timeout plus the
+ * Worker's own limits, so a request still genuinely in flight is never shown.
+ */
+const STUCK_SEND_MS = 2 * 60_000;
+
+/** Mark one thread read. False when there is no such thread. */
+export async function markReplyThreadRead(db: D1Database, threadId: string): Promise<boolean> {
+  const row = await db
+    .prepare("UPDATE smartlead_threads SET is_read = 1 WHERE id = ? RETURNING id")
+    .bind(threadId)
+    .first<{ id: string }>();
+  return Boolean(row?.id);
+}
+
+/**
+ * "Mark all read" for one tab.
+ *
+ * `before` is the `listedAt` of the list the rep was looking at — a server
+ * instant — compared against when each thread last RECEIVED a reply
+ * (last_received_at), not against Smartlead's message times. A reply that
+ * reached the CRM after that list loaded stays unread, even one Smartlead dates
+ * earlier: otherwise the button would acknowledge a message nobody has seen,
+ * which is the one thing an unread marker exists to prevent. Returns the number
+ * actually changed.
+ */
+export async function markReplyThreadsRead(
+  db: D1Database,
+  sentiment: ReplySentiment,
+  before: string | null,
+): Promise<number> {
+  const res = await db
+    .prepare(
+      `UPDATE smartlead_threads SET is_read = 1
+        WHERE is_read = 0
+          AND last_reply_at IS NOT NULL
+          AND (?2 IS NULL OR COALESCE(last_received_at, '') <= ?2)
+          AND lead_id IN (SELECT id FROM smartlead_reply_leads WHERE sentiment = ?1)`,
+    )
+    .bind(sentiment, before)
+    .run();
+  return res.meta?.changes ?? 0;
+}
+
+export type MeetingBookedResult =
+  | { found: false }
+  | { found: true; meetingBooked: boolean; promotedContact: string | null };
+
+/**
+ * Set the thread's meeting flag. The page always passes the value it wants
+ * (`booked`), because a blind flip lets two reps pressing at once cancel each
+ * other out; `null` flips, for a caller that only knows "toggle".
+ *
+ * Turning it ON also moves the uniquely matched contact to Meeting booked, from
+ * MEETING_PROMOTES_FROM only, with the guard in the WHERE clause rather than
+ * trusted from a read — the same race recordReplies() loses on purpose. Returns
+ * the promoted contact's name so the page can say what moved.
+ */
+export async function setReplyMeetingBooked(
+  db: D1Database,
+  threadId: string,
+  booked: boolean | null,
+): Promise<MeetingBookedResult> {
+  const row = await db
+    .prepare(
+      `UPDATE smartlead_threads
+          SET meeting_booked = CASE WHEN ?1 IS NULL THEN 1 - meeting_booked ELSE ?1 END
+        WHERE id = ?2
+       RETURNING lead_id, meeting_booked`,
+    )
+    .bind(booked === null ? null : booked ? 1 : 0, threadId)
+    .first<{ lead_id: string; meeting_booked: number }>();
+  if (!row) return { found: false };
+  if (row.meeting_booked !== 1) return { found: true, meetingBooked: false, promotedContact: null };
+
+  const lead = await db
+    .prepare("SELECT email FROM smartlead_reply_leads WHERE id = ?")
+    .bind(row.lead_id)
+    .first<{ email: string }>();
+  const contact = await uniqueContactByEmail(db, lead?.email ?? "");
+  if (!contact) return { found: true, meetingBooked: true, promotedContact: null };
+
+  const res = await db
+    .prepare(
+      `UPDATE contacts SET status = ?, dead_reason = NULL
+        WHERE id = ? AND status IN (${MEETING_PROMOTES_FROM.map(() => "?").join(", ")})`,
+    )
+    .bind(MEETING_STATUS, contact.id, ...MEETING_PROMOTES_FROM)
+    .run();
+  return {
+    found: true,
+    meetingBooked: true,
+    promotedContact: (res.meta?.changes ?? 0) > 0 ? contact.name : null,
+  };
+}
+
+/** Everything the send path needs to address reply-email-thread. */
+export type ReplySendContext = {
+  campaignId: string;
+  statsId: string | null;
+  smartleadLeadId: string | null;
+  replyMessageId: string | null;
+  latestReply: { body: string; sentAt: string } | null;
+};
+
+export async function getReplySendContext(db: D1Database, threadId: string): Promise<ReplySendContext | null> {
+  const row = await db
+    .prepare(
+      `SELECT t.campaign_id, t.latest_email_stats_id, t.latest_reply_message_id, l.smartlead_lead_id,
+              (SELECT body FROM smartlead_messages
+                WHERE thread_id = t.id AND direction = 'REPLY' ORDER BY sent_at DESC LIMIT 1) AS reply_body,
+              (SELECT sent_at FROM smartlead_messages
+                WHERE thread_id = t.id AND direction = 'REPLY' ORDER BY sent_at DESC LIMIT 1) AS reply_at
+         FROM smartlead_threads t
+         JOIN smartlead_reply_leads l ON l.id = t.lead_id
+        WHERE t.id = ?`,
+    )
+    .bind(threadId)
+    .first<{
+      campaign_id: string;
+      latest_email_stats_id: string | null;
+      latest_reply_message_id: string | null;
+      smartlead_lead_id: string | null;
+      reply_body: string | null;
+      reply_at: string | null;
+    }>();
+  if (!row) return null;
+  return {
+    campaignId: row.campaign_id,
+    statsId: row.latest_email_stats_id,
+    smartleadLeadId: row.smartlead_lead_id,
+    replyMessageId: row.latest_reply_message_id,
+    latestReply: row.reply_at ? { body: row.reply_body ?? "", sentAt: row.reply_at } : null,
+  };
+}
+
+export type ReserveSendResult =
+  | { ok: true; messageId: string }
+  | { ok: false; reason: "sent" | "unknown" };
+
+/**
+ * Claim a send BEFORE calling Smartlead.
+ *
+ * The row is written first, hidden (`delivery = 'sending'`), under the draft's
+ * client key; the partial unique index on (thread_id, client_key) is the real
+ * guard, for the reason smartlead_leads' index is — two submits of one draft
+ * race past any read, and only the index settles it. The loser learns which case
+ * it is in: that draft already went out, or a send of it started and its outcome
+ * was never recorded (the Worker died mid-request). The second is reported as
+ * unknown rather than retried, because a request that never came back may well
+ * have sent the email.
+ */
+export async function reserveReplySend(
+  db: D1Database,
+  threadId: string,
+  input: { body: string; sentBy: string; clientKey: string },
+): Promise<ReserveSendResult> {
+  const id = crypto.randomUUID();
+  const row = await db
+    .prepare(
+      `INSERT OR IGNORE INTO smartlead_messages
+         (id, thread_id, direction, body, sent_at, dedupe_key, origin, delivery, sent_by, client_key)
+       VALUES (?, ?, 'SENT', ?, ?, ?, 'crm', 'sending', ?, ?)
+       RETURNING id`,
+    )
+    .bind(id, threadId, input.body, new Date().toISOString(), `crm:${id}`, input.sentBy, input.clientKey)
+    .first<{ id: string }>();
+  if (row?.id) return { ok: true, messageId: row.id };
+
+  const existing = await db
+    .prepare("SELECT delivery FROM smartlead_messages WHERE thread_id = ? AND client_key = ?")
+    .bind(threadId, input.clientKey)
+    .first<{ delivery: string }>();
+  return { ok: false, reason: existing?.delivery === "sending" ? "unknown" : "sent" };
+}
+
+/**
+ * Smartlead accepted the send: show the row, mark the thread read and move it to
+ * the top. `resolvedStatsId` is the stats id the send path had to look up, stored
+ * so the next reply need not look again.
+ *
+ * `delivery = 'sending'` in the WHERE: a webhook can confirm the email in the gap
+ * between Smartlead answering and this running, and that must not be downgraded
+ * back to unconfirmed.
+ */
+export async function completeReplySend(
+  db: D1Database,
+  threadId: string,
+  messageId: string,
+  resolvedStatsId: string | null,
+  now: number,
+): Promise<ReplyMessage | null> {
+  const sentAt = new Date(now).toISOString();
+  await db.batch([
+    db
+      .prepare("UPDATE smartlead_messages SET delivery = 'sent', sent_at = ? WHERE id = ? AND delivery = 'sending'")
+      .bind(sentAt, messageId),
+    db
+      .prepare(
+        `UPDATE smartlead_threads
+            SET is_read = 1,
+                updated_at = CASE WHEN updated_at < ?1 THEN ?1 ELSE updated_at END,
+                latest_email_stats_id = COALESCE(latest_email_stats_id, ?2)
+          WHERE id = ?3`,
+      )
+      .bind(sentAt, resolvedStatsId, threadId),
+  ]);
+  const m = await db
+    .prepare("SELECT id, direction, body, sent_at, origin, delivery, sent_by FROM smartlead_messages WHERE id = ?")
+    .bind(messageId)
+    .first<{
+      id: string;
+      direction: string;
+      body: string;
+      sent_at: string;
+      origin: string;
+      delivery: string;
+      sent_by: string | null;
+    }>();
+  return m ? toReplyMessage(m, "", now) : null;
+}
+
+/** Smartlead refused the send: release the claim so the rep can try again. */
+export async function abandonReplySend(db: D1Database, messageId: string): Promise<void> {
+  await db.prepare("DELETE FROM smartlead_messages WHERE id = ? AND delivery = 'sending'").bind(messageId).run();
 }

@@ -302,6 +302,49 @@ export function createSmartleadClient(apiKey: string) {
       return call<Record<string, unknown>>("GET", "/leads/fetch-categories");
     },
 
+    /* --- Replies (the /analytics Replies tab) ---------------------------- */
+
+    /**
+     * Answer a lead inside their existing thread — a REAL email, sent the moment
+     * Smartlead accepts it.
+     *
+     * `email_stats_id` names the email being answered and decides the sending
+     * mailbox; `reply_message_id` threads the answer under the lead's reply in
+     * their own client. Called only from POST /api/replies/:threadId/send, which
+     * owns the double-send guard. No retry, as everywhere in this module — and
+     * here for the strongest version of the reason: a request that timed out may
+     * well have sent.
+     */
+    replyToEmailThread(
+      id: string,
+      body: {
+        email_stats_id: string;
+        email_body: string;
+        reply_message_id?: string;
+        reply_email_time?: string;
+        reply_email_body?: string;
+        add_signature?: boolean;
+      },
+    ) {
+      const safe = safeId(id);
+      if (!safe) return Promise.resolve(badId<unknown>());
+      return call<unknown>("POST", `/campaigns/${safe}/reply-email-thread`, { body });
+    },
+
+    /**
+     * One lead's conversation in one campaign, including each email's stats id.
+     *
+     * The send path's fallback for a thread whose webhooks never carried a stats
+     * id. Typed `unknown`: the documented example and live responses disagree on
+     * the envelope (`history` vs `messages`), so the caller unwraps defensively.
+     */
+    getLeadMessageHistory(id: string, leadId: string) {
+      const safe = safeId(id);
+      const safeLead = safeId(leadId);
+      if (!safe || !safeLead) return Promise.resolve(badId<unknown>());
+      return call<unknown>("GET", `/campaigns/${safe}/leads/${safeLead}/message-history`);
+    },
+
     /* --- Email accounts (the mailboxes a campaign sends from) ------------ *
      *
      * Read-and-assign only. Nothing here buys, creates or reconnects a mailbox:

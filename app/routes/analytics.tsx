@@ -1,5 +1,6 @@
 import type { Route } from "./+types/analytics";
-import { AnalyticsPage } from "../crm/analytics-page";
+import { AnalyticsPage, isAnalyticsTab } from "../crm/analytics-page";
+import type { ReplyCounts } from "../crm/replies";
 import { appContext } from "../../load-context";
 import type { CampaignLoopInput, CampaignStepInput } from "../crm/campaigns";
 import { ownerAvatar } from "../crm/data";
@@ -10,6 +11,7 @@ import { requireUser } from "../lib/session.server";
 import {
   buildAnalyticsLabels,
   countPushedLeadsByCampaign,
+  countReplyThreads,
   getCampaignBindings,
   listContacts,
   listPushedContactIds,
@@ -119,13 +121,22 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   const now = Date.now();
   try {
     const labels = buildAnalyticsLabels(now);
-    const [contacts, templates, bindings, stepsByLoop, leadCounts] = await Promise.all([
+    const [contacts, templates, bindings, stepsByLoop, leadCounts, replyCounts] = await Promise.all([
       listContacts(DB, now),
       listTemplates(DB, now),
       getCampaignBindings(DB, now),
       listSequenceStepsByLoop(DB),
       countPushedLeadsByCampaign(DB),
+      // Only the Replies tab's pill counts — the inbox itself is fetched by the
+      // panel. Caught rather than thrown: a deploy that ran ahead of migration
+      // 0026 should lose the Replies badge, not the whole analytics page. The
+      // panel's own requests report the real error when the tab is opened.
+      countReplyThreads(DB).catch((err): ReplyCounts | null => {
+        console.error("[loader] reply counts unavailable:", err);
+        return null;
+      }),
     ]);
+    const tab = new URL(request.url).searchParams.get("tab");
 
     // Second round trip because it needs the bindings from the first. Only for
     // loops that HAVE a campaign — an unbound loop has no rows to aggregate, and
@@ -158,6 +169,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       contacts,
       viewer: { name: user.name, initial: avatar.initial, color: avatar.color },
       labels,
+      replyCounts,
+      initialTab: isAnalyticsTab(tab) ? tab : "pipeline",
       campaigns: LOOPS.map((loop) =>
         buildLoopInput(
           loop,
@@ -178,7 +191,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   }
 }
 
-// No action: this page is read-only. Writes happen on the contacts page.
+// No action. The Replies tab's writes go to /api/replies/* (JSON resource routes),
+// so opening a thread doesn't revalidate this loader and re-read every contact.
 export default function Analytics({ loaderData }: Route.ComponentProps) {
   return (
     <AnalyticsPage
@@ -186,6 +200,8 @@ export default function Analytics({ loaderData }: Route.ComponentProps) {
       viewer={loaderData.viewer}
       labels={loaderData.labels}
       campaigns={loaderData.campaigns}
+      replyCounts={loaderData.replyCounts}
+      initialTab={loaderData.initialTab}
     />
   );
 }
