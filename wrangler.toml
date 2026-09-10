@@ -23,7 +23,15 @@ directory = "./build/client"
 # a secret, the same call ORIGAMI_PROJECT_ID makes. The key itself is a secret:
 # `wrangler secret put UNIPILE_API_KEY`. Leave this blank to disable /settings'
 # reply sync; the page still renders and says what is missing.
-UNIPILE_DSN = ""
+#
+# SET IT HERE, NOT IN THE DASHBOARD. `[vars]` is authoritative: every
+# `npm run deploy` replaces the worker's whole variable set with this block, so a
+# value typed into the Cloudflare dashboard survives exactly until the next
+# deploy and then silently disappears. It cost three deploys and a debugging
+# session to notice, because a blanked DSN does not error anywhere visible — the
+# reply sync just stops matching anything and /settings reports it as "not
+# configured", which reads like a Unipile problem rather than a deploy artefact.
+UNIPILE_DSN = "api28.unipile.com:15865"
 # Sender for magic-link sign-in emails. The domain must be verified in Resend.
 AUTH_EMAIL_FROM = "Matchbook CRM <noreply@onmatchbook.com>"
 
