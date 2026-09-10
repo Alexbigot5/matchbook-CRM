@@ -729,9 +729,16 @@ the contact's timeline, and a status move to `Replied` for anyone still at `New`
   the matchers return an `UnmatchedReason` alongside the match — `ambiguous-profile`,
   `ambiguous-name`, `ambiguous-email`, `profile-disagrees` or `unknown` — and the result
   line names up to `MAX_NAMED_UNMATCHED` senders with the refusal that stopped each.
-  **The reason is decided inside the matcher**, not by a second pass re-deriving it: an
-  explanation computed elsewhere is one refactor from describing a rule the matcher no
-  longer follows, and a confidently wrong explanation is worse than a count. "Present but
+  **Both the reason AND the compared key come out of the matcher**, not from a second pass
+  re-deriving them: an explanation computed elsewhere is one refactor from describing a rule
+  the matcher no longer follows, and a confidently wrong explanation is worse than a count.
+  The first version proved that by getting it wrong — the caller rebuilt the handle from
+  `senderIdentifier`, which for LinkedIn is the opaque provider id (`acoaabnner…`), so the
+  line printed a string the matcher had never compared and nobody could paste onto a contact.
+  `MatchOutcome.handle` is now whatever the rules actually looked at. `no-profile-url` is the
+  reason for a message Unipile hands over with no readable profile URL: the strong slug rule
+  cannot run at all, everything falls to the name, and that is a fact about the provider's
+  payload rather than about the contact book — no amount of tidying contacts fixes it. "Present but
   ambiguous" needed no index change — `put()` already stores `null` for a contested key,
   so it was always distinguishable from absent.
   **"Counted, not stored" still holds exactly.** The names go in the sentence handed back to
