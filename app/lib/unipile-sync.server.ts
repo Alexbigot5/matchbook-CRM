@@ -51,6 +51,8 @@ import {
   type UnmatchedSender,
   planReplies,
   toSnippet,
+  isLinkedinMemberId,
+  linkedinSlug,
   type ContactIndex,
   type MatchedReply,
   type ReplyCandidate,
@@ -60,6 +62,7 @@ import {
   UNIPILE_ACCOUNT_PAGE,
   UNIPILE_FIRST_SYNC_DAYS,
   UNIPILE_MAX_CHATS,
+  UNIPILE_MAX_PROFILE_LOOKUPS,
   UNIPILE_MESSAGE_MAX_PAGES,
   UNIPILE_MESSAGE_PAGE,
 } from "./validate";
@@ -274,7 +277,9 @@ async function readMailbox(
  * URL, and only those can be matched against a CRM row. So the shape is: pull
  * the messages, group the inbound ones by chat, then resolve each chat's
  * attendees — one extra call per conversation, which is what UNIPILE_MAX_CHATS
- * bounds.
+ * bounds. And a fourth per sender: the attendee's profile URL is built from
+ * LinkedIn's internal member id, so the public slug a contact stores has to be
+ * looked up (UNIPILE_MAX_PROFILE_LOOKUPS).
  *
  * `is_sender` is the whole filter. A 1 means we wrote it, and logging our own
  * outreach back onto the contact as their reply is the exact bug the email side
@@ -346,6 +351,50 @@ async function readLinkedin(
 
   const pairs: AccountRead["pairs"] = [];
 
+  // provider_id → the sender's public slug ("" when LinkedIn gave none), so a
+  // person who wrote in three chats, or three times in one, is looked up once.
+  const publicIds = new Map<string, string>();
+  let lookups = 0;
+
+  /**
+   * The public slug for an attendee whose profile URL is a member id — the
+   * fourth call. See isLinkedinMemberId for why the attendee's own URL can't be
+   * matched on.
+   *
+   * A failure that another press could fix (rate limit, Unipile down, timeout,
+   * or this sync's lookup budget) holds the watermark exactly as an unreadable
+   * chat does, so the message is looked at again. A refusal about the profile
+   * itself (404, 422) is not retried: it would answer the same way next time and
+   * pin the account's watermark forever, so it is cached as "no public slug" and
+   * the message goes to the name rule.
+   */
+  async function publicIdFor(attendee: { provider_id?: string; profile_url?: string }) {
+    const providerId = attendee.provider_id ?? "";
+    const fromUrl = linkedinSlug(attendee.profile_url);
+    if (!providerId || (fromUrl && !isLinkedinMemberId(fromUrl))) return "";
+    const cached = publicIds.get(providerId);
+    if (cached !== undefined) return cached;
+
+    if (lookups >= UNIPILE_MAX_PROFILE_LOOKUPS) {
+      truncated = true;
+      return "";
+    }
+    lookups++;
+    const res = await client.getUserProfile(providerId, accountId);
+    if (!res.ok) {
+      const transient = !res.status || res.status === 429 || res.status >= 500;
+      if (transient) {
+        truncated = true;
+        return "";
+      }
+      publicIds.set(providerId, "");
+      return "";
+    }
+    const publicId = (res.data?.public_identifier ?? "").trim();
+    publicIds.set(providerId, publicId);
+    return publicId;
+  }
+
   for (const chatId of resolved) {
     const res = await client.listChatAttendees(chatId);
     // A single unreadable chat is not the account's failure: a conversation can
@@ -388,6 +437,7 @@ async function readLinkedin(
       const outcome = matchLinkedin(candidate, index, {
         name: attendee.name,
         profileUrl: attendee.profile_url,
+        publicIdentifier: await publicIdFor(attendee),
       });
       pairs.push({
         candidate,
