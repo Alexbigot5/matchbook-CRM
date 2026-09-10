@@ -164,6 +164,8 @@ type AccountRead = {
     match: MatchedReply | null;
     /** Why it didn't match, so the result line can say. Null when it did. */
     reason: UnmatchedReason | null;
+    /** The key the matcher compared — never re-derived here. See MatchOutcome. */
+    handle: string;
   }[];
   /**
    * True when the read stopped at a budget rather than at the end of the data.
@@ -238,7 +240,12 @@ async function readMailbox(
         receivedAt,
       };
       const outcome = matchEmail(candidate, index);
-      pairs.push({ candidate, match: outcome.match, reason: outcome.reason });
+      pairs.push({
+        candidate,
+        match: outcome.match,
+        reason: outcome.reason,
+        handle: outcome.handle,
+      });
     }
 
     cursor = res.data?.cursor ?? undefined;
@@ -382,7 +389,12 @@ async function readLinkedin(
         name: attendee.name,
         profileUrl: attendee.profile_url,
       });
-      pairs.push({ candidate, match: outcome.match, reason: outcome.reason });
+      pairs.push({
+        candidate,
+        match: outcome.match,
+        reason: outcome.reason,
+        handle: outcome.handle,
+      });
     }
   }
 

@@ -320,7 +320,12 @@ export type UnmatchedReason =
   | "ambiguous-email"
   | "ambiguous-profile"
   | "ambiguous-name"
-  | "profile-disagrees";
+  | "profile-disagrees"
+  // The message carried no profile URL we could read, so the slug rule — the
+  // strong one — could not run at all and everything fell to the name. Worth its
+  // own reason because it is a fact about the PROVIDER's payload, not about the
+  // contact book, and no amount of tidying contacts will fix it.
+  | "no-profile-url";
 
 /** One sender the sync could not file, and what stopped it. */
 export type UnmatchedSender = {
@@ -336,6 +341,19 @@ export type MatchOutcome = {
   match: MatchedReply | null;
   /** Null exactly when `match` is set. */
   reason: UnmatchedReason | null;
+  /**
+   * The key the matcher actually COMPARED — the email address, or the LinkedIn
+   * slug read out of the message's profile URL. Empty when there was none.
+   *
+   * It travels out of the matcher for the same reason `reason` does, and the
+   * first version of this got it wrong in exactly the way that argument
+   * predicts: the caller recomputed a handle from `senderIdentifier`, which for
+   * LinkedIn is the opaque provider id (`acoaabnner…`) and not the profile URL
+   * the rules compare. The line then printed a string that matched nothing the
+   * matcher had looked at and that nobody could paste onto a contact. The value
+   * being reported has to come from the code that used it.
+   */
+  handle: string;
 };
 
 /**
@@ -361,6 +379,8 @@ export function unmatchedReasonText(reason: UnmatchedReason): string {
       return "two contacts share that name";
     case "profile-disagrees":
       return "a contact has that name but a different LinkedIn on file";
+    case "no-profile-url":
+      return "the message carried no LinkedIn profile URL, so only the name could be matched";
     default:
       return "not in the CRM";
   }
@@ -375,12 +395,18 @@ export function unmatchedReasonText(reason: UnmatchedReason): string {
 export function matchEmail(candidate: ReplyCandidate, index: ContactIndex): MatchOutcome {
   const key = emailKey(candidate.senderIdentifier);
   const contactId = unique(index.byEmail, key);
-  if (contactId) return { match: { ...candidate, contactId, matchedOn: "email" }, reason: null };
+  if (contactId) {
+    return { match: { ...candidate, contactId, matchedOn: "email" }, reason: null, handle: key };
+  }
   // The reason is decided HERE, in the same function that made the decision,
   // rather than by a second pass re-deriving it. An explanation computed
   // somewhere else is one refactor away from describing a rule the matcher no
   // longer follows, and a confidently wrong explanation is worse than a count.
-  return { match: null, reason: isAmbiguous(index.byEmail, key) ? "ambiguous-email" : "unknown" };
+  return {
+    match: null,
+    reason: isAmbiguous(index.byEmail, key) ? "ambiguous-email" : "unknown",
+    handle: key,
+  };
 }
 
 /**
@@ -400,7 +426,11 @@ export function matchLinkedin(
   const slug = linkedinSlug(attendee.profileUrl);
   const bySlug = unique(index.bySlug, slug);
   if (bySlug) {
-    return { match: { ...candidate, contactId: bySlug, matchedOn: "linkedin-profile" }, reason: null };
+    return {
+      match: { ...candidate, contactId: bySlug, matchedOn: "linkedin-profile" },
+      reason: null,
+      handle: slug,
+    };
   }
   // Captured before falling through to the name rule, and reported in
   // preference to whatever that rule concludes: a shared profile URL is the
@@ -412,11 +442,18 @@ export function matchLinkedin(
   if (!byName) {
     return {
       match: null,
+      // Ordered by how much each tells the operator. A shared profile is the
+      // most specific and the easiest to fix; a shared name next; "we never got
+      // a profile URL" next, because it explains why the strong rule never ran;
+      // and only then the genuine stranger.
       reason: slugAmbiguous
         ? "ambiguous-profile"
         : isAmbiguous(index.byName, nameId)
           ? "ambiguous-name"
-          : "unknown",
+          : !slug
+            ? "no-profile-url"
+            : "unknown",
+      handle: slug,
     };
   }
 
@@ -425,10 +462,14 @@ export function matchLinkedin(
   // slug rule above would already have matched them otherwise.
   const stored = index.slugById.get(byName);
   if (slug && stored && stored !== slug) {
-    return { match: null, reason: slugAmbiguous ? "ambiguous-profile" : "profile-disagrees" };
+    return {
+      match: null,
+      reason: slugAmbiguous ? "ambiguous-profile" : "profile-disagrees",
+      handle: slug,
+    };
   }
 
-  return { match: { ...candidate, contactId: byName, matchedOn: "name" }, reason: null };
+  return { match: { ...candidate, contactId: byName, matchedOn: "name" }, reason: null, handle: slug };
 }
 
 /**
@@ -448,7 +489,13 @@ export function matchLinkedin(
  * ./smartlead-map.ts.
  */
 export function planReplies(
-  candidates: { candidate: ReplyCandidate; match: MatchedReply | null; reason?: UnmatchedReason | null }[],
+  candidates: {
+    candidate: ReplyCandidate;
+    match: MatchedReply | null;
+    reason?: UnmatchedReason | null;
+    /** From the matcher. See MatchOutcome.handle for why it is not derived here. */
+    handle?: string;
+  }[],
 ): ReplyPlan {
   const seen = new Set<string>();
   const matched: MatchedReply[] = [];
@@ -456,7 +503,7 @@ export function planReplies(
   let unmatched = 0;
   let newest: string | null = null;
 
-  for (const { candidate, match, reason } of candidates) {
+  for (const { candidate, match, reason, handle } of candidates) {
     const key = `${candidate.accountId} ${candidate.providerMessageId}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -473,18 +520,15 @@ export function planReplies(
     // One entry per PERSON, not per message: someone who sent three messages in
     // one sync is one thing to fix, and listing them three times pushes the
     // other senders out of a bounded line.
-    const handle =
-      candidate.channel === "linkedin"
-        ? linkedinSlug(candidate.senderIdentifier) || candidate.senderIdentifier
-        : emailKey(candidate.senderIdentifier);
+    const compared = handle ?? "";
     const already = unmatchedSenders.some(
-      (u) => u.handle === handle && u.name === candidate.senderName,
+      (u) => u.handle === compared && u.name === candidate.senderName,
     );
     if (!already && unmatchedSenders.length < MAX_NAMED_UNMATCHED) {
       unmatchedSenders.push({
         channel: candidate.channel,
         name: candidate.senderName,
-        handle,
+        handle: compared,
         reason: reason ?? "unknown",
       });
     }
