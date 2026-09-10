@@ -130,11 +130,21 @@ type State = {
   selectedId: string | null;
   menuId: string | null;
   detailMenu: boolean;
-  noteDraft: string;
   modal: string | null;
   /** Contact awaiting a dead-reason choice in the "deadReason" modal. */
   pendingDeadId: string | null;
-  form: FormState;
+  /**
+   * How many table rows to render, and for which filter combination.
+   *
+   * The table used to render every matching contact, and that was most of the
+   * page's render cost: at a thousand contacts, around 200ms of work for any
+   * state change at all, which is what made typing lag. It now renders
+   * TABLE_PAGE rows and a "Show more". `key` is the filter combination the
+   * count was raised under, so changing the view, owner, source, tags, stage or
+   * search drops back to the first page without an effect to reset it — a
+   * stale key simply reads as TABLE_PAGE.
+   */
+  tableLimit: { key: string; n: number };
   csvText: string;
   /**
    * A dropped .xlsx already split into rows, or null when the pending file is a
@@ -178,15 +188,25 @@ type State = {
   todoDone: string[];
   todoExpanded: TodoKind[];
   todoShowAll: boolean;
-  /** The "New view" builder card, and the view being drafted in it. */
+  /**
+   * The "New view" builder card. The draft itself — conditions, name, shared —
+   * is the card's own state (see ViewBuilderCard), so editing it doesn't
+   * re-render the table. The page holds only what the card opens WITH, and a
+   * counter that remounts the card when it is reopened with a different seed
+   * (a To do group's "Save as view" while the card is already open).
+   */
   viewBuilder: boolean;
-  draftConditions: ViewCondition[];
-  viewName: string;
-  viewShared: boolean;
+  viewSeed: { conditions: ViewCondition[]; name: string };
+  viewBuilderSeq: number;
   // The prospecting agent's slide-over. Its results are NOT here: they live in
   // /api/prospect's payload, the same way contacts live in the loader. These are
   // the panel's own UI knobs.
   prospectOpen: boolean;
+  /**
+   * The brief and the Loop 2 source as they were when the panel last closed.
+   * While it is open both are the panel's own state, for the same reason as
+   * the view builder's draft; these only carry them across a close and reopen.
+   */
   prospectDraft: string;
   /** Which thread the panel is showing. Empty until a run is started or restored. */
   prospectRunId: string;
@@ -226,6 +246,9 @@ type ProspectActionResult =
 type ActionResult =
   | { ok: true; message?: string; savedViewId?: string; syncMessage?: string }
   | { ok: false; error: string };
+
+/** Contacts-table rows rendered before "Show more". See State.tableLimit. */
+const TABLE_PAGE = 100;
 
 const blankForm = (loops?: number[]): FormState => ({
   name: "",
@@ -302,10 +325,9 @@ export function SalesLoopCRM({
     selectedId: null,
     menuId: null,
     detailMenu: false,
-    noteDraft: "",
     modal: null,
     pendingDeadId: null,
-    form: blankForm([1]),
+    tableLimit: { key: "", n: TABLE_PAGE },
     csvText: "",
     csvRows: null,
     csvError: "",
@@ -318,9 +340,8 @@ export function SalesLoopCRM({
     todoExpanded: [],
     todoShowAll: false,
     viewBuilder: false,
-    draftConditions: [],
-    viewName: "",
-    viewShared: true,
+    viewSeed: { conditions: [], name: "" },
+    viewBuilderSeq: 0,
     prospectOpen: false,
     prospectDraft: "",
     prospectRunId: "",
@@ -353,9 +374,6 @@ export function SalesLoopCRM({
       // revalidated loader, which would race another user's save.
       patch({
         viewBuilder: false,
-        draftConditions: [],
-        viewName: "",
-        viewShared: true,
         actionError: "",
         menuId: null,
         sourceFilter: "all",
@@ -478,8 +496,8 @@ export function SalesLoopCRM({
 
   const closeProspect = () => patch({ prospectOpen: false, prospectError: "" });
 
-  const sendProspect = () => {
-    const prompt = S.prospectDraft.trim();
+  const sendProspect = (draft: string) => {
+    const prompt = draft.trim();
     if (!prompt) return;
     prospectWrite.submit(
       // runId continues the existing thread when there is one, which is how a
@@ -490,7 +508,7 @@ export function SalesLoopCRM({
     patch({ prospectDraft: "", prospectError: "" });
   };
 
-  const promoteProspects = () => {
+  const promoteProspects = (source: string) => {
     if (!activeRunId || !S.prospectSelected.length) return;
     prospectWrite.submit(
       {
@@ -499,7 +517,7 @@ export function SalesLoopCRM({
         ids: JSON.stringify(S.prospectSelected),
         loop: String(S.prospectLoop),
         owner: S.prospectOwner,
-        source: S.prospectSource,
+        source,
       },
       { method: "post", action: "/api/prospect" },
     );
@@ -575,7 +593,7 @@ export function SalesLoopCRM({
   };
   const clearSelection = () => patch({ selectedIds: [] });
   const open = (id: string) =>
-    patch({ selectedId: id, noteDraft: "", menuId: null, detailMenu: false });
+    patch({ selectedId: id, menuId: null, detailMenu: false });
   const close = () => patch({ selectedId: null, detailMenu: false });
   const toggleMenu = (id: string, e?: any) => {
     if (e) e.stopPropagation();
@@ -597,34 +615,23 @@ export function SalesLoopCRM({
     if (!S.pendingDeadId) return;
     submit({ intent: "setStatus", id: S.pendingDeadId, status: "Dead", reason });
   };
-  const logTouch = (ch: string) => {
+  // The note text arrives from the panel, which owns the draft (see noteDraft in
+  // ./contact-detail.tsx) so that typing a note doesn't re-render the table.
+  const logTouch = (ch: string, text: string) => {
     if (!S.selectedId) return;
-    const text = (S.noteDraft || "").trim();
-    patch({ noteDraft: "" });
     submit({ intent: "logTouch", id: S.selectedId, ch, text });
   };
   const deleteTouch = (touchId: string) => {
     if (!S.selectedId) return;
     submit({ intent: "deleteTouch", id: S.selectedId, touchId });
   };
-  const onNoteInput = (e: any) => patch({ noteDraft: e.target.value });
-  const addNote = () => {
-    const txt = (S.noteDraft || "").trim();
-    if (!txt || !S.selectedId) return;
-    patch({ noteDraft: "" });
-    submit({ intent: "addNote", id: S.selectedId, text: txt });
+  const addNote = (text: string) => {
+    if (!S.selectedId) return;
+    submit({ intent: "addNote", id: S.selectedId, text });
   };
-  const logMeeting = () => {
-    const txt = (S.noteDraft || "").trim();
-    if (!txt || !S.selectedId) return;
-    patch({ noteDraft: "" });
-    submit({ intent: "logMeeting", id: S.selectedId, text: txt });
-  };
-  const onNoteKey = (e: any) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      e.preventDefault();
-      addNote();
-    }
+  const logMeeting = (text: string) => {
+    if (!S.selectedId) return;
+    submit({ intent: "logMeeting", id: S.selectedId, text });
   };
   const snoozeFollow = () => {
     if (!S.selectedId) return;
@@ -640,8 +647,9 @@ export function SalesLoopCRM({
   };
 
   const defaultLoops = () => (S.view === "loop2" ? [2] : [1]);
-  const openAdd = () =>
-    patch({ modal: "add", form: blankForm(defaultLoops()), actionError: "" });
+  // The form itself is AddContactForm's state and starts blank on every open,
+  // because the modal unmounts it on close.
+  const openAdd = () => patch({ modal: "add", actionError: "" });
   const openCsv = () =>
     patch({
       modal: "csv",
@@ -669,14 +677,13 @@ export function SalesLoopCRM({
   // The builder drafts a view; saving posts it and the settle effect above
   // selects whatever id comes back.
   const openViewBuilder = () =>
-    patch({
+    patch((s) => ({
       viewBuilder: true,
-      draftConditions: [defaultCondition()],
-      viewName: "",
-      viewShared: true,
+      viewSeed: { conditions: [defaultCondition()], name: "" },
+      viewBuilderSeq: s.viewBuilderSeq + 1,
       actionError: "",
       menuId: null,
-    });
+    }));
   /**
    * Open the builder already holding "todo is <kind>", from a To do group's
    * header. This is the shortest path between noticing a recurring pile of work
@@ -685,50 +692,27 @@ export function SalesLoopCRM({
    * editable before Save so the owner or loop can be narrowed on top.
    */
   const openViewBuilderForTodo = (kind: TodoKind) =>
-    patch({
+    patch((s) => ({
       viewBuilder: true,
-      draftConditions: [{ field: "todo", op: "is", value: kind }],
-      viewName: TODO_META[kind].viewName,
-      viewShared: true,
+      viewSeed: {
+        conditions: [{ field: "todo", op: "is", value: kind }],
+        name: TODO_META[kind].viewName,
+      },
+      viewBuilderSeq: s.viewBuilderSeq + 1,
       actionError: "",
       menuId: null,
-    });
-  const closeViewBuilder = () =>
-    patch({ viewBuilder: false, draftConditions: [], viewName: "", actionError: "" });
-  const addCondition = () =>
-    patch((s) =>
-      s.draftConditions.length >= MAX_VIEW_CONDITIONS
-        ? {}
-        : { draftConditions: [...s.draftConditions, defaultCondition()] },
-    );
-  const removeCondition = (i: number) =>
-    patch((s) => ({ draftConditions: s.draftConditions.filter((_, j) => j !== i) }));
-  // Changing a row's field resets its value: a status value surviving a switch to
-  // `owner` would leave a clause that silently matches nothing.
-  const setConditionField = (i: number, field: string) =>
-    patch((s) => ({
-      draftConditions: s.draftConditions.map((c, j) =>
-        j === i ? { ...c, field, value: defaultValueForField(field) } : c,
-      ),
     }));
-  const setConditionOp = (i: number, op: ViewOp) =>
-    patch((s) => ({
-      draftConditions: s.draftConditions.map((c, j) => (j === i ? { ...c, op } : c)),
-    }));
-  const setConditionValue = (i: number, value: string) =>
-    patch((s) => ({
-      draftConditions: s.draftConditions.map((c, j) => (j === i ? { ...c, value } : c)),
-    }));
-  const saveView = () => {
+  const closeViewBuilder = () => patch({ viewBuilder: false, actionError: "" });
+  const saveView = (draft: ViewDraft) => {
     // The server validates both of these too; checking here keeps the message
     // instant rather than costing a round trip to say "name it".
-    if (!S.viewName.trim()) return patch({ actionError: "View name is required." });
-    if (!S.draftConditions.length) return patch({ actionError: "Add at least one condition." });
+    if (!draft.name.trim()) return patch({ actionError: "View name is required." });
+    if (!draft.conditions.length) return patch({ actionError: "Add at least one condition." });
     submit({
       intent: "createSavedView",
-      name: S.viewName.trim(),
-      shared: S.viewShared ? "1" : "0",
-      conditions: JSON.stringify(S.draftConditions),
+      name: draft.name.trim(),
+      shared: draft.shared ? "1" : "0",
+      conditions: JSON.stringify(draft.conditions),
     });
   };
   // No confirm modal, unlike a contact: a view is three dropdowns, and the audit
@@ -871,17 +855,7 @@ export function SalesLoopCRM({
     readImportFile(e.target.files?.[0]);
     e.target.value = ""; // allow re-selecting the same file
   };
-  const setForm = (p: Partial<FormState>) =>
-    patch((s) => ({ form: { ...s.form, ...p } }));
-  const toggleFormLoop = (n: number) =>
-    patch((s) => {
-      const has = s.form.loops.includes(n);
-      let loops = has ? s.form.loops.filter((x) => x !== n) : [...s.form.loops, n];
-      if (!loops.length) loops = [n];
-      return { form: { ...s.form, loops: loops.sort() } };
-    });
-  const submitAdd = () => {
-    const f = S.form;
+  const submitAdd = (f: FormState) => {
     if (!f.name.trim()) return;
     submit({
       intent: "addContact",
@@ -987,13 +961,6 @@ export function SalesLoopCRM({
   }
   const sources = [...sourceCounts.keys()].sort((a, b) => a.localeCompare(b));
 
-  // How many contacts the view being drafted would hold. Counted over `contacts`,
-  // never `visible`: a figure computed inside the currently active view/owner/
-  // stage/search would promise a number the saved view will never reproduce.
-  const draftMatches = contacts.filter((c) =>
-    matchesConditions(c, S.draftConditions),
-  ).length;
-
   // Counts are over the unfiltered list — see buildViewTabs. `setView` (not the
   // sidebar) owns resetting the Loop 2 source filter when leaving that view.
   // Saved views are appended as further rows of the same VIEWS group rather than
@@ -1087,6 +1054,16 @@ export function SalesLoopCRM({
   ].map((t) => ({ ...t, active: S.stage === t.key, onClick: () => setStage(t.key) }));
 
   const visible = stageBase.filter(byStage);
+
+  // Only the first page of `visible` is rendered — see State.tableLimit. Every
+  // count, the header's "N contacts", select-all and the bulk bar still work on
+  // the whole of `visible`, so paging changes what is drawn and nothing else.
+  const filterKey = [S.view, S.owner, S.sourceFilter, S.tagFilter.join("|"), S.stage, q].join(" ");
+  const rowLimit = S.tableLimit.key === filterKey ? S.tableLimit.n : TABLE_PAGE;
+  const shown = visible.length > rowLimit ? visible.slice(0, rowLimit) : visible;
+  const hiddenRows = visible.length - shown.length;
+  const showMoreRows = (all: boolean) =>
+    patch({ tableLimit: { key: filterKey, n: all ? visible.length : rowLimit + TABLE_PAGE } });
 
   // ---- selection / bulk actions ----
   const visibleIds = visible.map((c) => c.id);
@@ -1284,7 +1261,7 @@ export function SalesLoopCRM({
     };
   });
 
-  const rows = visible.map((c) => {
+  const rows = shown.map((c) => {
     const last = c.touches[0];
     // `?? NO_TOUCH` covers a stored `type` that isn't a known channel key.
     // Unreachable through the current write paths (both validate against
@@ -1360,27 +1337,6 @@ export function SalesLoopCRM({
     (visible.length === 1 ? "" : "s") +
     (S.owner === "all" ? "" : " · " + (S.owner === "unassigned" ? "unassigned" : S.owner));
 
-  // modal derived
-  const f = S.form;
-  const inputStyle =
-    "width:100%;padding:9px 11px;border:1px solid #e6e6e2;border-radius:9px;font-size:13px;font-family:inherit;background:#fff;outline:none;color:#1a1a1a;";
-  const loopChip = (n: number, on: boolean) => {
-    const amber = n === 2;
-    return on
-      ? `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid ${amber ? "#e5a53a" : "#c9c9c3"};background:${amber ? "#fdf0d9" : "#f0f0ec"};color:${amber ? "#b45309" : "#3a3a38"};font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;`
-      : `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid #e6e6e2;background:#fff;color:#75756f;font-size:13px;font-weight:450;font-family:inherit;cursor:pointer;`;
-  };
-  const ownerChoice = (on: boolean) =>
-    `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid ${on ? "#c9c9c3" : "#e6e6e2"};background:${on ? "#f0f0ec" : "#fff"};color:${on ? "#1a1a1a" : "#75756f"};font-size:13px;font-weight:${on ? "500" : "450"};font-family:inherit;cursor:pointer;`;
-  const formOwners = ["Tom", "Britton", "Unassigned"].map((o) => ({
-    label: o,
-    style: ownerChoice(f.owner === o),
-    onClick: () => setForm({ owner: o }),
-    hasAvatar: o !== "Unassigned",
-    color: ownerMeta(o)?.color ?? "",
-    initial: ownerMeta(o)?.initial ?? "",
-  }));
-
   return (
     <div className="slcrm" style={css("display:flex; height:100vh; width:100%; overflow:hidden; background:#ffffff;")}>
       <style dangerouslySetInnerHTML={{ __html: GLOBAL_CSS }} />
@@ -1443,123 +1399,16 @@ export function SalesLoopCRM({
               card would fight the SOURCE/STAGE rows for the same band, and the
               live match count wants to sit beside the rows it will replace. */}
           {S.viewBuilder && (
-            <div style={css("padding:16px 24px 0;")}>
-              <div style={css("border:1px solid #e6e6e2; border-radius:12px; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,0.04);")}>
-                <div style={css("display:flex; align-items:center; justify-content:space-between; padding:14px 16px 0;")}>
-                  <div style={css("font-size:13px; font-weight:600; letter-spacing:-0.01em;")}>New view</div>
-                  <Box as="button" onClick={closeViewBuilder} title="Close" style={css("border:none; background:#f2f2ef; width:24px; height:24px; border-radius:7px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}>
-                    <IconClose size={13} />
-                  </Box>
-                </div>
-
-                <div style={css("display:flex; flex-direction:column; gap:8px; padding:12px 16px 14px;")}>
-                  {/* Index keys, deliberately: all three controls are controlled
-                      <select>s with no internal DOM state, so re-keying after a
-                      middle removal costs a wasted diff and nothing else — where
-                      a synthetic id on ViewCondition would have to be stripped
-                      before every submit. */}
-                  {S.draftConditions.map((cond, i) => (
-                    <div key={i} style={css("display:flex; align-items:center; gap:8px;")}>
-                      <select
-                        value={cond.field}
-                        onChange={(e) => setConditionField(i, e.target.value)}
-                        aria-label="Field"
-                        style={css(inputStyle + "flex:1; min-width:0; cursor:pointer;")}
-                      >
-                        {VIEW_FIELDS.map((f) => (
-                          <option key={f.key} value={f.key}>{f.label}</option>
-                        ))}
-                      </select>
-                      <select
-                        value={cond.op}
-                        onChange={(e) => setConditionOp(i, e.target.value as ViewOp)}
-                        aria-label="Operator"
-                        style={css(inputStyle + "width:96px; flex:0 0 auto; cursor:pointer;")}
-                      >
-                        {VIEW_OPS.map((op) => (
-                          <option key={op} value={op}>{VIEW_OP_LABELS[op]}</option>
-                        ))}
-                      </select>
-                      <select
-                        value={cond.value}
-                        onChange={(e) => setConditionValue(i, e.target.value)}
-                        aria-label="Value"
-                        style={css(inputStyle + "flex:1.4; min-width:0; cursor:pointer;")}
-                      >
-                        {optionsForField(cond.field).map((o) => (
-                          <option key={o.value} value={o.value}>{o.label}</option>
-                        ))}
-                      </select>
-                      {/* Always rendered, even for the last row: removing it and
-                          hitting Save is how you find out a view needs a
-                          condition, which beats a disabled control with no
-                          explanation. */}
-                      <Box as="button" onClick={() => removeCondition(i)} title="Remove condition" style={css("border:none; background:none; padding:6px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:#b0b0aa; cursor:pointer; flex:0 0 auto;")} hover={css("background:#f2f2ef; color:#75756f;")}>
-                        <IconClose size={14} />
-                      </Box>
-                    </div>
-                  ))}
-
-                  <div>
-                    <Box
-                      as="button"
-                      onClick={addCondition}
-                      disabled={S.draftConditions.length >= MAX_VIEW_CONDITIONS}
-                      title={S.draftConditions.length >= MAX_VIEW_CONDITIONS ? `A view can have at most ${MAX_VIEW_CONDITIONS} conditions.` : undefined}
-                      style={css(`display:inline-flex; align-items:center; gap:6px; padding:7px 11px; border:1px solid #e6e6e2; background:#fff; border-radius:9px; font-size:12.5px; font-weight:500; font-family:inherit; color:${S.draftConditions.length >= MAX_VIEW_CONDITIONS ? "#b0b0aa" : "#3a3a38"}; cursor:${S.draftConditions.length >= MAX_VIEW_CONDITIONS ? "default" : "pointer"};`)}
-                      hover={css("background:#f4f4f1;")}
-                    >
-                      <IconPlus size={13} />
-                      Add condition
-                    </Box>
-                  </div>
-                </div>
-
-                {/* Conditions AND together, which "+ Add condition" rather implies
-                    an OR — so the count is the only honest preview available. */}
-                <div style={css("display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-top:1px solid #ededea;")}>
-                  <span style={css("font-size:12.5px; color:#9a9a95;")}>Matches</span>
-                  <span style={css(MONO + "font-size:11.5px; padding:3px 9px; border-radius:7px; background:#eef0fb; color:#4457c9;")}>
-                    {draftMatches} contact{draftMatches === 1 ? "" : "s"}
-                  </span>
-                </div>
-
-                {S.actionError && (
-                  <div style={css("padding:0 16px 10px; font-size:12px; color:#c2410c;")}>{S.actionError}</div>
-                )}
-
-                <div style={css("display:flex; align-items:center; gap:10px; padding:12px 16px; border-top:1px solid #ededea; flex-wrap:wrap;")}>
-                  <Box
-                    as="input"
-                    value={S.viewName}
-                    maxLength={LIMITS.viewName}
-                    onChange={(e: any) => patch({ viewName: e.target.value })}
-                    placeholder="Name this view"
-                    aria-label="View name"
-                    style={css(inputStyle + "flex:1; min-width:180px;")}
-                    focus={css("border-color:#c9c9c3;")}
-                  />
-                  <label style={css("display:flex; align-items:center; gap:7px; font-size:12.5px; color:#575753; cursor:pointer; white-space:nowrap;")}>
-                    <Checkbox
-                      checked={S.viewShared}
-                      onClick={() => patch((s) => ({ viewShared: !s.viewShared }))}
-                      title={S.viewShared ? "Everyone can see this view" : "Only you can see this view"}
-                    />
-                    Shared
-                  </label>
-                  <Box
-                    as="button"
-                    onClick={saveView}
-                    disabled={submitPending}
-                    style={css(`display:flex; align-items:center; gap:6px; padding:9px 15px; border:none; background:${submitPending ? "#c9c9c3" : "#1a1a1a"}; color:#fff; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:${submitPending ? "default" : "pointer"}; white-space:nowrap;`)}
-                    hover={css(submitPending ? "" : "background:#333;")}
-                  >
-                    <IconSave size={13} />
-                    Save view
-                  </Box>
-                </div>
-              </div>
-            </div>
+            <ViewBuilderCard
+              key={S.viewBuilderSeq}
+              contacts={contacts}
+              initialConditions={S.viewSeed.conditions}
+              initialName={S.viewSeed.name}
+              actionError={S.actionError}
+              pending={submitPending}
+              onSave={saveView}
+              onClose={closeViewBuilder}
+            />
           )}
           {S.view === "loop2" && sourceTabs.length > 0 && (
             <div style={css("display:flex; align-items:center; gap:8px; padding:14px 24px 2px; flex-wrap:wrap;")}>
@@ -1858,7 +1707,9 @@ export function SalesLoopCRM({
                     checked={allVisibleSelected}
                     indeterminate={!allVisibleSelected && someVisibleSelected}
                     onClick={toggleSelectAll}
-                    title={allVisibleSelected ? "Clear selection" : "Select all"}
+                    // Selects every match, including rows past the page limit, so
+                    // the title says how many when that is more than are drawn.
+                    title={allVisibleSelected ? "Clear selection" : hiddenRows > 0 ? `Select all ${visible.length}` : "Select all"}
                   />
                 )}
               </div>
@@ -1939,6 +1790,22 @@ export function SalesLoopCRM({
             {visible.length === 0 && (
               <div style={css("text-align:center; padding:48px; color:#a3a39d; font-size:13px;")}>No contacts match this view.</div>
             )}
+            {hiddenRows > 0 && (
+              <div style={css("display:flex; align-items:center; justify-content:center; gap:10px; padding:14px 0 0; font-size:12.5px; color:#9a9a95;")}>
+                <span style={css(MONO + "font-size:11.5px;")}>
+                  Showing {shown.length} of {visible.length}
+                </span>
+                <Box as="button" onClick={() => showMoreRows(false)} style={css("border:1px solid #e6e6e2; background:#fff; padding:6px 12px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; color:#3a3a38; cursor:pointer;")} hover={css("background:#f4f4f1;")}>
+                  Show {Math.min(TABLE_PAGE, hiddenRows)} more
+                </Box>
+                {/* Offered, not defaulted: rendering every row is exactly the
+                    cost the page limit exists to avoid, so it is one press away
+                    rather than what every keystroke pays for. */}
+                <Box as="button" onClick={() => showMoreRows(true)} style={css("border:none; background:none; padding:6px 8px; border-radius:8px; font-size:12.5px; font-family:inherit; color:#75756f; cursor:pointer;")} hover={css("background:#f0f0ec; color:#3a3a38;")}>
+                  Show all
+                </Box>
+              </div>
+            )}
           </div>
         </div>
       </main>
@@ -1995,22 +1862,21 @@ export function SalesLoopCRM({
       {S.prospectOpen && (
         <ProspectingPanel
           turns={turns}
-          draft={S.prospectDraft}
+          initialDraft={S.prospectDraft}
+          initialSource={S.prospectSource}
           selected={S.prospectSelected}
           loop={S.prospectLoop}
           owner={S.prospectOwner}
-          source={S.prospectSource}
           error={S.prospectError}
           pending={prospectPending}
           sending={prospectSending}
           configured={prospectConfigured}
-          onDraft={(prospectDraft) => patch({ prospectDraft })}
+          onStash={(prospectDraft, prospectSource) => patch({ prospectDraft, prospectSource })}
           onSend={sendProspect}
           onToggle={toggleProspect}
           onToggleAll={toggleAllProspects}
           onLoop={(prospectLoop) => patch({ prospectLoop })}
           onOwner={(prospectOwner) => patch({ prospectOwner })}
-          onSource={(prospectSource) => patch({ prospectSource })}
           onPromote={promoteProspects}
           onCancel={cancelProspect}
           onExport={exportProspects}
@@ -2025,14 +1891,11 @@ export function SalesLoopCRM({
           contact={sel}
           viewer={viewer}
           nameIndex={nameIndex}
-          noteDraft={S.noteDraft}
           statusMenuOpen={S.detailMenu}
           pending={fetcher.state !== "idle"}
           onClose={close}
           onToggleStatusMenu={toggleDetailMenu}
           onSetStatus={setStatus}
-          onNoteInput={onNoteInput}
-          onNoteKey={onNoteKey}
           onAddNote={addNote}
           onLogMeeting={logMeeting}
           onLogTouch={logTouch}
@@ -2052,91 +1915,12 @@ export function SalesLoopCRM({
         <div onClick={closeModal} style={css("position:fixed; inset:0; background:rgba(20,20,18,0.22); z-index:60; display:flex; align-items:flex-start; justify-content:center; padding:72px 20px; animation:slcrm-fadeIn 0.14s ease;")}>
           <div onClick={(e) => e.stopPropagation()} style={css("width:520px; max-width:100%; background:#fff; border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.22); overflow:hidden; animation:slcrm-slideDown 0.18s cubic-bezier(0.2,0.8,0.2,1);")}>
             {S.modal === "add" && (
-              <>
-                <div style={css("padding:20px 22px 16px; border-bottom:1px solid #ededea; display:flex; align-items:center; justify-content:space-between;")}>
-                  <div style={css("font-size:16px; font-weight:600; letter-spacing:-0.01em;")}>Add contact</div>
-                  <Box as="button" onClick={closeModal} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
-                </div>
-                <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:16px;")}>
-                  <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
-                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
-                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Name</span>
-                      <Box as="input" value={f.name} maxLength={LIMITS.name} onChange={(e: any) => setForm({ name: e.target.value })} placeholder="Full name" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
-                    </label>
-                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
-                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Company</span>
-                      <Box as="input" value={f.company} maxLength={LIMITS.company} onChange={(e: any) => setForm({ company: e.target.value })} placeholder="Company" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
-                    </label>
-                  </div>
-                  <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
-                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
-                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Email</span>
-                      <Box as="input" type="email" value={f.email} maxLength={LIMITS.email} onChange={(e: any) => setForm({ email: e.target.value })} placeholder="name@company.com" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
-                    </label>
-                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
-                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Phone</span>
-                      <Box as="input" value={f.phone} maxLength={LIMITS.phone} onChange={(e: any) => setForm({ phone: e.target.value })} placeholder="+1 (555) 000-0000" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
-                    </label>
-                  </div>
-                  <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
-                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
-                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Job title</span>
-                      <Box as="input" value={f.jobTitle} maxLength={LIMITS.jobTitle} onChange={(e: any) => setForm({ jobTitle: e.target.value })} placeholder="Head of Marketing" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
-                    </label>
-                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
-                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Website</span>
-                      <Box as="input" value={f.website} maxLength={LIMITS.website} onChange={(e: any) => setForm({ website: e.target.value })} placeholder="acme.com" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
-                    </label>
-                  </div>
-                  <label style={css("display:flex; flex-direction:column; gap:6px;")}>
-                    <span style={css("font-size:12px; font-weight:500; color:#575753;")}>LinkedIn</span>
-                    <Box as="input" value={f.linkedin} maxLength={LIMITS.linkedin} onChange={(e: any) => setForm({ linkedin: e.target.value })} placeholder="linkedin.com/in/handle" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
-                  </label>
-                  <div style={css("display:flex; flex-direction:column; gap:7px;")}>
-                    <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Loops</span>
-                    <div style={css("display:flex; gap:8px;")}>
-                      <button onClick={() => toggleFormLoop(1)} style={css(loopChip(1, f.loops.includes(1)))}><span style={css("width:8px;height:8px;border-radius:3px;background:#9a9a95;")} />Loop 1 · always-on</button>
-                      <button onClick={() => toggleFormLoop(2)} style={css(loopChip(2, f.loops.includes(2)))}><span style={css("width:8px;height:8px;border-radius:3px;background:#e0930a;")} />Loop 2 · blitz</button>
-                    </div>
-                  </div>
-                  {f.loops.includes(2) && (
-                    <label style={css("display:flex; flex-direction:column; gap:6px;")}>
-                      <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Community / Event <span style={css("color:#a3a39d; font-weight:450;")}>· where they came from</span></span>
-                      <Box as="input" list="slcrm-sources" value={f.source} maxLength={LIMITS.source} onChange={(e: any) => setForm({ source: e.target.value })} placeholder="e.g. Naturally Network Denver, Newtopia" style={css(inputStyle)} focus={css("border-color:#c9c9c3;")} />
-                      <datalist id="slcrm-sources">
-                        {sources.map((s) => (
-                          <option key={s} value={s} />
-                        ))}
-                      </datalist>
-                    </label>
-                  )}
-                  <div style={css("display:flex; flex-direction:column; gap:7px;")}>
-                    <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Owner</span>
-                    <div style={css("display:flex; gap:8px;")}>
-                      {formOwners.map((o, j) => (
-                        <button key={j} onClick={o.onClick} style={css(o.style)}>
-                          {o.hasAvatar && <span style={css(`width:16px;height:16px;border-radius:5px;background:${o.color};color:#fff;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;`)}>{o.initial}</span>}
-                          {o.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div style={css("display:flex; flex-direction:column; gap:7px;")}>
-                    <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Status</span>
-                    <div style={css("display:flex; gap:7px; flex-wrap:wrap;")}>
-                      {STATUSES.map((s) => (
-                        <button key={s.id} onClick={() => setForm({ status: s.id })} style={css(`display:flex;align-items:center;gap:7px;padding:7px 11px;border-radius:8px;border:1px solid ${s.id === f.status ? "#c9c9c3" : "#e6e6e2"};background:${s.id === f.status ? "#f4f4f1" : "#fff"};color:#3a3a38;font-size:12.5px;font-family:inherit;cursor:pointer;`)}>
-                          <span style={css(`width:6px;height:6px;border-radius:4px;background:${s.dot};`)} />{s.id}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
-                    <Box as="button" onClick={closeModal} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
-                    <button onClick={submitAdd} style={css(`border:none;background:${f.name.trim() ? "#1a1a1a" : "#c9c9c3"};color:#fff;padding:9px 16px;border-radius:9px;font-size:13px;font-weight:500;font-family:inherit;cursor:${f.name.trim() ? "pointer" : "default"};`)}>Add contact</button>
-                  </div>
-                </div>
-              </>
+              <AddContactForm
+                initialLoops={defaultLoops()}
+                sources={sources}
+                onSubmit={submitAdd}
+                onCancel={closeModal}
+              />
             )}
 
             {S.modal === "csv" && (
@@ -2203,5 +1987,325 @@ export function SalesLoopCRM({
         </div>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Draft-holding pieces of the page.
+//
+// WHY THESE ARE COMPONENTS AND NOT MORE `State`. Everything in SalesLoopCRM's
+// state re-renders SalesLoopCRM, which means the sidebar, the To do list and
+// every table row. That is the right trade for a filter change and the wrong
+// one for a keystroke: a view name or an Add contact field changes nothing the
+// table shows, yet each letter paid for rebuilding it. Each of these holds its
+// own draft, so typing re-renders the card or the form and nothing else. The
+// page still owns every WRITE — these hand a finished draft to a callback and
+// never submit anything themselves.
+// ---------------------------------------------------------------------------
+
+const INPUT_STYLE =
+  "width:100%;padding:9px 11px;border:1px solid #e6e6e2;border-radius:9px;font-size:13px;font-family:inherit;background:#fff;outline:none;color:#1a1a1a;";
+
+type ViewDraft = { conditions: ViewCondition[]; name: string; shared: boolean };
+
+/**
+ * The "New view" builder card.
+ *
+ * Mounted with a `key` that changes on every open, so reopening it — including
+ * from a To do group's "Save as view" while it is already open — starts from
+ * the new seed rather than keeping the previous draft.
+ */
+function ViewBuilderCard({
+  contacts,
+  initialConditions,
+  initialName,
+  actionError,
+  pending,
+  onSave,
+  onClose,
+}: {
+  contacts: Contact[];
+  initialConditions: ViewCondition[];
+  initialName: string;
+  actionError: string;
+  pending: boolean;
+  onSave: (draft: ViewDraft) => void;
+  onClose: () => void;
+}) {
+  const [conditions, setConditions] = useState<ViewCondition[]>(initialConditions);
+  const [name, setName] = useState(initialName);
+  const [shared, setShared] = useState(true);
+
+  const addCondition = () =>
+    setConditions((cs) => (cs.length >= MAX_VIEW_CONDITIONS ? cs : [...cs, defaultCondition()]));
+  const removeCondition = (i: number) => setConditions((cs) => cs.filter((_, j) => j !== i));
+  // Changing a row's field resets its value: a status value surviving a switch to
+  // `owner` would leave a clause that silently matches nothing.
+  const setConditionField = (i: number, field: string) =>
+    setConditions((cs) =>
+      cs.map((c, j) => (j === i ? { ...c, field, value: defaultValueForField(field) } : c)),
+    );
+  const setConditionOp = (i: number, op: ViewOp) =>
+    setConditions((cs) => cs.map((c, j) => (j === i ? { ...c, op } : c)));
+  const setConditionValue = (i: number, value: string) =>
+    setConditions((cs) => cs.map((c, j) => (j === i ? { ...c, value } : c)));
+
+  // How many contacts the view being drafted would hold. Counted over `contacts`,
+  // never `visible`: a figure computed inside the currently active view/owner/
+  // stage/search would promise a number the saved view will never reproduce.
+  const draftMatches = contacts.filter((c) => matchesConditions(c, conditions)).length;
+  const atMax = conditions.length >= MAX_VIEW_CONDITIONS;
+
+  return (
+    <div style={css("padding:16px 24px 0;")}>
+      <div style={css("border:1px solid #e6e6e2; border-radius:12px; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,0.04);")}>
+        <div style={css("display:flex; align-items:center; justify-content:space-between; padding:14px 16px 0;")}>
+          <div style={css("font-size:13px; font-weight:600; letter-spacing:-0.01em;")}>New view</div>
+          <Box as="button" onClick={onClose} title="Close" style={css("border:none; background:#f2f2ef; width:24px; height:24px; border-radius:7px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}>
+            <IconClose size={13} />
+          </Box>
+        </div>
+
+        <div style={css("display:flex; flex-direction:column; gap:8px; padding:12px 16px 14px;")}>
+          {/* Index keys, deliberately: all three controls are controlled
+              <select>s with no internal DOM state, so re-keying after a
+              middle removal costs a wasted diff and nothing else — where
+              a synthetic id on ViewCondition would have to be stripped
+              before every submit. */}
+          {conditions.map((cond, i) => (
+            <div key={i} style={css("display:flex; align-items:center; gap:8px;")}>
+              <select
+                value={cond.field}
+                onChange={(e) => setConditionField(i, e.target.value)}
+                aria-label="Field"
+                style={css(INPUT_STYLE + "flex:1; min-width:0; cursor:pointer;")}
+              >
+                {VIEW_FIELDS.map((f) => (
+                  <option key={f.key} value={f.key}>{f.label}</option>
+                ))}
+              </select>
+              <select
+                value={cond.op}
+                onChange={(e) => setConditionOp(i, e.target.value as ViewOp)}
+                aria-label="Operator"
+                style={css(INPUT_STYLE + "width:96px; flex:0 0 auto; cursor:pointer;")}
+              >
+                {VIEW_OPS.map((op) => (
+                  <option key={op} value={op}>{VIEW_OP_LABELS[op]}</option>
+                ))}
+              </select>
+              <select
+                value={cond.value}
+                onChange={(e) => setConditionValue(i, e.target.value)}
+                aria-label="Value"
+                style={css(INPUT_STYLE + "flex:1.4; min-width:0; cursor:pointer;")}
+              >
+                {optionsForField(cond.field).map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              {/* Always rendered, even for the last row: removing it and
+                  hitting Save is how you find out a view needs a
+                  condition, which beats a disabled control with no
+                  explanation. */}
+              <Box as="button" onClick={() => removeCondition(i)} title="Remove condition" style={css("border:none; background:none; padding:6px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:#b0b0aa; cursor:pointer; flex:0 0 auto;")} hover={css("background:#f2f2ef; color:#75756f;")}>
+                <IconClose size={14} />
+              </Box>
+            </div>
+          ))}
+
+          <div>
+            <Box
+              as="button"
+              onClick={addCondition}
+              disabled={atMax}
+              title={atMax ? `A view can have at most ${MAX_VIEW_CONDITIONS} conditions.` : undefined}
+              style={css(`display:inline-flex; align-items:center; gap:6px; padding:7px 11px; border:1px solid #e6e6e2; background:#fff; border-radius:9px; font-size:12.5px; font-weight:500; font-family:inherit; color:${atMax ? "#b0b0aa" : "#3a3a38"}; cursor:${atMax ? "default" : "pointer"};`)}
+              hover={css("background:#f4f4f1;")}
+            >
+              <IconPlus size={13} />
+              Add condition
+            </Box>
+          </div>
+        </div>
+
+        {/* Conditions AND together, which "+ Add condition" rather implies
+            an OR — so the count is the only honest preview available. */}
+        <div style={css("display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-top:1px solid #ededea;")}>
+          <span style={css("font-size:12.5px; color:#9a9a95;")}>Matches</span>
+          <span style={css(MONO + "font-size:11.5px; padding:3px 9px; border-radius:7px; background:#eef0fb; color:#4457c9;")}>
+            {draftMatches} contact{draftMatches === 1 ? "" : "s"}
+          </span>
+        </div>
+
+        {actionError && (
+          <div style={css("padding:0 16px 10px; font-size:12px; color:#c2410c;")}>{actionError}</div>
+        )}
+
+        <div style={css("display:flex; align-items:center; gap:10px; padding:12px 16px; border-top:1px solid #ededea; flex-wrap:wrap;")}>
+          <Box
+            as="input"
+            value={name}
+            maxLength={LIMITS.viewName}
+            onChange={(e: any) => setName(e.target.value)}
+            placeholder="Name this view"
+            aria-label="View name"
+            style={css(INPUT_STYLE + "flex:1; min-width:180px;")}
+            focus={css("border-color:#c9c9c3;")}
+          />
+          <label style={css("display:flex; align-items:center; gap:7px; font-size:12.5px; color:#575753; cursor:pointer; white-space:nowrap;")}>
+            <Checkbox
+              checked={shared}
+              onClick={() => setShared((v) => !v)}
+              title={shared ? "Everyone can see this view" : "Only you can see this view"}
+            />
+            Shared
+          </label>
+          <Box
+            as="button"
+            onClick={() => onSave({ conditions, name, shared })}
+            disabled={pending}
+            style={css(`display:flex; align-items:center; gap:6px; padding:9px 15px; border:none; background:${pending ? "#c9c9c3" : "#1a1a1a"}; color:#fff; border-radius:9px; font-size:13px; font-weight:500; font-family:inherit; cursor:${pending ? "default" : "pointer"}; white-space:nowrap;`)}
+            hover={css(pending ? "" : "background:#333;")}
+          >
+            <IconSave size={13} />
+            Save view
+          </Box>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The Add contact modal's body. Starts blank on every open because the modal
+ * unmounts it on close — the same reset `openAdd` used to do by hand.
+ */
+function AddContactForm({
+  initialLoops,
+  sources,
+  onSubmit,
+  onCancel,
+}: {
+  /** The loop being looked at, so adding while filtered to Loop 2 lands there. */
+  initialLoops: number[];
+  /** Existing Loop 2 sources, offered as suggestions. */
+  sources: string[];
+  onSubmit: (form: FormState) => void;
+  onCancel: () => void;
+}) {
+  const [f, setF] = useState<FormState>(() => blankForm(initialLoops));
+  const setForm = (p: Partial<FormState>) => setF((s) => ({ ...s, ...p }));
+  const toggleFormLoop = (n: number) =>
+    setF((s) => {
+      const has = s.loops.includes(n);
+      let loops = has ? s.loops.filter((x) => x !== n) : [...s.loops, n];
+      if (!loops.length) loops = [n];
+      return { ...s, loops: loops.sort() };
+    });
+
+  const loopChip = (n: number, on: boolean) => {
+    const amber = n === 2;
+    return on
+      ? `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid ${amber ? "#e5a53a" : "#c9c9c3"};background:${amber ? "#fdf0d9" : "#f0f0ec"};color:${amber ? "#b45309" : "#3a3a38"};font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;`
+      : `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid #e6e6e2;background:#fff;color:#75756f;font-size:13px;font-weight:450;font-family:inherit;cursor:pointer;`;
+  };
+  const ownerChoice = (on: boolean) =>
+    `display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid ${on ? "#c9c9c3" : "#e6e6e2"};background:${on ? "#f0f0ec" : "#fff"};color:${on ? "#1a1a1a" : "#75756f"};font-size:13px;font-weight:${on ? "500" : "450"};font-family:inherit;cursor:pointer;`;
+  const formOwners = ["Tom", "Britton", "Unassigned"].map((o) => ({
+    label: o,
+    style: ownerChoice(f.owner === o),
+    onClick: () => setForm({ owner: o }),
+    hasAvatar: o !== "Unassigned",
+    color: ownerMeta(o)?.color ?? "",
+    initial: ownerMeta(o)?.initial ?? "",
+  }));
+
+  return (
+    <>
+      <div style={css("padding:20px 22px 16px; border-bottom:1px solid #ededea; display:flex; align-items:center; justify-content:space-between;")}>
+        <div style={css("font-size:16px; font-weight:600; letter-spacing:-0.01em;")}>Add contact</div>
+        <Box as="button" onClick={onCancel} style={css("border:none; background:#f2f2ef; width:28px; height:28px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; color:#6b6b66;")} hover={css("background:#e8e8e4;")}><IconClose size={15} /></Box>
+      </div>
+      <div style={css("padding:18px 22px 22px; display:flex; flex-direction:column; gap:16px;")}>
+        <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
+          <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+            <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Name</span>
+            <Box as="input" value={f.name} maxLength={LIMITS.name} onChange={(e: any) => setForm({ name: e.target.value })} placeholder="Full name" style={css(INPUT_STYLE)} focus={css("border-color:#c9c9c3;")} />
+          </label>
+          <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+            <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Company</span>
+            <Box as="input" value={f.company} maxLength={LIMITS.company} onChange={(e: any) => setForm({ company: e.target.value })} placeholder="Company" style={css(INPUT_STYLE)} focus={css("border-color:#c9c9c3;")} />
+          </label>
+        </div>
+        <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
+          <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+            <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Email</span>
+            <Box as="input" type="email" value={f.email} maxLength={LIMITS.email} onChange={(e: any) => setForm({ email: e.target.value })} placeholder="name@company.com" style={css(INPUT_STYLE)} focus={css("border-color:#c9c9c3;")} />
+          </label>
+          <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+            <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Phone</span>
+            <Box as="input" value={f.phone} maxLength={LIMITS.phone} onChange={(e: any) => setForm({ phone: e.target.value })} placeholder="+1 (555) 000-0000" style={css(INPUT_STYLE)} focus={css("border-color:#c9c9c3;")} />
+          </label>
+        </div>
+        <div style={css("display:grid; grid-template-columns:1fr 1fr; gap:12px;")}>
+          <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+            <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Job title</span>
+            <Box as="input" value={f.jobTitle} maxLength={LIMITS.jobTitle} onChange={(e: any) => setForm({ jobTitle: e.target.value })} placeholder="Head of Marketing" style={css(INPUT_STYLE)} focus={css("border-color:#c9c9c3;")} />
+          </label>
+          <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+            <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Website</span>
+            <Box as="input" value={f.website} maxLength={LIMITS.website} onChange={(e: any) => setForm({ website: e.target.value })} placeholder="acme.com" style={css(INPUT_STYLE)} focus={css("border-color:#c9c9c3;")} />
+          </label>
+        </div>
+        <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+          <span style={css("font-size:12px; font-weight:500; color:#575753;")}>LinkedIn</span>
+          <Box as="input" value={f.linkedin} maxLength={LIMITS.linkedin} onChange={(e: any) => setForm({ linkedin: e.target.value })} placeholder="linkedin.com/in/handle" style={css(INPUT_STYLE)} focus={css("border-color:#c9c9c3;")} />
+        </label>
+        <div style={css("display:flex; flex-direction:column; gap:7px;")}>
+          <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Loops</span>
+          <div style={css("display:flex; gap:8px;")}>
+            <button onClick={() => toggleFormLoop(1)} style={css(loopChip(1, f.loops.includes(1)))}><span style={css("width:8px;height:8px;border-radius:3px;background:#9a9a95;")} />Loop 1 · always-on</button>
+            <button onClick={() => toggleFormLoop(2)} style={css(loopChip(2, f.loops.includes(2)))}><span style={css("width:8px;height:8px;border-radius:3px;background:#e0930a;")} />Loop 2 · blitz</button>
+          </div>
+        </div>
+        {f.loops.includes(2) && (
+          <label style={css("display:flex; flex-direction:column; gap:6px;")}>
+            <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Community / Event <span style={css("color:#a3a39d; font-weight:450;")}>· where they came from</span></span>
+            <Box as="input" list="slcrm-sources" value={f.source} maxLength={LIMITS.source} onChange={(e: any) => setForm({ source: e.target.value })} placeholder="e.g. Naturally Network Denver, Newtopia" style={css(INPUT_STYLE)} focus={css("border-color:#c9c9c3;")} />
+            <datalist id="slcrm-sources">
+              {sources.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
+          </label>
+        )}
+        <div style={css("display:flex; flex-direction:column; gap:7px;")}>
+          <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Owner</span>
+          <div style={css("display:flex; gap:8px;")}>
+            {formOwners.map((o, j) => (
+              <button key={j} onClick={o.onClick} style={css(o.style)}>
+                {o.hasAvatar && <span style={css(`width:16px;height:16px;border-radius:5px;background:${o.color};color:#fff;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;`)}>{o.initial}</span>}
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={css("display:flex; flex-direction:column; gap:7px;")}>
+          <span style={css("font-size:12px; font-weight:500; color:#575753;")}>Status</span>
+          <div style={css("display:flex; gap:7px; flex-wrap:wrap;")}>
+            {STATUSES.map((s) => (
+              <button key={s.id} onClick={() => setForm({ status: s.id })} style={css(`display:flex;align-items:center;gap:7px;padding:7px 11px;border-radius:8px;border:1px solid ${s.id === f.status ? "#c9c9c3" : "#e6e6e2"};background:${s.id === f.status ? "#f4f4f1" : "#fff"};color:#3a3a38;font-size:12.5px;font-family:inherit;cursor:pointer;`)}>
+                <span style={css(`width:6px;height:6px;border-radius:4px;background:${s.dot};`)} />{s.id}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={css("display:flex; justify-content:flex-end; gap:8px; margin-top:2px;")}>
+          <Box as="button" onClick={onCancel} style={css("border:1px solid #e6e6e2; background:#fff; padding:9px 15px; border-radius:9px; font-size:13px; font-family:inherit; cursor:pointer; color:#575753;")} hover={css("background:#f4f4f1;")}>Cancel</Box>
+          <button onClick={() => onSubmit(f)} style={css(`border:none;background:${f.name.trim() ? "#1a1a1a" : "#c9c9c3"};color:#fff;padding:9px 16px;border-radius:9px;font-size:13px;font-weight:500;font-family:inherit;cursor:${f.name.trim() ? "pointer" : "default"};`)}>Add contact</button>
+        </div>
+      </div>
+    </>
   );
 }

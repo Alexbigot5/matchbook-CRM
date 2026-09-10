@@ -36,9 +36,33 @@ export function crmFontLinks() {
   ];
 }
 
+/**
+ * Parsed style objects, keyed by the exact string.
+ *
+ * `css()` runs on every element of every render — about thirty times per
+ * contacts-table row — and parsing was measured at roughly a third of the page's
+ * whole render cost at 1,000 contacts. The strings are overwhelmingly the same
+ * few hundred literals, so parsing each once is nearly all of the win. It also
+ * hands React the SAME object for an unchanged style, which lets the DOM diff
+ * skip the property-by-property comparison entirely.
+ *
+ * Bounded because some strings are interpolated (a colour per status, a bar
+ * width per figure on /analytics). Clearing on overflow rather than evicting
+ * one entry at a time: refilling costs one parse per string, and the bound is
+ * far above the number of distinct strings a page actually produces.
+ */
+const CSS_CACHE = new Map<string, CSSProperties>();
+const CSS_CACHE_MAX = 5_000;
+
 // Parse an inline CSS string (as used throughout the original template) into a
 // React style object, so ported markup can keep its style strings verbatim.
+//
+// The returned object is SHARED between every caller passing the same string,
+// and frozen so that stays safe: spread it (`{ ...css(s), color }`) to vary it,
+// never assign into it.
 export function css(style: string): CSSProperties {
+  const hit = CSS_CACHE.get(style);
+  if (hit) return hit;
   const o: Record<string, string> = {};
   for (const decl of style.split(";")) {
     const i = decl.indexOf(":");
@@ -47,7 +71,10 @@ export function css(style: string): CSSProperties {
     if (!prop) continue;
     o[prop.startsWith("--") ? prop : kebabToCamel(prop)] = decl.slice(i + 1).trim();
   }
-  return o as CSSProperties;
+  if (CSS_CACHE.size >= CSS_CACHE_MAX) CSS_CACHE.clear();
+  const parsed = Object.freeze(o) as CSSProperties;
+  CSS_CACHE.set(style, parsed);
+  return parsed;
 }
 
 type BoxProps = {

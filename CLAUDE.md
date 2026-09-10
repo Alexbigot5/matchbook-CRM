@@ -197,7 +197,11 @@ over a shared shell:
   covers, per segment like the groups, and never a blank category. A new spelling of a known
   vertical lands in Other too until `CATEGORY_GROUP_BY_RAW` learns it.
 - **`ui.tsx`** — presentation primitives. `css(string)` parses an inline CSS **string** into a
-  React style object (the app keeps the original template's style strings verbatim). `Box` is
+  React style object (the app keeps the original template's style strings verbatim). **Results
+  are cached and frozen**: parsing ran ~30 times per table row per render and measured at about
+  a third of the contacts page's render cost, so each string is parsed once and every caller
+  gets the same object — spread it to vary it (`{ ...css(s), color }`), never assign into it.
+  The cache clears at 5,000 entries, since some strings are interpolated. `Box` is
   a polymorphic element (`as=...`, any element type — the sidebar passes `Link`) that adds
   `hover`/`focus` style merging via local state. Plus a set of inline SVG icon components,
   and the shell constants both pages share: `GLOBAL_CSS`, `MONO`, and `crmFontLinks` (the
@@ -394,12 +398,24 @@ over a shared shell:
   reverse, for the same bundle reason `sidebar.tsx` documents.
 - **`sales-loop-crm.tsx`** — the entire UI as **one big client component** taking a
   `contacts` prop from the route loader. A `useState` "God object" (`State`) holds only
-  **UI** state (filters, selection, menus, form/CSV drafts) — patched through `patch()`; the
+  **UI** state (filters, selection, menus, the CSV draft) — patched through `patch()`; the
   contact data itself lives in the loader. Every mutation (status changes, notes,
   follow-up snooze/clear, add, CSV import, delete) submits to the route `action` via a single
   `useFetcher` + a hidden `intent` field; React Router revalidates the loader afterward (no
   optimistic UI). Contains all views: sidebar filters, the To do list, contact
   table, detail slide-over, add/CSV-import modals.
+  **Anything a person TYPES into does not go in `State`.** Every `patch()` re-renders the
+  whole page — sidebar, To do list, table — which is right for a filter and was ~200ms per
+  letter at a thousand contacts for a text box. So the drafts live in the component that owns
+  the input: the Quick note in `ContactDetail`, the Add contact form in `AddContactForm`, the
+  New view draft in `ViewBuilderCard` (remounted via `viewBuilderSeq` so a reopen takes the new
+  `viewSeed`), and the Prospect brief and source in `ProspectingPanel` (stashed back to the page
+  on unmount via `onStash`, so they survive a close). Each hands a finished draft to a callback;
+  the page still owns every write. The search box is the one exception, because it IS a filter.
+  **The table renders `TABLE_PAGE` (100) rows** plus Show more / Show all, via
+  `State.tableLimit`, whose `key` is the filter combination it was raised under — any filter
+  change reads as a stale key and drops back to the first page with no effect to reset it.
+  Counts, the header's "N contacts", select-all and the bulk bar all still use every match.
 
 ### Two "loops" domain concept
 - **Loop 1** — always-on outbound (grey badge).

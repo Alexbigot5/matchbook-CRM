@@ -243,7 +243,6 @@ export type ContactDetailProps = {
   viewer: Viewer;
   /** Built once per page with buildNameIndex(contacts); drives the conflict banner. */
   nameIndex: NameIndex;
-  noteDraft: string;
   statusMenuOpen: boolean;
   /** fetcher.state !== "idle" — disables the touchpoint delete while in flight. */
   pending: boolean;
@@ -251,11 +250,14 @@ export type ContactDetailProps = {
   onToggleStatusMenu: () => void;
   /** Takes the event so the page can stopPropagation on nested menus. */
   onSetStatus: (id: string, status: string, e?: unknown) => void;
-  onNoteInput: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
-  onNoteKey: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
-  onAddNote: () => void;
-  onLogMeeting: () => void;
-  onLogTouch: (ch: string) => void;
+  /**
+   * The three writes that take the Quick note text, handed the text itself.
+   * The draft is this panel's own state — see `noteDraft` below. The first two
+   * are only called with non-blank text; a touch's note is optional.
+   */
+  onAddNote: (text: string) => void;
+  onLogMeeting: (text: string) => void;
+  onLogTouch: (ch: string, text: string) => void;
   onSnoozeFollow: () => void;
   onClearFollow: () => void;
   onResumeLoop1: () => void;
@@ -289,14 +291,11 @@ export function ContactDetail({
   contact,
   viewer,
   nameIndex,
-  noteDraft,
   statusMenuOpen,
   pending,
   onClose,
   onToggleStatusMenu,
   onSetStatus,
-  onNoteInput,
-  onNoteKey,
   onAddNote,
   onLogMeeting,
   onLogTouch,
@@ -322,6 +321,30 @@ export function ContactDetail({
   // pages that render this panel get it without extra plumbing. Both mount
   // this component with `key={contact.id}`, so switching contacts resets it.
   const [armedTouch, setArmedTouch] = useState<string | null>(null);
+  // The Quick note text, held HERE rather than by the page. It used to live in
+  // each page's state, so every keystroke re-rendered the whole contacts table
+  // behind the panel — around 200ms of work per letter at a thousand contacts,
+  // which is what made typing a note lag. Local state re-renders this panel
+  // only. Both pages key the panel on the contact, so opening another contact
+  // still starts from an empty box, exactly as the page-held draft did.
+  const [noteDraft, setNoteDraft] = useState("");
+  const addNote = () => {
+    const text = noteDraft.trim();
+    if (!text) return;
+    setNoteDraft("");
+    onAddNote(text);
+  };
+  const logMeeting = () => {
+    const text = noteDraft.trim();
+    if (!text) return;
+    setNoteDraft("");
+    onLogMeeting(text);
+  };
+  const logTouch = (ch: string) => {
+    const text = noteDraft.trim();
+    setNoteDraft("");
+    onLogTouch(ch, text);
+  };
 
   const statusMenu = STATUSES.map((s) => ({
     label: s.id,
@@ -731,18 +754,23 @@ export function ContactDetail({
                   as="textarea"
                   value={noteDraft}
                   maxLength={LIMITS.note}
-                  onChange={onNoteInput}
-                  onKeyDown={onNoteKey}
+                  onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setNoteDraft(e.target.value)}
+                  onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                      e.preventDefault();
+                      addNote();
+                    }
+                  }}
                   placeholder={`Add a note as ${viewer.name}… (⌘↵ to save)`}
                   style={css("width:100%; min-height:58px; resize:vertical; padding:9px 11px; border:1px solid #e6e6e2; border-radius:9px; font-size:13px; font-family:inherit; background:#fff; outline:none; color:#1a1a1a; line-height:1.5;")}
                   focus={css("border-color:#c9c9c3;")}
                 />
                 <div style={css("display:flex; justify-content:space-between; align-items:center; gap:8px; margin-top:7px;")}>
-                  <Box as="button" onClick={onLogMeeting} style={css("display:flex; align-items:center; gap:6px; border:1px solid #e6e6e2; background:#fff; color:#575753; padding:7px 12px; border-radius:8px; font-size:12.5px; font-family:inherit; cursor:pointer;")} hover={css("background:#f4f4f1;")}>
+                  <Box as="button" onClick={logMeeting} style={css("display:flex; align-items:center; gap:6px; border:1px solid #e6e6e2; background:#fff; color:#575753; padding:7px 12px; border-radius:8px; font-size:12.5px; font-family:inherit; cursor:pointer;")} hover={css("background:#f4f4f1;")}>
                     <IconCalendar style={css("width:14px; height:14px; color:#75756f;")} />
                     Log as meeting note
                   </Box>
-                  <button onClick={onAddNote} style={css("border:none; background:#1a1a1a; color:#fff; padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;")}>Add note</button>
+                  <button onClick={addNote} style={css("border:none; background:#1a1a1a; color:#fff; padding:7px 14px; border-radius:8px; font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;")}>Add note</button>
                 </div>
 
                 {/* Records outreach on a channel, which is what the analytics
@@ -754,7 +782,7 @@ export function ContactDetail({
                     <Box
                       as="button"
                       key={key}
-                      onClick={() => onLogTouch(key)}
+                      onClick={() => logTouch(key)}
                       title={`Log a ${CH[key].label.toLowerCase()} touchpoint`}
                       style={css(`display:inline-flex; align-items:center; gap:5px; padding:4px 9px; border-radius:7px; border:1px solid #e6e6e2; background:#fff; color:${CH[key].fg}; font-size:12px; font-weight:500; font-family:inherit; cursor:pointer;`)}
                       hover={css(`background:${CH[key].bg}; border-color:${CH[key].bg};`)}

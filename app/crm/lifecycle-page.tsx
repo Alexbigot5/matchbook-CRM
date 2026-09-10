@@ -59,7 +59,6 @@ type State = {
   menuId: string | null;
   selectedId: string | null;
   detailMenu: boolean;
-  noteDraft: string;
   /** Card currently being dragged; null outside a drag. */
   draggingId: string | null;
   /** Stage the pointer is over during a drag; drives the drop highlight. */
@@ -96,7 +95,6 @@ export function LifecyclePage({
     menuId: null,
     selectedId: null,
     detailMenu: false,
-    noteDraft: "",
     draggingId: null,
     dragOverStage: null,
     modal: null,
@@ -139,7 +137,7 @@ export function LifecyclePage({
 
   // ---- handlers ----
   const open = (id: string) =>
-    patch({ selectedId: id, noteDraft: "", menuId: null, detailMenu: false });
+    patch({ selectedId: id, menuId: null, detailMenu: false });
   const close = () => patch({ selectedId: null, detailMenu: false });
   const toggleDetailMenu = () => patch((s) => ({ detailMenu: !s.detailMenu }));
   const toggleMenu = (id: string, e?: any) => {
@@ -170,33 +168,22 @@ export function LifecyclePage({
     submit({ intent: "setStatus", id: S.pendingDeadId, status: "Dead", reason });
   };
 
-  const onNoteInput = (e: any) => patch({ noteDraft: e.target.value });
-  const addNote = () => {
-    const txt = (S.noteDraft || "").trim();
-    if (!txt || !S.selectedId) return;
-    patch({ noteDraft: "" });
-    submit({ intent: "addNote", id: S.selectedId, text: txt });
+  // The note text arrives from the panel, which owns the draft (see noteDraft in
+  // contact-detail.tsx) so typing doesn't re-render the board.
+  const addNote = (text: string) => {
+    if (!S.selectedId) return;
+    submit({ intent: "addNote", id: S.selectedId, text });
   };
-  const logMeeting = () => {
-    const txt = (S.noteDraft || "").trim();
-    if (!txt || !S.selectedId) return;
-    patch({ noteDraft: "" });
-    submit({ intent: "logMeeting", id: S.selectedId, text: txt });
-  };
-  const onNoteKey = (e: any) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-      e.preventDefault();
-      addNote();
-    }
+  const logMeeting = (text: string) => {
+    if (!S.selectedId) return;
+    submit({ intent: "logMeeting", id: S.selectedId, text });
   };
   const deleteTouch = (touchId: string) => {
     if (!S.selectedId) return;
     submit({ intent: "deleteTouch", id: S.selectedId, touchId });
   };
-  const logTouch = (ch: string) => {
+  const logTouch = (ch: string, text: string) => {
     if (!S.selectedId) return;
-    const text = (S.noteDraft || "").trim();
-    patch({ noteDraft: "" });
     submit({ intent: "logTouch", id: S.selectedId, ch, text });
   };
   const snoozeFollow = () => {
@@ -417,14 +404,11 @@ export function LifecyclePage({
           contact={sel}
           viewer={viewer}
           nameIndex={nameIndex}
-          noteDraft={S.noteDraft}
           statusMenuOpen={S.detailMenu}
           pending={fetcher.state !== "idle"}
           onClose={close}
           onToggleStatusMenu={toggleDetailMenu}
           onSetStatus={setStatus}
-          onNoteInput={onNoteInput}
-          onNoteKey={onNoteKey}
           onAddNote={addNote}
           onLogMeeting={logMeeting}
           onLogTouch={logTouch}
