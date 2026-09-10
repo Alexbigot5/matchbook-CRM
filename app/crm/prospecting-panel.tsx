@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { OWNERS } from "./data";
 import {
   confidenceChip,
@@ -58,11 +58,17 @@ const RESULT_GRID =
 export type ProspectingPanelProps = {
   /** Oldest turn first. Empty on a thread nobody has started. */
   turns: RunView[];
-  draft: string;
+  /**
+   * The brief and the Loop 2 source to open with. While the panel is open both
+   * are its OWN state: held by the page, every keystroke re-rendered the whole
+   * contacts table behind the panel. `onStash` hands them back on close so a
+   * half-written brief survives closing and reopening, as it did before.
+   */
+  initialDraft: string;
+  initialSource: string;
   selected: string[];
   loop: number;
   owner: string;
-  source: string;
   error: string;
   pending: boolean;
   /**
@@ -73,14 +79,13 @@ export type ProspectingPanelProps = {
   sending: string;
   /** False when ORIGAMI_API_KEY is unset. Everything stays read-only. */
   configured: boolean;
-  onDraft: (value: string) => void;
-  onSend: () => void;
+  onStash: (draft: string, source: string) => void;
+  onSend: (prompt: string) => void;
   onToggle: (id: string) => void;
   onToggleAll: (ids: string[]) => void;
   onLoop: (loop: number) => void;
   onOwner: (owner: string) => void;
-  onSource: (source: string) => void;
-  onPromote: () => void;
+  onPromote: (source: string) => void;
   onCancel: () => void;
   onExport: () => void;
   onClose: () => void;
@@ -88,27 +93,46 @@ export type ProspectingPanelProps = {
 
 export function ProspectingPanel({
   turns,
-  draft,
+  initialDraft,
+  initialSource,
   selected,
   loop,
   owner,
-  source,
   error,
   pending,
   sending,
   configured,
-  onDraft,
+  onStash,
   onSend,
   onToggle,
   onToggleAll,
   onLoop,
   onOwner,
-  onSource,
   onPromote,
   onCancel,
   onExport,
   onClose,
 }: ProspectingPanelProps) {
+  const [draft, setDraft] = useState(initialDraft);
+  const [source, setSource] = useState(initialSource);
+  // Stashed on unmount rather than on every change — handing each keystroke to
+  // the page is precisely the re-render this local state exists to avoid. The
+  // ref is what the cleanup reads; the state values it closed over at mount
+  // would be the initial ones.
+  const latest = useRef({ draft, source });
+  latest.current = { draft, source };
+  useEffect(
+    () => () => onStash(latest.current.draft, latest.current.source),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const send = () => {
+    const prompt = draft.trim();
+    if (!prompt) return;
+    setDraft("");
+    onSend(prompt);
+  };
+
   const last = turns[turns.length - 1];
   const running = !!last?.running || !!sending;
   // Only the newest turn's results are selectable. Older turns are history —
@@ -199,7 +223,7 @@ export function ProspectingPanel({
             </div>
           )}
 
-          {!turns.length && !sending && <EmptyThread onPick={onDraft} disabled={!configured} />}
+          {!turns.length && !sending && <EmptyThread onPick={setDraft} disabled={!configured} />}
 
           {turns.map((turn, index) => (
             <Turn
@@ -277,7 +301,7 @@ export function ProspectingPanel({
             {loop === 2 && (
               <input
                 value={source}
-                onChange={(e) => onSource(e.currentTarget.value)}
+                onChange={(e) => setSource(e.currentTarget.value)}
                 placeholder="Source"
                 maxLength={LIMITS.source}
                 style={css(SELECT + "width:96px;")}
@@ -298,7 +322,7 @@ export function ProspectingPanel({
               </Box>
               <Box
                 as="button"
-                onClick={onPromote}
+                onClick={() => onPromote(source)}
                 disabled={pending || !chosen.length}
                 style={css(
                   PRIMARY +
@@ -323,13 +347,13 @@ export function ProspectingPanel({
             value={draft}
             maxLength={LIMITS.prospectPrompt}
             disabled={!configured || running}
-            onChange={(e: any) => onDraft(e.currentTarget.value)}
+            onChange={(e: any) => setDraft(e.currentTarget.value)}
             onKeyDown={(e: any) => {
               // ⌘↵ and plain ↵ both send. The field is one line, so unlike the
               // note textarea there is nothing a bare Enter would otherwise do.
               if (e.key === "Enter" && canSend) {
                 e.preventDefault();
-                onSend();
+                send();
               }
             }}
             placeholder={
@@ -346,7 +370,7 @@ export function ProspectingPanel({
           />
           <Box
             as="button"
-            onClick={onSend}
+            onClick={send}
             disabled={!canSend}
             title="Send to the agent"
             style={css(
