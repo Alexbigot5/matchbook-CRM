@@ -75,6 +75,20 @@ export type ReplyPlan = {
   /** Replies from someone who isn't a contact. Counted, not stored — see the sync. */
   unmatched: number;
   /**
+   * Who those were, and why each was refused — for the result line only.
+   *
+   * This does NOT change "counted, not stored". Nothing here is written to a
+   * table: the sync puts these in the sentence it hands back to the page, and
+   * the `last_result` it persists keeps the count alone. A message from someone
+   * outside the CRM still leaves no row behind; it just stops being invisible in
+   * the one second the operator is looking at it.
+   *
+   * Bounded by MAX_NAMED_UNMATCHED — a newsletter-heavy mailbox produces dozens,
+   * and a result line that lists them all is as unreadable as one that lists
+   * none.
+   */
+  unmatchedSenders: UnmatchedSender[];
+  /**
    * The newest `receivedAt` seen across every candidate, matched or not — the
    * next watermark.
    *
@@ -279,14 +293,94 @@ function unique(map: Map<string, string | null>, key: string): string | null {
 }
 
 /**
+ * Why a reply found nobody.
+ *
+ * "Not in the CRM" is the answer everyone assumes, and it is the one case here
+ * that needs no explanation. The other three are the CRM refusing a match it
+ * could see — and reporting them as a bare count is what made a real incident
+ * undiagnosable: two test contacts saved under "Mike" and "mike" held the same
+ * profile slug, `put()` collapsed both keys to null, and every reply from that
+ * person was reported as "1 from someone not in the CRM" while their contact sat
+ * in the book the whole time.
+ *
+ * These are the refusals working correctly. They just have to say so.
+ */
+/**
+ * How many unmatched senders one sync will name.
+ *
+ * Five, not all of them: a mailbox that mostly receives newsletters produces
+ * dozens per sync, and a sentence listing dozens is skipped exactly as readily
+ * as a bare count. Five is enough to spot a pattern — the same person refused
+ * twice, or three refusals that all say "two contacts share that name".
+ */
+export const MAX_NAMED_UNMATCHED = 5;
+
+export type UnmatchedReason =
+  | "unknown"
+  | "ambiguous-email"
+  | "ambiguous-profile"
+  | "ambiguous-name"
+  | "profile-disagrees";
+
+/** One sender the sync could not file, and what stopped it. */
+export type UnmatchedSender = {
+  channel: "email" | "linkedin";
+  name: string;
+  /** The address or profile the matcher compared — what to paste onto a contact. */
+  handle: string;
+  reason: UnmatchedReason;
+};
+
+/** A matcher's verdict: the reply it filed, or the reason it could not. */
+export type MatchOutcome = {
+  match: MatchedReply | null;
+  /** Null exactly when `match` is set. */
+  reason: UnmatchedReason | null;
+};
+
+/**
+ * True when the index HAS this key but refused to resolve it.
+ *
+ * `put()` sets a key held by two different contacts to null rather than
+ * deleting it, so "present and ambiguous" and "absent" are already
+ * distinguishable — this only names the distinction. Nothing about the index
+ * changed to support the reporting below.
+ */
+function isAmbiguous(map: Map<string, string | null>, key: string): boolean {
+  return Boolean(key) && map.has(key) && map.get(key) === null;
+}
+
+/** The refusal, in words an operator can act on. */
+export function unmatchedReasonText(reason: UnmatchedReason): string {
+  switch (reason) {
+    case "ambiguous-email":
+      return "two contacts share that address";
+    case "ambiguous-profile":
+      return "two contacts share that LinkedIn profile";
+    case "ambiguous-name":
+      return "two contacts share that name";
+    case "profile-disagrees":
+      return "a contact has that name but a different LinkedIn on file";
+    default:
+      return "not in the CRM";
+  }
+}
+
+/**
  * Resolve one email reply to a contact. Address only — an email carries a
  * display name too, but matching a stranger's inbox on "Dana Okafor" is exactly
  * the failure this module is built to avoid, and unlike LinkedIn there is no
  * case where the address is missing but the person is knowable.
  */
-export function matchEmail(candidate: ReplyCandidate, index: ContactIndex): MatchedReply | null {
-  const contactId = unique(index.byEmail, emailKey(candidate.senderIdentifier));
-  return contactId ? { ...candidate, contactId, matchedOn: "email" } : null;
+export function matchEmail(candidate: ReplyCandidate, index: ContactIndex): MatchOutcome {
+  const key = emailKey(candidate.senderIdentifier);
+  const contactId = unique(index.byEmail, key);
+  if (contactId) return { match: { ...candidate, contactId, matchedOn: "email" }, reason: null };
+  // The reason is decided HERE, in the same function that made the decision,
+  // rather than by a second pass re-deriving it. An explanation computed
+  // somewhere else is one refactor away from describing a rule the matcher no
+  // longer follows, and a confidently wrong explanation is worse than a count.
+  return { match: null, reason: isAmbiguous(index.byEmail, key) ? "ambiguous-email" : "unknown" };
 }
 
 /**
@@ -302,21 +396,39 @@ export function matchLinkedin(
   candidate: ReplyCandidate,
   index: ContactIndex,
   attendee: { name?: string; profileUrl?: string },
-): MatchedReply | null {
+): MatchOutcome {
   const slug = linkedinSlug(attendee.profileUrl);
   const bySlug = unique(index.bySlug, slug);
-  if (bySlug) return { ...candidate, contactId: bySlug, matchedOn: "linkedin-profile" };
+  if (bySlug) {
+    return { match: { ...candidate, contactId: bySlug, matchedOn: "linkedin-profile" }, reason: null };
+  }
+  // Captured before falling through to the name rule, and reported in
+  // preference to whatever that rule concludes: a shared profile URL is the
+  // most specific thing that can be wrong here and the easiest to act on.
+  const slugAmbiguous = isAmbiguous(index.bySlug, slug);
 
-  const byName = unique(index.byName, nameKey(attendee.name));
-  if (!byName) return null;
+  const nameId = nameKey(attendee.name);
+  const byName = unique(index.byName, nameId);
+  if (!byName) {
+    return {
+      match: null,
+      reason: slugAmbiguous
+        ? "ambiguous-profile"
+        : isAmbiguous(index.byName, nameId)
+          ? "ambiguous-name"
+          : "unknown",
+    };
+  }
 
   // The disagreement refusal. A contact whose stored profile points somewhere
   // else is positive evidence of a different person with the same name — the
   // slug rule above would already have matched them otherwise.
   const stored = index.slugById.get(byName);
-  if (slug && stored && stored !== slug) return null;
+  if (slug && stored && stored !== slug) {
+    return { match: null, reason: slugAmbiguous ? "ambiguous-profile" : "profile-disagrees" };
+  }
 
-  return { ...candidate, contactId: byName, matchedOn: "name" };
+  return { match: { ...candidate, contactId: byName, matchedOn: "name" }, reason: null };
 }
 
 /**
@@ -336,14 +448,15 @@ export function matchLinkedin(
  * ./smartlead-map.ts.
  */
 export function planReplies(
-  candidates: { candidate: ReplyCandidate; match: MatchedReply | null }[],
+  candidates: { candidate: ReplyCandidate; match: MatchedReply | null; reason?: UnmatchedReason | null }[],
 ): ReplyPlan {
   const seen = new Set<string>();
   const matched: MatchedReply[] = [];
+  const unmatchedSenders: UnmatchedSender[] = [];
   let unmatched = 0;
   let newest: string | null = null;
 
-  for (const { candidate, match } of candidates) {
+  for (const { candidate, match, reason } of candidates) {
     const key = `${candidate.accountId} ${candidate.providerMessageId}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -352,14 +465,35 @@ export function planReplies(
       newest = candidate.receivedAt;
     }
 
-    if (match) matched.push(match);
-    else unmatched++;
+    if (match) {
+      matched.push(match);
+      continue;
+    }
+    unmatched++;
+    // One entry per PERSON, not per message: someone who sent three messages in
+    // one sync is one thing to fix, and listing them three times pushes the
+    // other senders out of a bounded line.
+    const handle =
+      candidate.channel === "linkedin"
+        ? linkedinSlug(candidate.senderIdentifier) || candidate.senderIdentifier
+        : emailKey(candidate.senderIdentifier);
+    const already = unmatchedSenders.some(
+      (u) => u.handle === handle && u.name === candidate.senderName,
+    );
+    if (!already && unmatchedSenders.length < MAX_NAMED_UNMATCHED) {
+      unmatchedSenders.push({
+        channel: candidate.channel,
+        name: candidate.senderName,
+        handle,
+        reason: reason ?? "unknown",
+      });
+    }
   }
 
   // Oldest first, so a contact receiving two replies in one sync gets them
   // written to the timeline in the order they were sent.
   matched.sort((a, b) => (a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : 0));
-  return { matched, unmatched, newest };
+  return { matched, unmatched, unmatchedSenders, newest };
 }
 
 /**
@@ -369,12 +503,35 @@ export function planReplies(
  * two callers (the contacts strip's Sync button and the settings page's) cannot
  * drift into describing the same operation differently.
  */
+/**
+ * The unmatched senders as one clause: who, and why each was refused.
+ *
+ * Identical reasons are grouped rather than repeated — three contacts refused
+ * for sharing a name is one fact about the book, and printing it three times
+ * spends the line without adding anything.
+ */
+export function describeUnmatchedSenders(senders: UnmatchedSender[]): string {
+  if (!senders.length) return "";
+  const byReason = new Map<UnmatchedReason, string[]>();
+  for (const sender of senders) {
+    const label = sender.name || sender.handle || "unknown sender";
+    const withHandle =
+      sender.handle && sender.name ? `${label} · ${sender.handle}` : label;
+    byReason.set(sender.reason, [...(byReason.get(sender.reason) ?? []), withHandle]);
+  }
+  return [...byReason.entries()]
+    .map(([reason, names]) => `${names.join(", ")} — ${unmatchedReasonText(reason)}`)
+    .join("; ");
+}
+
 export function describeSync(counts: {
   accounts: number;
   replies: number;
   unmatched: number;
   promoted: number;
   failed: number;
+  /** Optional: absent means the caller has nothing to name, not that there was nothing. */
+  unmatchedSenders?: UnmatchedSender[];
 }): string {
   const parts: string[] = [];
   parts.push(
@@ -386,10 +543,16 @@ export function describeSync(counts: {
   if (counts.unmatched > 0) {
     // Said out loud rather than swallowed: this number is the difference between
     // a quiet inbox and a matching rule that has stopped working.
+    //
+    // And now it says WHO, because the count alone could not tell those two
+    // apart. "1 from someone not in the CRM" reads as a stranger and ends the
+    // investigation; "Mike — two contacts share that LinkedIn profile" is the
+    // answer. The phrase is only omitted when the sync could not name anybody.
+    const named = describeUnmatchedSenders(counts.unmatchedSenders ?? []);
     parts.push(
-      counts.unmatched === 1
-        ? "1 from someone not in the CRM"
-        : `${counts.unmatched} from people not in the CRM`,
+      (counts.unmatched === 1
+        ? "1 unmatched"
+        : `${counts.unmatched} unmatched`) + (named ? ` (${named})` : ""),
     );
   }
   if (counts.failed > 0) {

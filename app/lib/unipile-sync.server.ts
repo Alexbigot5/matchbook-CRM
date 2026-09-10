@@ -46,6 +46,9 @@ import {
   emailKey,
   matchEmail,
   matchLinkedin,
+  MAX_NAMED_UNMATCHED,
+  type UnmatchedReason,
+  type UnmatchedSender,
   planReplies,
   toSnippet,
   type ContactIndex,
@@ -156,7 +159,12 @@ export async function listAccountViews(
 
 /** What one account's read produced, before anything is written. */
 type AccountRead = {
-  pairs: { candidate: ReplyCandidate; match: MatchedReply | null }[];
+  pairs: {
+    candidate: ReplyCandidate;
+    match: MatchedReply | null;
+    /** Why it didn't match, so the result line can say. Null when it did. */
+    reason: UnmatchedReason | null;
+  }[];
   /**
    * True when the read stopped at a budget rather than at the end of the data.
    *
@@ -229,7 +237,8 @@ async function readMailbox(
         senderIdentifier: from,
         receivedAt,
       };
-      pairs.push({ candidate, match: matchEmail(candidate, index) });
+      const outcome = matchEmail(candidate, index);
+      pairs.push({ candidate, match: outcome.match, reason: outcome.reason });
     }
 
     cursor = res.data?.cursor ?? undefined;
@@ -369,13 +378,11 @@ async function readLinkedin(
         senderIdentifier: (attendee.provider_id ?? "").slice(0, 320),
         receivedAt: message.timestamp!,
       };
-      pairs.push({
-        candidate,
-        match: matchLinkedin(candidate, index, {
-          name: attendee.name,
-          profileUrl: attendee.profile_url,
-        }),
+      const outcome = matchLinkedin(candidate, index, {
+        name: attendee.name,
+        profileUrl: attendee.profile_url,
       });
+      pairs.push({ candidate, match: outcome.match, reason: outcome.reason });
     }
   }
 
@@ -449,6 +456,9 @@ export async function syncReplies(
   let unmatched = 0;
   let promoted = 0;
   const failures: string[] = [];
+  // Across every account, bounded the same way one account's list is: the
+  // sentence has one budget whether the workspace connected one mailbox or six.
+  const unmatchedSenders: UnmatchedSender[] = [];
 
   for (const account of syncable) {
     const id = String(account.id);
@@ -495,7 +505,16 @@ export async function syncReplies(
     replies += written.stored;
     unmatched += plan.unmatched;
     promoted += written.promoted;
+    for (const sender of plan.unmatchedSenders) {
+      if (unmatchedSenders.length >= MAX_NAMED_UNMATCHED) break;
+      unmatchedSenders.push(sender);
+    }
 
+    // The STORED sentence keeps the count alone, deliberately. Naming the
+    // senders is what makes a sync debuggable in the moment it is run, and that
+    // is the message handed back to the page below — but `last_result` is a
+    // column, and writing the names of people who are not in the CRM into one
+    // is the "counted, not stored" rule (migrations/0021) by another route.
     const sentence = [
       written.stored === 1 ? "1 new reply" : `${written.stored} new replies`,
       plan.unmatched > 0 ? `${plan.unmatched} unmatched` : "",
@@ -528,6 +547,7 @@ export async function syncReplies(
         unmatched,
         promoted,
         failed: failures.length,
+        unmatchedSenders,
       }),
     },
   };
