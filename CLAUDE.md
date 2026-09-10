@@ -721,10 +721,23 @@ the contact's timeline, and a status move to `Replied` for anyone still at `New`
 - **LinkedIn costs three calls, not one.** A message carries a `sender_attendee_id` and
   nothing else about the person; only the chat's attendee list turns that into a name and a
   profile URL. Hence `UNIPILE_MAX_CHATS`, and hence chats being resolved newest-first.
-- **Unmatched replies are counted, not stored.** The sync says "3 from people not in the
-  CRM", which is what distinguishes a quiet inbox from a matching rule that has stopped
-  working. `matched_on` records which rule fired, and is the only way to diagnose a wrong
-  match after the fact.
+- **Unmatched replies are counted, not stored — but the sync now says WHO and WHY.** The
+  count alone distinguishes a quiet inbox from a broken matcher, and nothing more: a real
+  incident had two test contacts saved as "Mike" and "mike" holding the same profile slug,
+  `put()` collapsed both the slug and the name key to null, and every reply from that person
+  was reported as "1 from someone not in the CRM" while their contact sat in the book. So
+  the matchers return an `UnmatchedReason` alongside the match — `ambiguous-profile`,
+  `ambiguous-name`, `ambiguous-email`, `profile-disagrees` or `unknown` — and the result
+  line names up to `MAX_NAMED_UNMATCHED` senders with the refusal that stopped each.
+  **The reason is decided inside the matcher**, not by a second pass re-deriving it: an
+  explanation computed elsewhere is one refactor from describing a rule the matcher no
+  longer follows, and a confidently wrong explanation is worse than a count. "Present but
+  ambiguous" needed no index change — `put()` already stores `null` for a contested key,
+  so it was always distinguishable from absent.
+  **"Counted, not stored" still holds exactly.** The names go in the sentence handed back to
+  the page; the `last_result` column keeps the count alone, so a message from someone outside
+  the CRM still leaves no row behind. `matched_on` records which rule fired, and is the only
+  way to diagnose a wrong match after the fact.
 - **The first sync of an account reads `UNIPILE_FIRST_SYNC_DAYS` back, not everything.**
   That is a correctness bound, not a performance one: a mailbox holds years of
   correspondence with people who are also contacts, and reading all of it would stamp
