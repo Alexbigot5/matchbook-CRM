@@ -330,12 +330,10 @@ const CATEGORY_GROUP_BY_RAW: ReadonlyMap<string, CategoryGroup> = new Map(
  * the import ships three contacts stored as "Pet Products;Pet Products", and two
  * segments that merely share a group ("Food;Snacks") would double it too.
  *
- * [] rather than an "Other" bucket on purpose: an Other option in the dropdown
- * would mix "this brand is in a vertical we have no group for" with "a new
- * spelling arrived and nobody has filed it yet", and the second is a thing to
- * fix in the table, not a category to prospect into. An unmapped value still
- * shows verbatim on the contact row; it just is not filterable until it is
- * mapped.
+ * [] for an unmapped segment rather than OTHER_CATEGORY: "Other" is not a
+ * group a segment resolves to but the complement of all of them, and is asked
+ * separately through hasOtherCategory. An unmapped value still shows verbatim on
+ * the contact row.
  */
 export function categoryGroup(category: string | null | undefined): string[] {
   const groups: string[] = [];
@@ -347,6 +345,35 @@ export function categoryGroup(category: string | null | undefined): string[] {
     if (group && !groups.includes(group)) groups.push(group);
   }
   return groups;
+}
+
+/**
+ * The saved-view category value for "a category none of the groups cover".
+ *
+ * Kept out of CATEGORY_GROUPS: it is not a group a spelling can be filed under
+ * but whatever is left over, and putting it in that list would let the table
+ * above map a raw value to it.
+ */
+export const OTHER_CATEGORY = "Other";
+
+/**
+ * True when a contact's category has at least one segment no group covers.
+ *
+ * Per SEGMENT, matching categoryGroup: "Food & Beverage;Candles" is in Food &
+ * Beverage AND in Other, the same way a compound value already sits in two
+ * groups. A blank category is in no group and NOT in Other — "no category" and
+ * "a category we have no group for" are different answers.
+ *
+ * Be aware of what lands here besides genuinely uncovered verticals: a new
+ * spelling of a known one ("Food+Bev") is unmapped too, and shows up under Other
+ * until it is added to CATEGORY_GROUP_BY_RAW. That makes Other the quickest way
+ * to find spellings the table is missing, and it means filing one moves those
+ * contacts out of an Other view.
+ */
+export function hasOtherCategory(category: string | null | undefined): boolean {
+  return splitCategoryTags(category ?? null).some(
+    (segment) => !CATEGORY_GROUP_BY_RAW.has(segment.toLowerCase()),
+  );
 }
 
 /**
