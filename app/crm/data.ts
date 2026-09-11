@@ -142,7 +142,8 @@ export function isArrFigure(arr: string | null | undefined): boolean {
  * rest are the ZoomInfo import's sub-industries, which arrive already canonical
  * — one spelling per value — so each is a group of exactly one raw string. To a
  * saved view both are the same kind of thing: a label you pick, resolved through
- * CATEGORY_GROUP_BY_RAW.
+ * CATEGORY_GROUP_BY_RAW. "Investors", last, belongs to neither: it was added by
+ * hand for contacts who are investors rather than brands.
  *
  * Pairs across those two populations that look mergeable are deliberately NOT
  * merged — "Pet" / "Pet Products", "Apparel & Accessories" / "Apparel &
@@ -198,6 +199,9 @@ export const CATEGORY_GROUPS = [
   "Household Goods",
   "Furniture",
   "Crops",
+  // Added by hand, from neither source: a contact who is an investor rather than
+  // a brand. See CATEGORY_GROUP_BY_RAW for the spellings it covers.
+  "Investors",
 ] as const;
 
 export type CategoryGroup = (typeof CATEGORY_GROUPS)[number];
@@ -304,6 +308,10 @@ const CATEGORY_GROUP_BY_RAW: ReadonlyMap<string, CategoryGroup> = new Map(
       ["Household Goods", "Household Goods"],
       ["Furniture", "Furniture"],
       ["Crops", "Crops"],
+      // Neither source spells this, so both the plural and the singular are
+      // listed: either is what someone would type into a CSV's Category column.
+      ["Investors", "Investors"],
+      ["Investor", "Investors"],
     ] as [string, CategoryGroup][]
   ).map(([raw, group]) => [raw.toLowerCase(), group]),
 );
