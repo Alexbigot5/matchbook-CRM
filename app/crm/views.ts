@@ -150,11 +150,14 @@ export type ViewField = { key: string; label: string; options: ViewFieldOption[]
  * The six filterable fields and the closed set of values each accepts.
  * validateSavedView checks a condition's value against exactly these lists.
  *
- * Owner options are hardcoded Tom / Britton / Unassigned, mirroring
- * buildOwnerTabs() in ./sidebar.tsx — NOT built from OWNERS in ./data.ts. OWNERS
- * has four entries because Alex and Mike can sign in and author notes, but
- * contacts are only ever *assigned* to Tom and Britton, so deriving the dropdown
- * from it would offer two options that match zero contacts forever.
+ * Owner options are hardcoded Tom / Britton / Mike / Unassigned — NOT built from
+ * OWNERS in ./data.ts. OWNERS has an entry for everyone who can sign in and
+ * author notes, which includes Alex, and contacts are not assigned to him, so
+ * deriving the dropdown from it would offer an option that matches zero contacts
+ * forever. Mike is listed because contacts do get assigned to him: the CSV
+ * import reads an Owner column of "Mike" (parseImportOwner in ./import-map.ts)
+ * and isValidOwner accepts it. The sidebar's buildOwnerTabs() in ./sidebar.tsx
+ * still lists only Tom and Britton.
  *
  * "unassigned" is a sentinel string rather than "": an empty value is rejected by
  * the validator, which would leave "owner is unassigned" inexpressible.
@@ -171,6 +174,7 @@ export const VIEW_FIELDS: ViewField[] = [
     options: [
       { value: "Tom", label: "Tom" },
       { value: "Britton", label: "Britton" },
+      { value: "Mike", label: "Mike" },
       { value: UNASSIGNED, label: "Unassigned" },
     ],
   },
